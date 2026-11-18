@@ -55,11 +55,18 @@ pub fn default_runtime_dir() -> PathBuf {
     PathBuf::from("/run/nydus/")
 }
 
-/// Returns the default timeout of a request to the origin registry. Kept
+/// Returns the default timeout of a request to the origin registry, its body
+/// included.
+#[inline]
+fn default_registry_http_request_timeout() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// Returns the default read timeout of a request to the origin registry. Kept
 /// short because a read holds the chunk group's fetch claim for its whole duration,
 /// and the readers waiting behind that claim are FUSE worker threads.
 #[inline]
-fn default_registry_http_request_timeout() -> Duration {
+fn default_registry_http_request_read_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -92,9 +99,16 @@ pub fn default_prefetch_retry_interval() -> Duration {
 }
 
 /// Returns the default timeout of each attempt of a request through the
-/// Dragonfly seed peers.
+/// Dragonfly seed peers, its body included.
 #[inline]
 fn default_registry_dragonfly_request_timeout() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// Returns the default read timeout of each attempt of a request through the
+/// Dragonfly seed peers.
+#[inline]
+fn default_registry_dragonfly_request_read_timeout() -> Duration {
     Duration::from_secs(5)
 }
 
@@ -105,11 +119,32 @@ fn default_registry_dragonfly_max_retries() -> u32 {
     1
 }
 
-/// Returns the default rate limit of the origin requests on-demand reads fall
-/// back to when the Dragonfly seed peers cannot serve them, one request per
-/// second per process.
+/// Returns the default timeout of a request the fallback sends to the origin
+/// registry, its body included.
 #[inline]
-fn default_registry_dragonfly_fallback_rate_limit() -> u64 {
+fn default_registry_fallback_request_timeout() -> Duration {
+    Duration::from_secs(60)
+}
+
+/// Returns the default read timeout of a request the fallback sends to the
+/// origin registry.
+#[inline]
+fn default_registry_fallback_request_read_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+/// Returns the default maximum number of retry attempts of the fallback per
+/// request, none.
+#[inline]
+fn default_registry_fallback_max_retries() -> u32 {
+    0
+}
+
+/// Returns the default rate limit of the origin requests on-demand reads fall
+/// back to when the proxy or the Dragonfly seed peers cannot serve them, one
+/// request per second per process.
+#[inline]
+fn default_registry_fallback_rate_limit() -> u64 {
     1
 }
 
@@ -214,30 +249,37 @@ pub struct RegistryConfig {
     pub registry_token: Option<RedactedString>,
 
     /// The HTTP client configuration of requests to the origin registry:
-    /// timeouts, retries, and TLS trust. Every origin request goes through
-    /// it, the on-demand reads a Dragonfly backend falls back to the origin
-    /// with included.
+    /// timeouts, retries, and TLS trust. The on-demand reads that fall back
+    /// to the origin use the timeouts and retries of `fallback` instead, and
+    /// share its TLS trust.
     #[serde(default)]
     #[validate(nested)]
     pub http: HttpConfig,
 
     /// The optional Dragonfly configuration. When set, blob `GET`s are routed
     /// through the Dragonfly client SDK for P2P distribution instead of
-    /// hitting the origin registry directly. Parsed unconditionally so a
-    /// build without the `dragonfly` feature rejects the block loudly when
-    /// the configuration is loaded instead of silently ignoring it.
+    /// hitting the origin registry directly, and `http.proxy` is not used.
+    /// Parsed unconditionally so a build without the `dragonfly` feature
+    /// rejects the block loudly when the configuration is loaded instead of
+    /// silently ignoring it.
     #[serde(default)]
     #[validate(nested)]
     pub dragonfly: Option<DragonflyConfig>,
+
+    /// The fallback configuration: the origin requests an on-demand read
+    /// falls back to when `dragonfly` or `http.proxy` cannot serve it.
+    #[serde(default)]
+    #[validate(nested)]
+    pub fallback: FallbackConfig,
 }
 
 /// The HTTP client configuration for the registry backend.
 #[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
-    /// The timeout of a request to the origin registry (connect + read), e.g.
-    /// `5s` or `1m`, greater than zero. A request fetches one chunk group, so
-    /// this bounds a single chunk group download.
+    /// The timeout of a request to the origin registry, from connecting to the
+    /// end of its body, e.g. `30s` or `1m`, greater than zero. It counts the
+    /// time the cache takes to decode and write the body as it arrives.
     #[serde(
         default = "default_registry_http_request_timeout",
         with = "humantime_serde"
@@ -245,15 +287,28 @@ pub struct HttpConfig {
     #[validate(custom(function = "Self::validate_request_timeout"))]
     pub request_timeout: Duration,
 
+    /// The read timeout of a request to the origin registry: the longest wait
+    /// for the connection, the response and each part of its body, e.g. `5s`,
+    /// greater than zero. The time the cache takes between two parts does not
+    /// count.
+    #[serde(
+        default = "default_registry_http_request_read_timeout",
+        with = "humantime_serde"
+    )]
+    #[validate(custom(function = "Self::validate_request_timeout"))]
+    pub request_read_timeout: Duration,
+
     /// The maximum number of retry attempts per request, applied by the HTTP
     /// client's retry middleware. A prefetch read still failing after them is
     /// sent once more after `prefetch.retry_interval`.
     #[serde(default = "default_registry_http_max_retries")]
     pub max_retries: u32,
 
-    /// The optional proxy configuration. When set, every registry request is
-    /// routed through the proxy. When unset, ambient proxy environment
-    /// variables are ignored and connections go directly to the origin.
+    /// The optional proxy configuration. When set, and `dragonfly` is not,
+    /// every registry request is routed through the proxy, and an on-demand
+    /// read or a token fetch the proxy cannot serve falls back to the origin
+    /// (see `fallback`). When unset, ambient proxy environment variables are
+    /// ignored and connections go directly to the origin.
     #[serde(default)]
     pub proxy: Option<ProxyConfig>,
 
@@ -292,6 +347,7 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             request_timeout: default_registry_http_request_timeout(),
+            request_read_timeout: default_registry_http_request_read_timeout(),
             max_retries: default_registry_http_max_retries(),
             proxy: None,
             tls: TlsConfig::default(),
@@ -388,8 +444,8 @@ impl TlsConfig {
 /// | `429` / `5xx` / `408`         | retried on the next seed peer, then the origin | retried once hours later, no origin   |
 ///
 /// On-demand reads retry `max_retries` times and fall back to the origin
-/// through the registry's `http` client, under `fallback_rate_limit`. A
-/// timeout or connection failure counts as a transient answer.
+/// (see `fallback`). A timeout or connection failure counts as a transient
+/// answer.
 #[derive(Debug, Clone, Validate, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DragonflyConfig {
@@ -398,14 +454,28 @@ pub struct DragonflyConfig {
     #[validate(custom(function = "Self::validate_scheduler_endpoint"))]
     pub scheduler_endpoint: Url,
 
-    /// The timeout of each attempt of a request through the seed peers, e.g.
-    /// `5s` or `1m`. A request fetches one chunk group, so this bounds a
-    /// single chunk group download from a seed peer.
+    /// The timeout of each attempt of a request through the seed peers, from
+    /// connecting to the end of its body, e.g. `30s` or `1m`, greater than
+    /// zero. It counts the time the cache takes to decode and write the body
+    /// as it arrives.
     #[serde(
         default = "default_registry_dragonfly_request_timeout",
         with = "humantime_serde"
     )]
+    #[validate(custom(function = "HttpConfig::validate_request_timeout"))]
     pub request_timeout: Duration,
+
+    /// The read timeout of each attempt of a request through the seed peers:
+    /// the longest wait for the connection, the response and each part of its
+    /// body, e.g. `5s`, greater than zero. The time the cache takes between
+    /// two parts does not count. An on-demand read waits that long for a seed
+    /// peer before going to the origin.
+    #[serde(
+        default = "default_registry_dragonfly_request_read_timeout",
+        with = "humantime_serde"
+    )]
+    #[validate(custom(function = "HttpConfig::validate_request_timeout"))]
+    pub request_read_timeout: Duration,
 
     /// The maximum number of retries of an on-demand blob `GET` through
     /// Dragonfly on a transient failure (timeout, connection, dfdaemon, `5xx`,
@@ -415,16 +485,6 @@ pub struct DragonflyConfig {
     #[serde(default = "default_registry_dragonfly_max_retries")]
     #[validate(range(max = 3))]
     pub max_retries: u32,
-
-    /// The rate limit of the origin requests on-demand reads fall back to
-    /// when the seed peers cannot serve them, in requests per second, `1` by
-    /// default and at least `1`. The requests themselves go through the
-    /// registry's `http` client; every attempt, retries included, waits for
-    /// a slot, so the origin never sees more than this many a second from
-    /// one process however many seed peers fail.
-    #[serde(default = "default_registry_dragonfly_fallback_rate_limit")]
-    #[validate(range(min = 1))]
-    pub fallback_rate_limit: u64,
 }
 
 /// Implement DragonflyConfig.
@@ -438,6 +498,62 @@ impl DragonflyConfig {
 
         Err(ValidationError::new("feature_disabled")
             .with_message("requires a build with the `dragonfly` feature".into()))
+    }
+}
+
+/// The fallback configuration for the registry backend: the HTTP client an
+/// on-demand read falls back to when `dragonfly` or `http.proxy` cannot serve
+/// it. It is a client of its own, with its own timeouts and retries: it
+/// connects to the origin directly, never through `http.proxy`, and trusts
+/// what `http.tls` trusts.
+#[derive(Debug, Clone, Validate, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FallbackConfig {
+    /// The timeout of a request to the origin registry, from connecting to
+    /// the end of its body, e.g. `30s` or `1m`, greater than zero. It counts
+    /// the time the cache takes to decode and write the body as it arrives.
+    #[serde(
+        default = "default_registry_fallback_request_timeout",
+        with = "humantime_serde"
+    )]
+    #[validate(custom(function = "HttpConfig::validate_request_timeout"))]
+    pub request_timeout: Duration,
+
+    /// The read timeout of a request to the origin registry: the longest wait
+    /// for the connection, the response and each part of its body, e.g. `5s`,
+    /// greater than zero. The time the cache takes between two parts does not
+    /// count.
+    #[serde(
+        default = "default_registry_fallback_request_read_timeout",
+        with = "humantime_serde"
+    )]
+    #[validate(custom(function = "HttpConfig::validate_request_timeout"))]
+    pub request_read_timeout: Duration,
+
+    /// The maximum number of retry attempts per request, applied by the HTTP
+    /// client's retry middleware, `0` by default: a request the origin fails
+    /// is not sent again.
+    #[serde(default = "default_registry_fallback_max_retries")]
+    pub max_retries: u32,
+
+    /// The rate limit of the origin requests, in requests per second, `1` by
+    /// default and at least `1`. Every attempt, retries included, waits for
+    /// a slot, so the origin never sees more than this many a second from
+    /// one process however many reads fall back.
+    #[serde(default = "default_registry_fallback_rate_limit")]
+    #[validate(range(min = 1))]
+    pub rate_limit: u64,
+}
+
+/// Implement Default for FallbackConfig.
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout: default_registry_fallback_request_timeout(),
+            request_read_timeout: default_registry_fallback_request_read_timeout(),
+            max_retries: default_registry_fallback_max_retries(),
+            rate_limit: default_registry_fallback_rate_limit(),
+        }
     }
 }
 
@@ -708,6 +824,7 @@ mod tests {
             Some("bearer-token")
         );
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_read_timeout, Duration::from_secs(3));
         assert_eq!(registry.http.max_retries, 5);
         assert_eq!(
             registry.http.proxy.as_ref().unwrap().addr,
@@ -724,8 +841,15 @@ mod tests {
             "http://127.0.0.1:8002/"
         );
         assert_eq!(dragonfly.request_timeout, Duration::from_secs(10));
+        assert_eq!(dragonfly.request_read_timeout, Duration::from_secs(2));
         assert_eq!(dragonfly.max_retries, 2);
-        assert_eq!(dragonfly.fallback_rate_limit, 2);
+        assert_eq!(registry.fallback.request_timeout, Duration::from_secs(20));
+        assert_eq!(
+            registry.fallback.request_read_timeout,
+            Duration::from_secs(4)
+        );
+        assert_eq!(registry.fallback.max_retries, 1);
+        assert_eq!(registry.fallback.rate_limit, 2);
 
         assert_eq!(
             config.storage.dir.as_deref(),
@@ -766,6 +890,7 @@ config:
   registry_token: bearer-token
   http:
     request_timeout: 30s
+    request_read_timeout: 3s
     max_retries: 5
     tls:
       skip_verify: true
@@ -789,6 +914,7 @@ config:
             Some("bearer-token")
         );
         assert_eq!(registry.http.request_timeout, Duration::from_secs(30));
+        assert_eq!(registry.http.request_read_timeout, Duration::from_secs(3));
         assert_eq!(registry.http.max_retries, 5);
         assert!(registry.http.tls.skip_verify);
         assert_eq!(
@@ -832,24 +958,24 @@ config:
             default_registry_dragonfly_request_timeout()
         );
         assert_eq!(
-            defaults.max_retries,
-            default_registry_dragonfly_max_retries()
+            defaults.request_read_timeout,
+            default_registry_dragonfly_request_read_timeout()
         );
         assert_eq!(
-            defaults.fallback_rate_limit,
-            default_registry_dragonfly_fallback_rate_limit()
+            defaults.max_retries,
+            default_registry_dragonfly_max_retries()
         );
 
         let yaml = r#"
 scheduler_endpoint: http://127.0.0.1:8002
 request_timeout: 5s
+request_read_timeout: 3s
 max_retries: 0
-fallback_rate_limit: 3
 "#;
         let dragonfly: DragonflyConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(dragonfly.request_timeout, Duration::from_secs(5));
+        assert_eq!(dragonfly.request_read_timeout, Duration::from_secs(3));
         assert_eq!(dragonfly.max_retries, 0);
-        assert_eq!(dragonfly.fallback_rate_limit, 3);
     }
 
     #[test]
@@ -870,10 +996,30 @@ config:
             default_registry_http_request_timeout()
         );
         assert_eq!(
+            registry.http.request_read_timeout,
+            default_registry_http_request_read_timeout()
+        );
+        assert_eq!(
             registry.http.max_retries,
             default_registry_http_max_retries()
         );
         assert!(registry.http.proxy.is_none());
+        assert_eq!(
+            registry.fallback.request_timeout,
+            default_registry_fallback_request_timeout()
+        );
+        assert_eq!(
+            registry.fallback.request_read_timeout,
+            default_registry_fallback_request_read_timeout()
+        );
+        assert_eq!(
+            registry.fallback.max_retries,
+            default_registry_fallback_max_retries()
+        );
+        assert_eq!(
+            registry.fallback.rate_limit,
+            default_registry_fallback_rate_limit()
+        );
         assert!(!registry.http.tls.skip_verify);
         assert!(registry.http.tls.ca_cert.is_none());
         assert!(registry.auth.is_none());
@@ -1143,6 +1289,16 @@ storage:
                 },
             ),
             (
+                Box::new(HttpConfig {
+                    request_read_timeout: Duration::ZERO,
+                    ..Default::default()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_read_timeout: must be greater than 0s");
+                },
+            ),
+            (
                 Box::new(Config {
                     prefetch: PrefetchConfig {
                         concurrent_blob_count: 0,
@@ -1190,12 +1346,52 @@ storage:
             ),
             (
                 Box::new(DragonflyConfig {
-                    fallback_rate_limit: 0,
+                    request_timeout: Duration::ZERO,
+                    ..dragonfly.clone()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_timeout: must be greater than 0s");
+                },
+            ),
+            (
+                Box::new(DragonflyConfig {
+                    request_read_timeout: Duration::ZERO,
                     ..dragonfly
                 }),
                 |result| {
                     let err = result.unwrap_err().to_string();
-                    assert!(err.starts_with("fallback_rate_limit: Validation error: range"));
+                    assert_eq!(err, "request_read_timeout: must be greater than 0s");
+                },
+            ),
+            (
+                Box::new(FallbackConfig {
+                    request_timeout: Duration::ZERO,
+                    ..FallbackConfig::default()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_timeout: must be greater than 0s");
+                },
+            ),
+            (
+                Box::new(FallbackConfig {
+                    request_read_timeout: Duration::ZERO,
+                    ..FallbackConfig::default()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert_eq!(err, "request_read_timeout: must be greater than 0s");
+                },
+            ),
+            (
+                Box::new(FallbackConfig {
+                    rate_limit: 0,
+                    ..FallbackConfig::default()
+                }),
+                |result| {
+                    let err = result.unwrap_err().to_string();
+                    assert!(err.starts_with("rate_limit: Validation error: range"));
                 },
             ),
         ];

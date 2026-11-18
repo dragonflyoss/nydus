@@ -1216,17 +1216,31 @@ backend:
     # base64-encoded `username:password`
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     http:
-      request_timeout: 5s
+      request_timeout: 1m
+      request_read_timeout: 5s
       max_retries: 3
       tls:
         skip_verify: false
         ca_cert: /etc/nydus/certs/registry-ca.pem
     # dragonfly:
     #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
-    #   request_timeout: 5s
+    #   request_timeout: 1m
+    #   request_read_timeout: 5s
     #   max_retries: 1
-    #   fallback_rate_limit: 1
+    # fallback:
+    #   request_timeout: 1m
+    #   request_read_timeout: 5s
+    #   max_retries: 0
+    #   rate_limit: 1
 ```
+
+What a blob `GET` goes through follows the configuration:
+
+| Configured | Blob `GET`s go through | An on-demand read they cannot serve |
+| --- | --- | --- |
+| `dragonfly` | the Dragonfly seed peers; `http.proxy` is not used | falls back to the origin, under `fallback` |
+| `http.proxy`, no `dragonfly` | the proxy | falls back to the origin, under `fallback` |
+| neither | the origin | fails |
 
 Fields under `backend.config`:
 
@@ -1241,12 +1255,18 @@ Fields under `backend.config`:
 - `registry_token` (optional): bearer token sent before any challenge, until
 	the registry answers `401`; the auth handshake then fetches a replacement,
 	with `auth` when set.
-- `http` (optional, defaults apply): the HTTP client settings of every
-	request to the origin registry — timeouts, retries, and TLS trust — the
-	reads a Dragonfly backend falls back to the origin with included.
-	- `request_timeout` (default `5s`): the timeout of a request to the origin
-		registry in humantime format (e.g. `5s`, `1m`), greater than zero. Kept
-		short because a read holds the
+- `http` (optional, defaults apply): the HTTP client settings of the
+	requests to the origin registry — timeouts, retries, and TLS trust. The
+	on-demand reads that fall back to the origin use the timeouts and retries
+	of `fallback` instead, and share its TLS trust.
+	- `request_timeout` (default `1m`): the timeout of a request to the origin
+		registry, from connecting to the end of its body, in humantime format
+		(e.g. `30s`, `1m`), greater than zero. It counts the time the cache
+		takes to decode and write the body as it arrives.
+	- `request_read_timeout` (default `5s`): the read timeout of a request to
+		the origin registry, the longest wait for the connection, the response
+		and each part of its body, greater than zero. The time the cache takes
+		between two parts does not count. Kept short because a read holds the
 		chunk group's cross-process fetch claim for its whole duration, and what
 		queues up behind that claim are reader threads in the other instances
 		sharing the cache directory.
@@ -1255,11 +1275,19 @@ Fields under `backend.config`:
 		middleware. A prefetch read still answered with a `429`, `5xx` or
 		`408` after them is sent once more after `prefetch.retry_interval`,
 		like one Dragonfly answers so; an on-demand read, and a prefetch read
-		failing in transport, errors out.
+		failing in transport, errors out. A body that breaks off fails the
+		read.
 	- `proxy` (optional): routes every registry request through an HTTP
 		forward proxy. Requests keep their original upstream URL, so a proxy
-		like a Dragonfly `dfdaemon` knows what to back-source. Omit to connect
-		directly to the origin.
+		like a Dragonfly `dfdaemon` knows what to back-source. An on-demand
+		read the proxy cannot serve (timeout, connection, `5xx`, `408`, `429`,
+		an answer outside the range, or a body that breaks off) falls back to
+		the origin (see `fallback`), like one through Dragonfly, and so does
+		a token fetch; a prefetch read never does. A proxy that fails to
+		connect is not retried: the requests fail at once, the on-demand
+		reads falling back without a wait, until one request connects again
+		5 seconds later. Not used when `dragonfly` is configured. Omit to
+		connect directly to the origin.
 		- `addr` (required): the proxy address including the scheme, e.g.
 			`http://127.0.0.1:65001`.
 	- `tls` (optional): the TLS settings for connections to the registry.
@@ -1274,8 +1302,12 @@ Fields under `backend.config`:
 	to the origin registry through `http`. Only available when the
 	binary is built with the `dragonfly` feature; a build without it rejects
 	the block when the config is loaded. Omit to talk to the origin directly.
-	Each read is counted under the `source` that served it, `dragonfly` for
-	the seed peers and `fallback` for the origin (see [Metrics](#metrics)).
+	With `http.proxy` configured too, Dragonfly comes first and no request
+	goes through the proxy: the blob `GET`s go through the seed peers, and
+	the fallback and the token fetches connect to the origin directly.
+	A read of a daemon with this block is counted under the `source`
+	`dragonfly`, or `fallback` once it fell back to the origin (see
+	[Metrics](#metrics)).
 
 	For an on-demand read the SDK retries a transient failure (timeout,
 	connection, dfdaemon, `5xx`, `408`, `429`) up to `max_retries` times
@@ -1290,7 +1322,8 @@ Fields under `backend.config`:
 	| dfdaemon `507` (the seed peer has no room for the blob) | Sent once more after `prefetch.retry_interval`, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the fallback rate limit |
 	| `429` / `5xx` / `408` / dfdaemon `500` | Sent once more after `prefetch.retry_interval`, no origin fallback; the blob's prefetch fails if that attempt fails too | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the fallback rate limit |
 	| timeout / connection | Fails the read at once, no retry, no origin fallback | Retried on the next seed peer up to `max_retries` times, then go back to the origin through the fallback rate limit |
-	| Origin fallback: `5xx` / `408` / `429` / transport error | n/a | Retried by the `http` client's retry middleware up to `http.max_retries` times, every attempt waiting for its own `fallback_rate_limit` slot |
+	| Body breaks off after a `206` | Fails the read, no retry, no origin fallback | Resumed by the SDK on the next seed peer for the bytes left, within the same `max_retries`; a seed peer that does not answer with exactly those bytes counts as a failed attempt. When the retries run out, the bytes left are read from the origin through the fallback rate limit |
+	| Origin fallback: `5xx` / `408` / `429` / transport error | n/a | Retried by the fallback client's retry middleware up to `fallback.max_retries` times, none by default, every attempt waiting for its own `fallback.rate_limit` slot |
 
 	Prefetch reads never fall back to the origin, so a Dragonfly outage
 	degrades prefetch instead of flooding the registry, while on-demand reads
@@ -1300,21 +1333,15 @@ Fields under `backend.config`:
 		with the scheme, e.g. `http://dragonfly-scheduler.dragonfly-system.svc:8002`.
 		It is parsed as a URL, so spellings of one address, such as with a
 		trailing `/` or an uppercase host, share one seed peer cache file.
-	- `request_timeout` (default `5s`): the timeout of each attempt of a
-		request through the seed peers, one chunk group per request.
+	- `request_timeout` (default `1m`): the timeout of each attempt of a
+		request through the seed peers, from connecting to the end of its body,
+		greater than zero.
+	- `request_read_timeout` (default `5s`): the read timeout of each attempt,
+		the longest wait for the connection, the response and each part of its
+		body, greater than zero.
 	- `max_retries` (default `1`, at most `3`): Dragonfly retries of an
 		on-demand read on a transient failure, each on the next seed peer after
 		an exponential backoff. Prefetch reads never retry.
-	- `fallback_rate_limit` (default `1`, i.e. 1 QPS per process): the rate
-		limit of the origin requests an on-demand read falls back to when the
-		seed peers cannot serve it, in requests per second, at least `1`. The
-		requests themselves use the registry's `http` settings (timeout,
-		retries, proxy, TLS). Every attempt — including each retry of a
-		transient origin failure — waits for its own slot, so actual origin
-		requests never exceed the limit. Only these reads are shaped; the
-		direct path of a plain registry and the auth token fetches never are.
-		On-demand group singleflight already dedupes concurrent readers per
-		group, so the limiter queues at most one leader per cold group.
 
 	The seed peers are shared between the nydus processes on the host
 	through cache files in the `dragonfly` subdirectory of the top-level
@@ -1330,11 +1357,34 @@ Fields under `backend.config`:
 	still read from its replica seed peers only: from the healthy one when
 	the other fails, and when both do, an on-demand read goes to the origin
 	while a prefetch read fails. Without a seed peer, an on-demand read
-	waits at most `request_timeout` before going to the origin, and a
+	waits at most `request_read_timeout` before going to the origin, and a
 	prefetch read waits at most `prefetch.request_timeout` before failing.
 	nydus creates the subdirectory with mode `0o755` at startup and fails to
 	start when it cannot. A process that cannot open the cache file, such as
 	one running as another user, lists the seed peers on its own.
+- `fallback` (optional, defaults apply): the HTTP client an on-demand read
+	falls back to the origin with when `dragonfly` or `http.proxy` cannot
+	serve it. It is a client of its own, with its own timeouts and retries:
+	it connects to the origin directly, never through `http.proxy`, and
+	trusts what `http.tls` trusts. A fallback request the origin does not
+	answer, or answers outside the range, fails the read as a
+	`502 Bad Gateway` carrying the error.
+	- `request_timeout` (default `1m`): the timeout of a request, from
+		connecting to the end of its body, greater than zero.
+	- `request_read_timeout` (default `5s`): the read timeout of a request,
+		the longest wait for the connection, the response and each part of its
+		body, greater than zero.
+	- `max_retries` (default `0`): the maximum number of retry attempts per
+		request, applied by the HTTP client's retry middleware. By default a
+		request the origin fails is not sent again.
+	- `rate_limit` (default `1`, i.e. 1 QPS per process): the rate limit of
+		its requests, in requests per second, at least `1`. Every attempt —
+		including each retry of a transient origin failure — waits for its own
+		slot, so actual origin requests never exceed the limit. Only these
+		reads are shaped; the direct path of a plain registry and the auth
+		token fetches never are. On-demand group singleflight already dedupes
+		concurrent readers per group, so the limiter queues at most one leader
+		per cold group.
 
 ## Metrics
 
@@ -1401,33 +1451,39 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 | Label | Meaning | Values |
 | --- | --- | --- |
 | `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
-| `source` | where the backend read its bytes | `local`, `origin`, `proxy`, `dragonfly`, `fallback` |
+| `source` | what the backend reads its bytes through | `local`, `http`, `http_proxy`, `dragonfly`, `fallback` |
 | `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
 | `operation` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
 
-`source` is `local` for the local directory backend, `origin` for the
-registry backend reading the origin registry itself, `proxy` for it reading
-through an HTTP forward proxy (`http.proxy`), `dragonfly` for it reading the
-Dragonfly seed peers, and `fallback` for a read Dragonfly could not serve
-that went back to the origin through `http` under
-`dragonfly.fallback_rate_limit`. A failed read counts once, under the source
-it would have read from: `dragonfly` on a Dragonfly daemon, whether the seed
-peers or the origin fallback failed last; the cause is in the logs.
+`source` follows the backend configuration: `local` for the local directory
+backend, `http` for the registry backend reading the origin directly,
+`http_proxy` when it reads the origin through `http.proxy`, and `dragonfly`
+for the registry backend with `dragonfly` configured. An on-demand read the
+proxy or the seed peers could not serve falls back to the origin, under
+`fallback.rate_limit`, and is counted under `fallback` from then on,
+whether the origin serves it or fails it. A read that fails without falling
+back, on a `403` or `404` of the proxy or the seed peers, stays under the
+configured source, and so does one that fails on its token fetch or on a
+redirect without a `Location`. Each fallback is also in the logs as
+`request failed, falling back to the origin`.
 
 Backend (`nydus_backend_*`):
 
 - `nydus_backend_read_total{type,source}`,
 	`nydus_backend_read_failure_total{type,source}` — backend range reads,
-	failed ones included, and the failed ones alone. On a Dragonfly daemon a
-	`fallback` read is an on-demand read that went back to the origin; it
-	counts once, however many rate-limited retry attempts it made. Watch the
-	`fallback` rate to confirm origin load stays shaped by
-	`dragonfly.fallback_rate_limit`.
+	failed ones included, and the failed ones alone. A read counts once,
+	however many seed peers it tried and whether it fell back to the origin.
 - `nydus_backend_read_bytes_total{type,source}` — compressed bytes the
 	successful reads returned.
 - `nydus_backend_read_duration_milliseconds{type,source}` — duration
-	histogram of the successful reads.
+	histogram of the successful reads, from the request until the reader took
+	the last byte. The reader's own pace is part of it: a registry read
+	buffers four body chunks ahead of its reader and then waits for it, and a
+	local read is timed until its reader is dropped. A busy CPU or a slow
+	disk behind the reader, decompressing, verifying and writing the cache,
+	raises it the way a slow backend does, so read it as an upper bound on
+	the backend's latency, not as the network's alone.
 
 Storage (`nydus_storage_*`):
 
@@ -2383,9 +2439,12 @@ A miss does not fetch its group alone. The cache splits the **compressed**
 data region into cells of `storage.fetch_size` bytes (default 2 MiB) and,
 on a miss, issues one range read for every group whose compressed range
 overlaps the missed group's cell — trimmed at groups that are already cached
-or already being fetched — then decodes each group as it comes and publishes
-it. The fetch size is a runtime choice, independent of the image's chunk
-size; groups tile the data region back to back, so a fetch is always one
+or already being fetched — and decodes each group while the rest of the read
+is still arriving, a zstd group as its own bytes arrive, then validates,
+writes and publishes it. A read that breaks off keeps the groups it already
+published, so the next one fetches only the rest. The fetch size is a
+runtime choice, independent of the image's chunk size; groups tile the data
+region back to back, so a fetch is always one
 contiguous range, and because it is measured in compressed bytes it bounds
 the transfer rather than the decoded span. The fetch size sets the
 request/byte trade-off: the blobs compress several-fold, so a fetch of `W`
@@ -2505,10 +2564,11 @@ Per-blob prefetch streams chunk groups into the cache:
 	whose compressed bytes add up to `storage.fetch_size` (default 2 MiB),
 	so prefetch and on-demand reads issue backend requests of the same size;
 	a zero fetch size reads group by group.
-- For each batch it issues a single contiguous backend range read, then
-	decodes each contained chunk group (plain copy, zstd or LZ4), validates
-	the group's length and CRC32C, writes the decoded bytes to the cache file
-	at the chunks' padded blocks, and marks the group ready in the group map.
+- For each batch it issues a single contiguous backend range read and, as
+	the bytes arrive, decodes each contained chunk group (plain copy, zstd or
+	LZ4), validates the group's length and CRC32C, writes the decoded bytes
+	to the cache file at the chunks' padded blocks, and marks the group ready
+	in the group map.
 - A priority blob's batches are fetched by up to
 	`prefetch.concurrent_blob_count` workers (default 10), handed out in blob
 	order; the first batches are single groups (a "ramp") so the head of an
@@ -2678,7 +2738,7 @@ than one per instance.
 - Waiting blocks in the kernel rather than polling, so the handover follows the
 	release immediately. What bounds the wait is the fetcher, not the waiter:
 	every backend read carries a timeout (hence the short registry
-	`request_timeout` default), so a claim is always released. **A claim must never be held across
+	`request_read_timeout` default, with `request_timeout` above it), so a claim is always released. **A claim must never be held across
 	an operation that cannot time out** — what queues up behind it are reader
 	threads. The wait is interruptible, so shutdown still works.
 - The in-process fetch flight elects a single fetcher per group before any of

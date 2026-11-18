@@ -25,7 +25,7 @@ func TestRedirect(t *testing.T) {
 	}
 
 	assert.Greater(t, proxy.blobGetCount(), 1)
-	assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+	assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 }
 
 func TestRedirectExpiry(t *testing.T) {
@@ -59,7 +59,7 @@ func TestRedirectExpiry(t *testing.T) {
 			}
 
 			assert.EqualValues(t, 1, proxy.staleRedirects.Load())
-			assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+			assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 		})
 	}
 }
@@ -125,11 +125,11 @@ func TestRedirectPrefetchExpiry(t *testing.T) {
 			if !assert.NoError(t, m.read(t, image, "data/size/08392705")) {
 				t.FailNow()
 			}
-			if !assert.Zero(t, m.backendReads(t, "ondemand", "origin")) {
+			if !assert.Zero(t, m.backendReads(t, "ondemand", "http")) {
 				t.FailNow()
 			}
 
-			assert.Zero(t, m.backendFailures(t, "prefetch", "origin"))
+			assert.Zero(t, m.backendFailures(t, "prefetch", "http"))
 			assert.Equal(t, 2, proxy.redirectCount())
 		})
 	}

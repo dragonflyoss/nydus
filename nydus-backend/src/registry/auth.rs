@@ -11,8 +11,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::Deserialize;
 use url::Url;
 
-use super::http::Http;
-use super::Transport;
+use super::transport::Fetcher;
 
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
@@ -278,8 +277,12 @@ impl Authorizer {
     }
 
     /// Answers `challenge` with the basic credentials or a bearer token fetched
-    /// through `http`, one handshake at a time.
-    pub(crate) async fn authenticate(&self, http: &Http, challenge: Challenge) -> io::Result<()> {
+    /// through `fetcher`, one handshake at a time.
+    pub(crate) async fn authenticate(
+        &self,
+        fetcher: &impl Fetcher,
+        challenge: Challenge,
+    ) -> io::Result<()> {
         let _handshake = self.handshake.lock().await;
         if self
             .authorization
@@ -299,18 +302,18 @@ impl Authorizer {
                 realm,
                 service,
                 scope,
-            } => self.fetch_token(http, &realm, &service, &scope).await?,
+            } => self.fetch_token(fetcher, &realm, &service, &scope).await?,
         };
 
         *self.authorization.write().unwrap() = Some(authorization);
         Ok(())
     }
 
-    /// Fetches a bearer token from `realm` through `http`, never Dragonfly,
+    /// Fetches a bearer token from `realm` through `fetcher`, never Dragonfly,
     /// with the basic credentials when configured.
     async fn fetch_token(
         &self,
-        http: &Http,
+        fetcher: &impl Fetcher,
         realm: &str,
         service: &str,
         scope: &str,
@@ -328,7 +331,7 @@ impl Authorizer {
             headers.insert(AUTHORIZATION, basic.value().clone());
         }
 
-        let response = http.get(url.as_str(), headers).await?;
+        let response = fetcher.get(url.as_str(), headers).await?;
         if !response.status.is_success() {
             return Err(response.into_io_error().await);
         }
@@ -350,7 +353,7 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
-    use crate::Source;
+    use crate::registry::transport::Http;
     use nydus_config::TlsConfig;
 
     #[test]
@@ -512,14 +515,14 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_answers_a_basic_challenge_from_the_config() {
-        let http = Http::new(
+        let http_client = Http::new(
+            Duration::from_secs(5),
             Duration::from_secs(5),
             3,
             None,
             &TlsConfig::default(),
             Duration::from_secs(1),
             None,
-            Source::Origin,
         )
         .unwrap();
         let test_cases: Vec<(Option<&str>, fn(io::Result<()>, Option<HeaderValue>))> = vec![
@@ -535,7 +538,9 @@ mod tests {
 
         for (basic, assert_fn) in test_cases {
             let authorizer = Authorizer::new(basic, None).unwrap();
-            let result = authorizer.authenticate(&http, Challenge::Basic).await;
+            let result = authorizer
+                .authenticate(&http_client, Challenge::Basic)
+                .await;
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
             assert_fn(result, headers.get(AUTHORIZATION).cloned());
@@ -573,14 +578,14 @@ mod tests {
                 });
             }
         });
-        let http = Http::new(
+        let http_client = Http::new(
+            Duration::from_secs(5),
             Duration::from_secs(5),
             3,
             None,
             &TlsConfig::default(),
             Duration::from_secs(1),
             None,
-            Source::Origin,
         )
         .unwrap();
         let authorizer = Authorizer::new(None, None).unwrap();
@@ -591,8 +596,8 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(
-            authorizer.authenticate(&http, challenge()),
-            authorizer.authenticate(&http, challenge())
+            authorizer.authenticate(&http_client, challenge()),
+            authorizer.authenticate(&http_client, challenge())
         );
 
         assert!(first.is_ok());

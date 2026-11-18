@@ -6,12 +6,14 @@ use std::fs::DirBuilder;
 use std::io;
 use std::ops::RangeInclusive;
 use std::os::unix::fs::DirBuilderExt;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
-use bytes::BytesMut;
+use bytes::Bytes;
+use futures::{stream, StreamExt, TryStreamExt};
 use rand::Rng;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
 use tokio::sync::watch;
 use tracing::{debug, error, warn};
@@ -19,29 +21,31 @@ use tracing::{debug, error, warn};
 use dragonfly_api::common::v2::Priority;
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
 use dragonfly_client_request::{
-    ExponentialBuilder, GetRequest, ProxyWithSeedPeers, RequestWithSeedPeers as _,
+    ExponentialBuilder, GetRequest, GetResponse, ProxyWithSeedPeers, RequestWithSeedPeers as _,
 };
 
-use nydus_config::{BackendConfig, Config};
+use nydus_config::{Config, DragonflyConfig};
 
-use super::http::{Http, RateLimit};
-use super::range::Range;
-use super::response::{Body, Response};
-use super::rt::Runtime;
-use super::Transport;
 use crate::Source;
+
+use crate::registry::response::Response;
+use crate::registry::rt::Runtime;
+
+use super::Fetcher;
 
 use self::seed_peer_resolver::SeedPeerResolver;
 
-/// The Dragonfly transport, one [`SeedPeerClient`] per read kind.
+/// The Dragonfly transport, one [`SeedPeerClient`] per read kind. What it
+/// fails of an on-demand read falls back to the origin in `Transport`.
 ///
 /// ```text
 /// GET ──▶ wait for the client ──▶ seed peer ──▶ 2xx / 3xx / 4xx ──────▶ handed back as is
+///           │                      │            └─ on-demand body breaks off ─▶ SDK: the next seed peer ─▶ error
 ///           │ no seed peer         │ 429 / 5xx / 408 / transport failure
-///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ origin
+///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ error
 ///           │                      └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more ─▶ error
 ///           │                                    └─ transport failure ──────────▶ error
-///           ├─ on-demand ─▶ origin
+///           ├─ on-demand ─▶ error
 ///           └─ prefetch ──▶ wait for a seed peer, within the prefetch request timeout
 /// ```
 pub(crate) struct Dragonfly {
@@ -50,10 +54,6 @@ pub(crate) struct Dragonfly {
 
     /// The seed peer client of prefetch reads, never retrying at once.
     prefetch_client: SeedPeerClient,
-
-    /// The origin client of on-demand fallbacks, limited by
-    /// `fallback_rate_limit`.
-    fallback_http_client: Http,
 
     /// The random wait before a prefetch read is sent once more.
     prefetch_retry_interval: RangeInclusive<Duration>,
@@ -64,23 +64,13 @@ pub(crate) struct Dragonfly {
 
 /// Implements the Dragonfly transport.
 impl Dragonfly {
-    /// Creates the transport the registry backend of `config` configures,
-    /// sharing the seed peers under `<runtime_dir>/dragonfly`.
-    pub(crate) fn new(config: &Config, runtime: &Runtime) -> io::Result<Self> {
-        let (http, dragonfly) = match &config.backend {
-            BackendConfig::Registry(registry) => registry
-                .dragonfly
-                .as_ref()
-                .map(|dragonfly| (&registry.http, dragonfly)),
-            BackendConfig::Local(_) => None,
-        }
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "backend has no dragonfly configuration",
-            )
-        })?;
-
+    /// Creates the transport `dragonfly` configures, sharing the seed peers
+    /// under `<runtime_dir>/dragonfly`.
+    pub(crate) fn new(
+        config: &Config,
+        dragonfly: &DragonflyConfig,
+        runtime: &Runtime,
+    ) -> io::Result<Self> {
         let dir = config.runtime_dir.join("dragonfly");
         DirBuilder::new()
             .recursive(true)
@@ -100,58 +90,38 @@ impl Dragonfly {
             runtime,
             SeedPeerResolver::new(&dir, dragonfly.scheduler_endpoint.to_string()),
             dragonfly.max_retries as u8,
-            dragonfly.request_timeout,
+            dragonfly.request_read_timeout,
             config.prefetch.request_timeout,
         );
         Ok(Self {
             ondemand_client,
             prefetch_client,
-            fallback_http_client: Http::new(
-                http.request_timeout,
-                http.max_retries,
-                http.proxy.as_ref(),
-                &http.tls,
-                config.prefetch.retry_interval,
-                Some(RateLimit::new(
-                    dragonfly.fallback_rate_limit,
-                    Duration::from_secs(1),
-                )),
-                Source::Fallback,
-            )?,
             request_timeout: dragonfly.request_timeout,
             prefetch_retry_interval: config.prefetch.retry_interval
                 ..=config.prefetch.retry_interval.saturating_mul(2),
         })
     }
-}
 
-/// Implements the blob transport over the Dragonfly SDK.
-#[async_trait]
-impl Transport for Dragonfly {
-    /// Fetches `url` through the on-demand client at `Level6`, falling back to
-    /// the origin.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let request = GetRequest {
-            url: url.to_string(),
-            header: headers.clone(),
-            priority: Some(Priority::Level6 as i32),
-            timeout: self.request_timeout,
-            ..Default::default()
-        };
-
-        // Fall back to the origin while there is no seed peer.
-        let Ok(client) = self.ondemand_client.ready().await else {
-            return self.fallback_http_client.get(url, headers).await;
-        };
-
-        let start = Instant::now();
-        let mut body = BytesMut::new();
-        let result = match client.get_into(&request, &mut body).await {
+    /// Converts the SDK answer to a `GET` into a response, an SDK error with
+    /// an HTTP status included.
+    fn response(result: dragonfly_client_request::Result<GetResponse>) -> io::Result<Response> {
+        match result {
             Ok(response) => Ok(Response {
                 status: response.status_code.unwrap_or(StatusCode::OK),
                 headers: response.header,
-                body: Body::Bytes(body.freeze()),
-                source: Source::Dragonfly,
+                body: match response.body {
+                    Some(body) => body
+                        .map_err(|err| match err {
+                            Error::RequestTimeout(message) => io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!("dragonfly request timed out: {message}"),
+                            ),
+                            err => io::Error::other(format!("dragonfly error: {err}")),
+                        })
+                        .boxed(),
+                    None => stream::empty().boxed(),
+                },
+                fallback: Arc::default(),
             }),
             Err(Error::ProxyError(ProxyError {
                 status_code: Some(status),
@@ -178,50 +148,46 @@ impl Transport for Dragonfly {
                         ))
                     })
                     .collect(),
-                body: Body::Bytes(message.unwrap_or_default().into()),
-                source: Source::Dragonfly,
+                body: stream::iter([Ok(Bytes::from(message.unwrap_or_default()))]).boxed(),
+                fallback: Arc::default(),
             }),
             Err(Error::RequestTimeout(message)) => Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("dragonfly request timed out: {message}"),
             )),
             Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
+        }
+    }
+}
+
+/// Implements the fetcher over the Dragonfly SDK.
+#[async_trait]
+impl Fetcher for Dragonfly {
+    /// Fetches `url` through the on-demand client at `Level6`.
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let request = GetRequest {
+            url: url.to_string(),
+            header: headers,
+            priority: Some(Priority::Level6 as i32),
+            timeout: self.request_timeout,
+            ..Default::default()
         };
 
-        // Fall back to the origin on an answer outside the range.
-        let range = headers
-            .get(RANGE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::parse::<Range>)
-            .transpose()?;
-
-        let result = match (result, &range) {
-            (Ok(response), Some(range)) if response.status.is_success() => {
-                response.validate_range(range).map(|()| response)
-            }
-            (result, _) => result,
-        };
-
+        let client = self.ondemand_client.ready().await?;
+        let now = Instant::now();
+        let result = Self::response(client.get(&request).await);
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) through dragonfly returned {} in {:?}",
                 response.status,
-                start.elapsed()
+                now.elapsed()
             ),
             Err(err) => debug!(
                 "GET {url} (ondemand) through dragonfly failed in {:?}: {err}",
-                start.elapsed()
+                now.elapsed()
             ),
         }
-
-        // Serve a definitive answer; fall back to the origin on anything else.
-        let err = match result {
-            Ok(response) if response.needs_fallback() => response.into_io_error().await,
-            Ok(response) => return Ok(response),
-            Err(err) => err,
-        };
-        warn!("dragonfly request failed, falling back to the origin: {err}");
-        self.fallback_http_client.get(url, headers).await
+        result
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, below normal
@@ -238,65 +204,24 @@ impl Transport for Dragonfly {
         let client = self.prefetch_client.ready().await?;
         let mut retried = false;
         loop {
-            let start = Instant::now();
-            let mut body = BytesMut::new();
-            let result = match client.get_into(&request, &mut body).await {
-                Ok(response) => Ok(Response {
-                    status: response.status_code.unwrap_or(StatusCode::OK),
-                    headers: response.header,
-                    body: Body::Bytes(body.freeze()),
-                    source: Source::Dragonfly,
-                }),
-                Err(Error::ProxyError(ProxyError {
-                    status_code: Some(status),
-                    header,
-                    message,
-                }))
-                | Err(Error::BackendError(BackendError {
-                    status_code: Some(status),
-                    header,
-                    message,
-                }))
-                | Err(Error::DfdaemonError(DfdaemonError {
-                    status_code: Some(status),
-                    header,
-                    message,
-                })) => Ok(Response {
-                    status,
-                    headers: header
-                        .into_iter()
-                        .filter_map(|(name, value)| {
-                            Some((
-                                HeaderName::from_bytes(name.as_bytes()).ok()?,
-                                HeaderValue::from_str(&value).ok()?,
-                            ))
-                        })
-                        .collect(),
-                    body: Body::Bytes(message.unwrap_or_default().into()),
-                    source: Source::Dragonfly,
-                }),
-                Err(Error::RequestTimeout(message)) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("dragonfly request timed out: {message}"),
-                )),
-                Err(err) => Err(io::Error::other(format!("dragonfly error: {err}"))),
-            };
+            let now = Instant::now();
+            let result = Self::response(client.get(&request).await);
 
             match &result {
                 Ok(response) => debug!(
                     "GET {url} (prefetch) through dragonfly returned {} in {:?}",
                     response.status,
-                    start.elapsed()
+                    now.elapsed()
                 ),
                 Err(err) => debug!(
                     "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
-                    start.elapsed()
+                    now.elapsed()
                 ),
             }
 
             // Serve a definitive answer, or the second transient one.
             let response = result?;
-            if !response.needs_retry() || retried {
+            if !response.is_transient() || retried {
                 return Ok(response);
             }
 
@@ -307,6 +232,11 @@ impl Transport for Dragonfly {
             tokio::time::sleep(delay).await;
             retried = true;
         }
+    }
+
+    /// Returns the `source` label of the reads the seed peers serve.
+    fn source(&self) -> Source {
+        Source::Dragonfly
     }
 }
 
@@ -347,12 +277,14 @@ struct SeedPeerClient {
 impl SeedPeerClient {
     /// Creates the on-demand client, failing fast without a seed peer, and the
     /// prefetch client, waiting for one, sharing one resolve task on `runtime`.
+    /// Both read under `request_read_timeout`. The on-demand client waits that
+    /// long for the proxy, the prefetch client `prefetch_request_timeout`.
     fn clients(
         runtime: &Runtime,
         seed_peer_resolver: SeedPeerResolver,
         max_retries: u8,
-        ondemand_ready_timeout: Duration,
-        prefetch_ready_timeout: Duration,
+        request_read_timeout: Duration,
+        prefetch_request_timeout: Duration,
     ) -> (Self, Self) {
         let (ondemand_tx, ondemand_rx) = watch::channel(ConnectivityState::Connecting);
         let (prefetch_tx, prefetch_rx) = watch::channel(ConnectivityState::Connecting);
@@ -383,6 +315,7 @@ impl SeedPeerClient {
                                 match ProxyWithSeedPeers::builder()
                                     .seed_peers(seed_peers.clone())
                                     .max_retries(*max_retries)
+                                    .read_timeout(request_read_timeout)
                                     .backoff(ExponentialBuilder::default().with_jitter())
                                     .build()
                                     .await
@@ -430,12 +363,12 @@ impl SeedPeerClient {
         (
             Self {
                 state: ondemand_rx,
-                ready_timeout: ondemand_ready_timeout,
+                ready_timeout: request_read_timeout,
                 wait_for_ready: false,
             },
             Self {
                 state: prefetch_rx,
-                ready_timeout: prefetch_ready_timeout,
+                ready_timeout: prefetch_request_timeout,
                 wait_for_ready: true,
             },
         )
@@ -493,14 +426,6 @@ mod tests {
         }])
     }
 
-    fn dragonfly_config(runtime_dir: &Path) -> Config {
-        serde_yaml::from_str(&format!(
-            "runtime_dir: {}\nbackend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n    dragonfly:\n      scheduler_endpoint: http://127.0.0.1:1\n",
-            runtime_dir.display()
-        ))
-        .unwrap()
-    }
-
     fn write_cache_file(dir: &Path, seed_peers: serde_json::Value, due_in: Duration) {
         let next_refresh_at =
             humantime_serde::re::humantime::format_rfc3339(SystemTime::now() + due_in);
@@ -521,8 +446,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let runtime_dir = dir.path().join("run");
         let runtime = Runtime::new(None).unwrap();
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: local\n  config:\n    dir: /blobs\n",
+            runtime_dir.display()
+        ))
+        .unwrap();
+        let dragonfly: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:1\n").unwrap();
 
-        Dragonfly::new(&dragonfly_config(&runtime_dir), &runtime).unwrap();
+        Dragonfly::new(&config, &dragonfly, &runtime).unwrap();
 
         for dir in [runtime_dir.clone(), runtime_dir.join("dragonfly")] {
             let metadata = fs::metadata(dir).unwrap();
@@ -537,12 +469,40 @@ mod tests {
         let runtime_dir = dir.path().join("run");
         fs::write(&runtime_dir, b"").unwrap();
         let runtime = Runtime::new(None).unwrap();
+        let config: Config = serde_yaml::from_str(&format!(
+            "runtime_dir: {}\nbackend:\n  type: local\n  config:\n    dir: /blobs\n",
+            runtime_dir.display()
+        ))
+        .unwrap();
+        let dragonfly: DragonflyConfig =
+            serde_yaml::from_str("scheduler_endpoint: http://127.0.0.1:1\n").unwrap();
 
-        let err = Dragonfly::new(&dragonfly_config(&runtime_dir), &runtime)
-            .err()
-            .unwrap();
+        let err = Dragonfly::new(&config, &dragonfly, &runtime).err().unwrap();
 
         assert!(err.to_string().contains("dragonfly runtime directory"));
+    }
+
+    #[tokio::test]
+    async fn response_reports_a_body_that_times_out_as_timed_out() {
+        let test_cases = vec![
+            (
+                Error::RequestTimeout("deadline".to_string()),
+                io::ErrorKind::TimedOut,
+            ),
+            (Error::Internal("reset".to_string()), io::ErrorKind::Other),
+        ];
+
+        for (err, expected) in test_cases {
+            let response = Dragonfly::response(Ok(GetResponse {
+                success: true,
+                header: HeaderMap::new(),
+                status_code: Some(StatusCode::PARTIAL_CONTENT),
+                body: Some(Box::new(stream::iter([Err(err)]))),
+            }))
+            .unwrap();
+
+            assert_eq!(response.bytes(4).await.unwrap_err().kind(), expected);
+        }
     }
 
     #[test]

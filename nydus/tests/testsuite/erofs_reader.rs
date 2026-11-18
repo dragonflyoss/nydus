@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -802,20 +802,25 @@ impl Backend for CountingBackend {
         self.local.metrics()
     }
 
-    fn read_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
-        self.local.read_blob_metadata(blob_id)
+    fn get_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
+        self.local.get_blob_metadata(blob_id)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {
         self.local.is_raw_device(blob_id)
     }
 
-    fn read_range_into(&self, blob_id: &[u8; 32], offset: u64, dst: &mut [u8]) -> io::Result<()> {
+    fn get(
+        &self,
+        blob_id: &[u8; 32],
+        offset: u64,
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read_range_into(blob_id, offset, dst)
+        self.local.get(blob_id, offset, len)
     }
 }
 

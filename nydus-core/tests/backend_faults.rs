@@ -51,6 +51,7 @@ fn ensure_range_and_read_file_data_fail_on_a_backend_fault_until_it_is_spent() {
             io::ErrorKind::ConnectionReset,
         ),
         (Fault::ShortRead { len: 4096 }, io::ErrorKind::InvalidData),
+        (Fault::Truncate { len: 4096 }, io::ErrorKind::UnexpectedEof),
         (
             Fault::FlipBit {
                 offset: compressed.start + 1,

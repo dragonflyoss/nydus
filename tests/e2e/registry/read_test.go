@@ -21,11 +21,11 @@ func TestReadThroughOrigin(t *testing.T) {
 	if !assert.NoError(t, m.read(t, image, "data/size/08392705")) {
 		t.FailNow()
 	}
-	if !assert.Positive(t, m.backendReads(t, "ondemand", "origin")) {
+	if !assert.Positive(t, m.backendReads(t, "ondemand", "http")) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, m.backendFailures(t, "ondemand", "origin"))
+	assert.Zero(t, m.backendFailures(t, "ondemand", "http"))
 	assert.Positive(t, proxy.blobGetCount())
 }
 
@@ -47,8 +47,8 @@ func TestMetadataResponse(t *testing.T) {
 		{"MissingContentRange", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": ""}}, "missing Content-Range"},
 		{"InvalidContentRange", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": "bytes 0-1/not-a-length"}}, "invalid Content-Range bytes 0-1/not-a-length"},
 		{"UnknownContentLength", registry.Fault{Match: footer, Headers: map[string]string{"Content-Range": "bytes 0-1/*"}}, "invalid Content-Range bytes 0-1/*"},
-		{"ShortFooter", registry.Fault{Match: footer, ShortBody: 1}, "early eof"},
-		{"ShortMetadata", registry.Fault{Match: meta, ShortBody: 1}, "early eof"},
+		{"ShortFooter", registry.Fault{Match: footer, ShortBody: 1}, "registry returned 1 bytes, expected"},
+		{"ShortMetadata", registry.Fault{Match: meta, ShortBody: 1}, "registry returned 1 bytes, expected"},
 	} {
 		for _, scope := range []string{"none", "all"} {
 			t.Run(tc.name+"/"+scope, func(t *testing.T) {

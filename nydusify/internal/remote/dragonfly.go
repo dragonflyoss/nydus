@@ -28,7 +28,7 @@ type getter interface {
 }
 
 // The SDK is used as nydus fuse's on-demand reads use it (nydus-backend's
-// registry/dragonfly.rs): requests are sent at Level6, the SDK's default
+// registry/transport/dragonfly): requests are sent at Level6, the SDK's default
 // priority, and a transient failure is retried once on the next seed peer
 // after a jittered exponential backoff. The per-attempt timeout stays at the
 // SDK default of ten minutes, since a request here fetches a whole layer

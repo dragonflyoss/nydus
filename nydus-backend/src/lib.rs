@@ -8,7 +8,7 @@ mod netns;
 mod registry;
 
 use std::fs::File;
-use std::io;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -49,8 +49,9 @@ pub struct RawDeviceFile {
 /// Backend
 ///   ├─ Local      full blobs in a directory, named by digest
 ///   └─ Registry   an OCI registry
-///        ├─ Http        the origin
-///        └─ Dragonfly   the seed peers, falling back to the origin
+///        ├─ dragonfly ───▶ the Dragonfly seed peers, falling back to the origin
+///        ├─ http.proxy ──▶ the proxy, falling back to the origin
+///        └─ neither ─────▶ the origin
 /// ```
 pub trait Backend: Send + Sync {
     /// Returns the metrics of the image, shared with the layers above.
@@ -89,32 +90,32 @@ pub trait Backend: Send + Sync {
     }
 
     /// Reads the blob's metadata for an on-demand read.
-    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
+    fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
 
     /// Reads the blob's metadata for a prefetch read.
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
     ) -> io::Result<BlobMetadata> {
-        self.read_blob_metadata(blob_id)
+        self.get_blob_metadata(blob_id)
     }
 
-    /// Fills `buf` with the blob bytes from `offset` for an on-demand read.
-    fn read_range_into(
+    /// Reads `len` blob bytes from `offset` for an on-demand read, streaming.
+    fn get(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()>;
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>>;
 
-    /// Fills `buf` with the blob bytes from `offset` for a prefetch read.
-    fn prefetch_range_into(
+    /// Reads `len` blob bytes from `offset` for a prefetch read, streaming.
+    fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        self.read_range_into(blob_id, offset, buf)
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        self.get(blob_id, offset, len)
     }
 }
 
@@ -130,7 +131,9 @@ impl dyn Backend {
         match &config.backend {
             BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone(), metrics))),
             #[cfg(feature = "registry")]
-            BackendConfig::Registry(_) => Ok(Arc::new(Registry::new(config, netns, metrics)?)),
+            BackendConfig::Registry(registry) => {
+                Ok(Arc::new(Registry::new(config, registry, netns, metrics)?))
+            }
             #[cfg(not(feature = "registry"))]
             BackendConfig::Registry(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

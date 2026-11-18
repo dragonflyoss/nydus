@@ -497,9 +497,12 @@ The rate-limit case reads its complete payload in chunk-group-sized requests
 with kernel read-ahead disabled, so coalescing cannot turn it into a single GET.
 
 - Build the GA binary with `cli,fuse,fileio,dragonfly`. Registry timeouts
-  use `http.request_timeout`; Dragonfly uses `request_timeout`,
-  `max_retries` and `fallback_rate_limit`. Prefetch retries use
-  `prefetch.retry_interval`, not the old min/max delay pair.
+  use `http.request_timeout` and `http.request_read_timeout`; Dragonfly uses
+  `request_timeout`, `request_read_timeout` and `max_retries`, and the origin
+  fallback uses its own `fallback.request_timeout`,
+  `fallback.request_read_timeout`, `fallback.max_retries` and
+  `fallback.rate_limit`. Prefetch retries use `prefetch.retry_interval`, not
+  the old min/max delay pair.
 - Dragonfly prefetch retries transient HTTP statuses once, but transport
   errors terminate the task without origin fallback. Recovery after a
   terminal failure starts a new mount/prefetch. Completion requires a
@@ -510,11 +513,11 @@ with kernel read-ahead disabled, so coalescing cannot turn it into a single GET.
   subsequent polls without waiting behind reads; otherwise a Go process
   reading the mount and serving its registry can deadlock its network loop.
 - Metrics use `nydus_*` names and labels. `Metrics.Sum` selects labels
-  independently of their ordering. Successful backend reads identify
-  `source="dragonfly"` or `source="fallback"`; failed reads identify the
-  configured transport, so a failed fallback is counted under Dragonfly,
-  not under a separate fallback-error counter. Retry/fallback decisions
-  are checked through requests and logs, not removed per-attempt counters.
+  independently of their ordering. Backend reads identify the configured
+  backend: `source="dragonfly"` on a Dragonfly daemon, also for a read
+  that fell back to the origin, and `source="http"` otherwise. Retry and
+  fallback decisions are checked through requests and logs, such as
+  `falling back to the origin`, not through per-attempt counters.
 - Labeled counters may be absent before the first event. Positive control
   reads and cache gauges keep a renamed metric from turning an assertion
   into a vacuous zero-equals-zero check.

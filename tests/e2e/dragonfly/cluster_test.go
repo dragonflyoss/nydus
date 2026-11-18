@@ -130,12 +130,18 @@ func (c *cluster) mount(t testing.TB, img fixture.Image, addr string, o options)
 			cfg.Backend = mount.RegistryBackend(mount.RegistryConfig{
 				Addr:       addr,
 				Repository: repo,
-				HTTP:       &mount.HTTPConfig{RequestTimeout: o.timeout, MaxRetries: mount.Ptr(1)},
+				HTTP:       &mount.HTTPConfig{RequestTimeout: o.timeout, RequestReadTimeout: o.timeout, MaxRetries: mount.Ptr(1)},
 				Dragonfly: &mount.DragonflyConfig{
-					SchedulerEndpoint: c.scheduler,
-					RequestTimeout:    o.timeout,
-					MaxRetries:        mount.Ptr(1),
-					FallbackRateLimit: mount.Ptr(o.fallbackRateLimit),
+					SchedulerEndpoint:  c.scheduler,
+					RequestTimeout:     o.timeout,
+					RequestReadTimeout: o.timeout,
+					MaxRetries:         mount.Ptr(1),
+				},
+				Fallback: &mount.FallbackConfig{
+					RequestTimeout:     o.timeout,
+					RequestReadTimeout: o.timeout,
+					MaxRetries:         mount.Ptr(1),
+					RateLimit:          mount.Ptr(o.fallbackRateLimit),
 				},
 			})
 

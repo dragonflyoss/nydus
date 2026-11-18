@@ -40,26 +40,36 @@ backend:
     #
     # registry_token: <bearer-token>
 
-    # HTTP client settings of every request to the origin registry:
-    # timeouts, retries, and TLS trust, the reads Dragonfly falls back to the
-    # origin with included. The whole block and every field are optional.
+    # HTTP client settings of the requests to the origin registry: timeouts,
+    # retries, and TLS trust. The on-demand reads that fall back to the origin
+    # use the timeouts and retries of `fallback` below instead, and share its
+    # TLS trust. The whole block and every field are optional.
     http:
-      # Timeout of a request to the origin registry (connect + read), e.g.
-      # `5s` or `1m`, greater than zero. Default: 5s. Kept short because a
-      # read holds its chunk group's fetch claim for its whole duration, and
-      # the readers waiting behind that claim are FUSE worker threads.
-      request_timeout: 5s
+      # Timeout of a request to the origin registry, from connecting to the
+      # end of its body, e.g. `30s` or `1m`, greater than zero. It counts the
+      # time the cache takes to decode and write the body as it arrives.
+      # Default: 1m.
+      request_timeout: 1m
+
+      # Read timeout of a request to the origin registry: the longest wait
+      # for the connection, the response and each part of its body, e.g.
+      # `5s`, greater than zero. Default: 5s. Kept short because a read holds
+      # its chunk group's fetch claim for its whole duration, and the readers
+      # waiting behind that claim are FUSE worker threads.
+      request_read_timeout: 5s
 
       # Maximum number of retry attempts per request, applied by the HTTP
-      # client's retry middleware on direct origin requests and on origin
-      # requests issued when Dragonfly cannot serve a read. A prefetch read
-      # still failing after them is retried once hours later. Default: 3.
+      # client's retry middleware. A prefetch read still failing after them
+      # is retried once hours later. Default: 3.
       max_retries: 3
 
       # Optional proxy block routing every registry request through an HTTP
       # forward proxy. Requests keep their original upstream URL, so a proxy
-      # like a Dragonfly dfdaemon knows what to back-source. Omit to connect
-      # directly to the origin.
+      # like a Dragonfly dfdaemon knows what to back-source. An on-demand read
+      # or a token fetch the proxy cannot serve falls back to the origin, see
+      # `fallback` below.
+      # Not used when `dragonfly` is configured. Omit to connect directly to
+      # the origin.
       #
       # proxy:
       #   # The proxy address including the scheme.
@@ -79,19 +89,25 @@ backend:
 
     # Optional Dragonfly block (requires the `dragonfly` feature). When set,
     # blob GETs are routed through the Dragonfly client SDK for P2P
-    # distribution. An on-demand read the seed peers cannot serve goes back
-    # to the origin registry through the `http` client above under
-    # `fallback_rate_limit`, a prefetch read is retried once hours later
-    # instead. Auth token fetches go directly to the origin registry. Omit to
-    # talk to the origin directly.
+    # distribution, and `http.proxy` above is not used. An on-demand read the
+    # seed peers cannot serve falls back to the origin, see `fallback` below,
+    # a prefetch read is retried once hours later instead. Auth token fetches
+    # go directly to the origin registry. Omit to talk to the origin directly.
     #
     # dragonfly:
     #   # The Dragonfly scheduler service address with the scheme.
     #   scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
     #
-    #   # Timeout of each attempt of a request through the seed peers, e.g.
-    #   # `5s` or `1m`. Default: 5s.
-    #   request_timeout: 5s
+    #   # Timeout of each attempt of a request through the seed peers, from
+    #   # connecting to the end of its body, e.g. `30s` or `1m`, greater than
+    #   # zero. Default: 1m.
+    #   request_timeout: 1m
+    #
+    #   # Read timeout of each attempt: the longest wait for the connection,
+    #   # the response and each part of its body, e.g. `5s`, greater than
+    #   # zero. An on-demand read waits that long for a seed peer before going
+    #   # to the origin. Default: 5s.
+    #   request_read_timeout: 5s
     #
     #   # Retries of an on-demand read on a transient failure (timeout,
     #   # connection, dfdaemon, 5xx, 408, 429), each on the next seed peer
@@ -99,12 +115,33 @@ backend:
     #   # is instead retried once after a random delay of
     #   # `prefetch.retry_interval` to twice that, 6h-12h by default.
     #   max_retries: 1
+
+    # Optional fallback block: the HTTP client an on-demand read falls back
+    # to the origin with when `dragonfly` or `http.proxy` cannot serve it. It
+    # is a client of its own, with its own timeouts and retries: it connects
+    # to the origin directly, never through the proxy, and trusts what
+    # `http.tls` above trusts.
     #
-    #   # Rate limit of the origin requests an on-demand read falls back to
-    #   # when the seed peers cannot serve it, in requests per second, at
-    #   # least 1; every attempt, retries included, waits for a slot.
-    #   # Default: 1.
-    #   fallback_rate_limit: 1
+    #   dragonfly configured ──▶ the seed peers, then the fallback
+    #   http.proxy configured ─▶ the proxy, then the fallback
+    #   neither ───────────────▶ the origin, no fallback
+    #
+    # fallback:
+    #   # Timeout of a request, from connecting to the end of its body,
+    #   # greater than zero. Default: 1m.
+    #   request_timeout: 1m
+    #
+    #   # Read timeout of a request: the longest wait for the connection, the
+    #   # response and each part of its body, greater than zero. Default: 5s.
+    #   request_read_timeout: 5s
+    #
+    #   # Maximum number of retry attempts per request. Default: 0, a request
+    #   # the origin fails is not sent again.
+    #   max_retries: 0
+    #
+    #   # Rate limit of its requests, in requests per second, at least 1;
+    #   # every attempt, retries included, waits for a slot. Default: 1.
+    #   rate_limit: 1
 
 storage:
   # Persistent chunk cache directory (equivalent to --cache-dir). Optional:

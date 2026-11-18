@@ -161,7 +161,7 @@ func TestOutageRecovery(t *testing.T) {
 					if !assert.ErrorIs(t, err, unix.EIO) {
 						t.FailNow()
 					}
-					if !assert.Positive(t, d.of(proxyErrors)) {
+					if !assert.Positive(t, d.of(fallbackErrors)) {
 						t.FailNow()
 					}
 
@@ -185,7 +185,7 @@ func TestOutageRecovery(t *testing.T) {
 			}
 
 			batch := p.concurrentBatch(t)
-			if d.of(proxyReads) > 0 && batch.of(proxyReads) > 0 && batch.of(fallbackReads) == 0 {
+			if d.fallbacks == 0 && batch.of(proxyReads) > 0 && batch.fallbacks == 0 {
 				if !assert.Zero(t, d.of(proxyErrors)) {
 					t.FailNow()
 				}

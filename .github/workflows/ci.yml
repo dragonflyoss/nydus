@@ -63,7 +63,7 @@ jobs:
       - name: Run dual TLS tests
         run: |
           cargo llvm-cov --no-report -p nydus-backend --features registry,reqwest/default-tls --lib -- \
-            registry::http::tests::new_trusts_the_ca_cert_or_skips_verification
+            registry::transport::http::tests::new_trusts_the_ca_cert_or_skips_verification
 
       - name: Export coverage
         run: cargo llvm-cov report --lcov --output-path lcov.info
