@@ -39,6 +39,9 @@ pub(crate) struct Http {
 
     /// The random wait before a prefetch read is sent once more.
     prefetch_retry_interval: RangeInclusive<Duration>,
+
+    /// The proxy the requests go through.
+    pub(crate) proxy: Option<ProxyConfig>,
 }
 
 /// Implements the origin HTTP client.
@@ -102,6 +105,7 @@ impl Http {
             client: client.build(),
             prefetch_retry_interval: prefetch_retry_interval
                 ..=prefetch_retry_interval.saturating_mul(2),
+            proxy: proxy.cloned(),
         })
     }
 

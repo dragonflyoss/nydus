@@ -186,10 +186,10 @@ impl Registry {
 impl Client {
     /// Returns the `source` label of the reads.
     fn source(&self) -> Source {
-        if self.dragonfly.is_some() {
-            Source::Dragonfly
-        } else {
-            Source::Http
+        match (&self.dragonfly, &self.http.proxy) {
+            (Some(_), _) => Source::Dragonfly,
+            (None, Some(_)) => Source::HttpProxy,
+            (None, None) => Source::Http,
         }
     }
 
@@ -1757,7 +1757,26 @@ backend:
         registry.client.authorizer.authorize(&mut headers);
         assert_eq!(headers[AUTHORIZATION], "Bearer xyz");
         assert!(registry.client.dragonfly.is_none());
-        assert_eq!(registry.client.source(), Source::Http);
+    }
+
+    #[test]
+    fn new_names_the_source_after_the_http_proxy() {
+        let test_cases = vec![
+            ("", Source::Http),
+            (
+                "    http:\n      proxy:\n        addr: http://127.0.0.1:65001\n",
+                Source::HttpProxy,
+            ),
+        ];
+
+        for (http, source) in test_cases {
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n{http}"
+            ))
+            .unwrap();
+            let registry = Registry::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            assert_eq!(registry.client.source(), source);
+        }
     }
 
     #[test]

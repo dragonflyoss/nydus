@@ -529,8 +529,11 @@ pub enum Source {
     /// The local directory backend's blob files.
     Local,
 
-    /// The registry backend without Dragonfly.
+    /// The registry backend, reading the origin directly.
     Http,
+
+    /// The registry backend, reading the origin through `http.proxy`.
+    HttpProxy,
 
     /// The registry backend with Dragonfly, served by the seed peers.
     Dragonfly,
@@ -547,6 +550,7 @@ impl fmt::Display for Source {
         match self {
             Source::Local => write!(f, "local"),
             Source::Http => write!(f, "http"),
+            Source::HttpProxy => write!(f, "http_proxy"),
             Source::Dragonfly => write!(f, "dragonfly"),
             Source::DragonflyFallback => write!(f, "dragonfly_fallback"),
         }
@@ -700,6 +704,8 @@ mod tests {
             (ReadKind::Prefetch, Source::Local),
             (ReadKind::Ondemand, Source::Http),
             (ReadKind::Prefetch, Source::Http),
+            (ReadKind::Ondemand, Source::HttpProxy),
+            (ReadKind::Prefetch, Source::HttpProxy),
             (ReadKind::Ondemand, Source::Dragonfly),
             (ReadKind::Prefetch, Source::Dragonfly),
             (ReadKind::Ondemand, Source::DragonflyFallback),
@@ -752,6 +758,7 @@ mod tests {
             ("prefetch", ReadKind::Prefetch.to_string()),
             ("local", Source::Local.to_string()),
             ("http", Source::Http.to_string()),
+            ("http_proxy", Source::HttpProxy.to_string()),
             ("dragonfly", Source::Dragonfly.to_string()),
             ("dragonfly_fallback", Source::DragonflyFallback.to_string()),
             ("decode", WriteFailureReason::Decode.to_string()),

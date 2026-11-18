@@ -1415,15 +1415,15 @@ successes alone. Dimensions are labels, each with a fixed vocabulary, the
 | Label | Meaning | Values |
 | --- | --- | --- |
 | `type` | what triggered the backend read, or what wrote the chunk group | `ondemand`, `prefetch`; on the cache writes also `redirect` |
-| `source` | what the backend reads its bytes through | `local`, `http`, `dragonfly`, `dragonfly_fallback` |
+| `source` | what the backend reads its bytes through | `local`, `http`, `http_proxy`, `dragonfly`, `dragonfly_fallback` |
 | `reason` | why the cache write failed | `decode`, `checksum`, `io`, `unknown_source` |
 | `status` | whether the image bytes are in the local cache | `cached`, `uncached` |
 | `operation` | the FUSE operation | `lookup`, `read`, `getattr`, ... |
 
 `source` follows the backend configuration: `local` for the local directory
-backend, `http` for the registry backend reading the origin, directly or
-through `http.proxy`, and `dragonfly` for the registry backend with
-`dragonfly` configured. A Dragonfly daemon counts a read the seed peers
+backend, `http` for the registry backend reading the origin directly,
+`http_proxy` when it reads the origin through `http.proxy`, and `dragonfly`
+for the registry backend with `dragonfly` configured. A Dragonfly daemon counts a read the seed peers
 served under `dragonfly`, and an on-demand read the origin answered or
 finished, under `dragonfly.fallback_rate_limit`, under `dragonfly_fallback`.
 A read that fails before any answer stays under `dragonfly`. Each fallback
