@@ -1282,9 +1282,12 @@ Fields under `backend.config`:
 		like a Dragonfly `dfdaemon` knows what to back-source. An on-demand
 		read the proxy cannot serve (timeout, connection, `5xx`, `408`, `429`,
 		an answer outside the range, or a body that breaks off) falls back to
-		the origin (see `fallback`), like one through Dragonfly; a prefetch
-		read never does, and a token fetch stays on the proxy. Not used when
-		`dragonfly` is configured. Omit to connect directly to the origin.
+		the origin (see `fallback`), like one through Dragonfly, and so does
+		a token fetch; a prefetch read never does. A proxy that fails to
+		connect is not retried: the requests fail at once, the on-demand
+		reads falling back without a wait, until one request connects again
+		5 seconds later. Not used when `dragonfly` is configured. Omit to
+		connect directly to the origin.
 		- `addr` (required): the proxy address including the scheme, e.g.
 			`http://127.0.0.1:65001`.
 	- `tls` (optional): the TLS settings for connections to the registry.
@@ -1364,8 +1367,8 @@ Fields under `backend.config`:
 	serve it. It is a client of its own, with its own timeouts and retries:
 	it connects to the origin directly, never through `http.proxy`, and
 	trusts what `http.tls` trusts. A fallback request the origin does not
-	answer fails the read as a `502 Bad Gateway` carrying the transport
-	error.
+	answer, or answers outside the range, fails the read as a
+	`502 Bad Gateway` carrying the error.
 	- `request_timeout` (default `1m`): the timeout of a request, from
 		connecting to the end of its body, greater than zero.
 	- `request_read_timeout` (default `5s`): the read timeout of a request,
@@ -1461,7 +1464,8 @@ proxy or the seed peers could not serve falls back to the origin, under
 `fallback.rate_limit`, and is counted under `fallback` from then on,
 whether the origin serves it or fails it. A read that fails without falling
 back, on a `403` or `404` of the proxy or the seed peers, stays under the
-configured source. Each fallback is also in the logs as
+configured source, and so does one that fails on its token fetch or on a
+redirect without a `Location`. Each fallback is also in the logs as
 `request failed, falling back to the origin`.
 
 Backend (`nydus_backend_*`):

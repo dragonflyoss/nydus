@@ -66,7 +66,8 @@ backend:
       # Optional proxy block routing every registry request through an HTTP
       # forward proxy. Requests keep their original upstream URL, so a proxy
       # like a Dragonfly dfdaemon knows what to back-source. An on-demand read
-      # the proxy cannot serve falls back to the origin, see `fallback` below.
+      # or a token fetch the proxy cannot serve falls back to the origin, see
+      # `fallback` below.
       # Not used when `dragonfly` is configured. Omit to connect directly to
       # the origin.
       #

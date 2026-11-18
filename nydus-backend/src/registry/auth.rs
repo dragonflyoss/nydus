@@ -11,7 +11,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::Deserialize;
 use url::Url;
 
-use super::transport::{Fetcher, Http};
+use super::transport::Fetcher;
 
 /// The lifetime of a bearer token when the token server does not say.
 const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
@@ -277,10 +277,10 @@ impl Authorizer {
     }
 
     /// Answers `challenge` with the basic credentials or a bearer token fetched
-    /// through `http_client`, one handshake at a time.
+    /// through `fetcher`, one handshake at a time.
     pub(crate) async fn authenticate(
         &self,
-        http_client: &Http,
+        fetcher: &impl Fetcher,
         challenge: Challenge,
     ) -> io::Result<()> {
         let _handshake = self.handshake.lock().await;
@@ -302,21 +302,18 @@ impl Authorizer {
                 realm,
                 service,
                 scope,
-            } => {
-                self.fetch_token(http_client, &realm, &service, &scope)
-                    .await?
-            }
+            } => self.fetch_token(fetcher, &realm, &service, &scope).await?,
         };
 
         *self.authorization.write().unwrap() = Some(authorization);
         Ok(())
     }
 
-    /// Fetches a bearer token from `realm` through `http_client`, never Dragonfly,
+    /// Fetches a bearer token from `realm` through `fetcher`, never Dragonfly,
     /// with the basic credentials when configured.
     async fn fetch_token(
         &self,
-        http_client: &Http,
+        fetcher: &impl Fetcher,
         realm: &str,
         service: &str,
         scope: &str,
@@ -334,7 +331,7 @@ impl Authorizer {
             headers.insert(AUTHORIZATION, basic.value().clone());
         }
 
-        let response = http_client.get(url.as_str(), headers).await?;
+        let response = fetcher.get(url.as_str(), headers).await?;
         if !response.status.is_success() {
             return Err(response.into_io_error().await);
         }
@@ -356,6 +353,7 @@ mod tests {
     #![allow(clippy::type_complexity)]
 
     use super::*;
+    use crate::registry::transport::Http;
     use nydus_config::TlsConfig;
 
     #[test]

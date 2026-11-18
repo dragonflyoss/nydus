@@ -306,8 +306,8 @@ pub struct HttpConfig {
 
     /// The optional proxy configuration. When set, and `dragonfly` is not,
     /// every registry request is routed through the proxy, and an on-demand
-    /// read the proxy cannot serve falls back to the origin (see
-    /// `fallback`). When unset, ambient proxy environment variables are
+    /// read or a token fetch the proxy cannot serve falls back to the origin
+    /// (see `fallback`). When unset, ambient proxy environment variables are
     /// ignored and connections go directly to the origin.
     #[serde(default)]
     pub proxy: Option<ProxyConfig>,

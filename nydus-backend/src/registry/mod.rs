@@ -52,11 +52,13 @@ use self::transport::{Fetcher, Http, RateLimit, Transport};
 ///   └─ Client
 ///        ├─ Authorizer      the challenge and the token that answers it
 ///        ├─ RedirectCache   the signed URLs blob GETs were redirected to
-///        ├─ Http            the origin, through `http.proxy` when set, for token fetches
+///        ├─ Transport       the transport of token fetches, never Dragonfly
+///        │    ├─ http.proxy ──▶ Fallback: the proxy, then the origin
+///        │    └─ otherwise ───▶ Direct: the origin
 ///        └─ Transport       the transport of blob GETs, by the configuration
-///             ├─ dragonfly ───▶ the seed peers, then the origin
-///             ├─ http.proxy ──▶ the proxy, then the origin
-///             └─ neither ─────▶ the origin
+///             ├─ dragonfly ───▶ Fallback: the seed peers, then the origin
+///             ├─ http.proxy ──▶ Fallback: the proxy, then the origin
+///             └─ neither ─────▶ Direct: the origin
 /// ```
 pub(crate) struct Registry {
     /// The registry client, shared with the task of each read.
@@ -82,7 +84,7 @@ impl Registry {
 
         // Read through Dragonfly when configured, else through the proxy when
         // configured, both falling back to the origin, else from the origin.
-        let (http_client, transport): (Http, Transport) =
+        let (auth_transport, transport): (Transport, Transport) =
             match (&registry.dragonfly, &registry.http.proxy) {
                 #[cfg(feature = "dragonfly")]
                 (Some(dragonfly), _) => {
@@ -110,8 +112,14 @@ impl Registry {
                     )?;
 
                     let dragonfly = Dragonfly::new(config, dragonfly, &runtime)?;
-                    let transport = Transport::new(Box::new(dragonfly), Some(fallback_http_client));
-                    (http_client, transport)
+                    let auth_transport = Transport::Direct {
+                        fetcher: Box::new(http_client),
+                    };
+                    let transport = Transport::Fallback {
+                        fetcher: Box::new(dragonfly),
+                        fallback_http_client,
+                    };
+                    (auth_transport, transport)
                 }
                 (None, Some(proxy)) => {
                     let http_client = Http::new(
@@ -137,9 +145,15 @@ impl Registry {
                         )),
                     )?;
 
-                    let transport =
-                        Transport::new(Box::new(http_client.clone()), Some(fallback_http_client));
-                    (http_client, transport)
+                    let auth_transport = Transport::Fallback {
+                        fetcher: Box::new(http_client.clone()),
+                        fallback_http_client: fallback_http_client.clone(),
+                    };
+                    let transport = Transport::Fallback {
+                        fetcher: Box::new(http_client),
+                        fallback_http_client,
+                    };
+                    (auth_transport, transport)
                 }
                 _ => {
                     let http_client = Http::new(
@@ -152,8 +166,13 @@ impl Registry {
                         None,
                     )?;
 
-                    let transport = Transport::new(Box::new(http_client.clone()), None);
-                    (http_client, transport)
+                    let auth_transport = Transport::Direct {
+                        fetcher: Box::new(http_client.clone()),
+                    };
+                    let transport = Transport::Direct {
+                        fetcher: Box::new(http_client),
+                    };
+                    (auth_transport, transport)
                 }
             };
 
@@ -166,7 +185,7 @@ impl Registry {
                     registry.registry_token.as_ref().map(RedactedString::expose),
                 )?,
                 redirects: RedirectCache::new(),
-                http_client,
+                auth_transport,
                 transport,
             }),
             runtime,
@@ -681,6 +700,9 @@ mod tests {
             let header = match status {
                 "307 Temporary Redirect" => format!("Location: http://{host}/redirected\r\n"),
                 "401 Unauthorized" => "WWW-Authenticate: Basic realm=\"registry\"\r\n".to_string(),
+                "401 Bearer" => {
+                    format!("WWW-Authenticate: Bearer realm=\"http://{host}/token\"\r\n")
+                }
                 _ => String::new(),
             };
 
@@ -729,17 +751,23 @@ mod tests {
                 repository: "library/ubuntu".to_string(),
                 authorizer: Authorizer::new(auth, registry_token).unwrap(),
                 redirects: RedirectCache::new(),
-                http_client: Http::new(
-                    http.request_timeout,
-                    http.request_read_timeout,
-                    http.max_retries,
-                    None,
-                    &http.tls,
-                    PrefetchConfig::default().retry_interval,
-                    None,
-                )
-                .unwrap(),
-                transport: Transport::new(Box::new(transport), None),
+                auth_transport: Transport::Direct {
+                    fetcher: Box::new(
+                        Http::new(
+                            http.request_timeout,
+                            http.request_read_timeout,
+                            http.max_retries,
+                            None,
+                            &http.tls,
+                            PrefetchConfig::default().retry_interval,
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                },
+                transport: Transport::Direct {
+                    fetcher: Box::new(transport),
+                },
             }),
             runtime: Arc::new(Runtime::new(None).unwrap()),
             metrics: Arc::new(Metrics::new()),
@@ -1585,7 +1613,7 @@ mod tests {
             assert_eq!(origin.hits(), 1);
             assert_eq!(proxy.hits(), 0);
             assert_eq!(sources(), ["fallback"]);
-            assert_eq!(registry.client.http_client.source(), Source::Http);
+            assert_eq!(registry.client.auth_transport.source(), Source::Http);
         }
     }
 
@@ -1718,6 +1746,13 @@ backend:
                 None,
                 1,
             ),
+            (
+                &["503 Service Unavailable"],
+                &["200 OK"],
+                "fallback",
+                None,
+                1,
+            ),
         ];
 
         for (proxy_statuses, origin_statuses, source, expected, origin_hits) in test_cases {
@@ -1790,6 +1825,35 @@ backend:
         assert!(err.to_string().contains("502 Bad Gateway"));
         assert_eq!(proxy.hits(), 1);
         assert_eq!(failures(), ["fallback"]);
+    }
+
+    #[test]
+    fn proxied_read_fetches_the_token_from_the_origin_while_the_proxy_is_unreachable() {
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        drop(proxy);
+        let token = br#"{"token":"abc"}"#.to_vec();
+        let origin = OriginStub::serve(
+            &["401 Bearer", "200 OK", "206 Partial Content"],
+            token.clone(),
+        );
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      proxy:\n        addr: http://{proxy_addr}\n    fallback:\n      rate_limit: 100\n",
+            origin.addr
+        ))
+        .unwrap();
+        let registry = configured_registry(&config, None);
+
+        let mut buf = [0u8; 4];
+        registry
+            .get(&TEST_BLOB_ID, 0, buf.len())
+            .unwrap()
+            .read_exact(&mut buf)
+            .unwrap();
+
+        assert_eq!(buf, token[..4]);
+        assert_eq!(origin.hits(), 3);
+        assert!(origin.requests.lock().unwrap()[2].contains("authorization: Bearer abc"));
     }
 
     #[test]

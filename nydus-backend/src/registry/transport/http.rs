@@ -7,13 +7,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
-use http::Extensions;
-use leaky_bucket::RateLimiter;
 use rand::Rng;
 use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
-use reqwest::{Certificate, Client, Request};
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
+use reqwest::{Certificate, Client};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tracing::{debug, warn};
 
@@ -23,6 +21,7 @@ use crate::Source;
 
 use crate::registry::response::Response;
 
+use super::middleware::{CircuitBreaker, RateLimit};
 use super::Fetcher;
 
 /// The HTTP client of the origin registry.
@@ -35,9 +34,13 @@ use super::Fetcher;
 ///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more after the retry interval ─▶ error
 ///                         └─ transport failure ───────────────────────────▶ error
 /// ```
+///
+/// A proxy that fails to connect is never tried again at once, see
+/// [`CircuitBreaker`].
 #[derive(Clone)]
 pub(crate) struct Http {
-    /// The reqwest client behind the retry and rate limit middleware.
+    /// The reqwest client behind the retry, rate limit and circuit breaker
+    /// middleware.
     client: ClientWithMiddleware,
 
     /// The random wait before a prefetch read is sent once more.
@@ -102,6 +105,10 @@ impl Http {
 
         if let Some(rate_limit) = rate_limit {
             client = client.with(rate_limit);
+        }
+
+        if let Some(proxy) = proxy {
+            client = client.with(CircuitBreaker::new(&proxy.addr));
         }
 
         Ok(Self {
@@ -190,44 +197,6 @@ impl Fetcher for Http {
     }
 }
 
-/// A fair leaky bucket of one slot per attempt, inside the retry middleware.
-pub(crate) struct RateLimit {
-    /// The request rate limiter.
-    limiter: RateLimiter,
-}
-
-/// Implements the rate limit.
-impl RateLimit {
-    /// Creates a limit of `request_rate_limit` requests per `interval`, both
-    /// at least one.
-    pub(crate) fn new(request_rate_limit: u64, interval: Duration) -> Self {
-        Self {
-            limiter: RateLimiter::builder()
-                .initial(request_rate_limit as usize)
-                .refill(request_rate_limit as usize)
-                .max(request_rate_limit as usize)
-                .interval(interval)
-                .fair(true)
-                .build(),
-        }
-    }
-}
-
-/// Implements the rate limit as a reqwest middleware.
-#[async_trait]
-impl Middleware for RateLimit {
-    /// Claims a slot, then runs the request.
-    async fn handle(
-        &self,
-        req: Request,
-        extensions: &mut Extensions,
-        next: Next<'_>,
-    ) -> reqwest_middleware::Result<reqwest::Response> {
-        self.limiter.acquire_one().await;
-        next.run(req, extensions).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,17 +257,6 @@ mod tests {
             Some(RateLimit::new(10, Duration::from_secs(1))),
         )
         .is_ok());
-    }
-
-    #[cfg(feature = "dragonfly")]
-    #[test]
-    fn new_fills_a_fair_bucket_to_the_limit() {
-        let limit = RateLimit::new(10, Duration::from_millis(100));
-        assert_eq!(limit.limiter.max(), 10);
-        assert_eq!(limit.limiter.refill(), 10);
-        assert_eq!(limit.limiter.balance(), 10);
-        assert_eq!(limit.limiter.interval(), Duration::from_millis(100));
-        assert!(limit.limiter.is_fair());
     }
 
     async fn start_https_server(cert: CertifiedKey) -> String {

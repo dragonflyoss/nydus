@@ -16,7 +16,7 @@ use super::auth::{Authorizer, Challenge};
 use super::range::Range;
 use super::redirect::RedirectCache;
 use super::response::Response;
-use super::transport::{Fetcher, Http, Transport};
+use super::transport::{Fetcher, Transport};
 
 /// The client of one repository on one registry.
 ///
@@ -62,9 +62,9 @@ pub(crate) struct Client {
     /// The signed URLs blob `GET`s were redirected to, by blob hex digest.
     pub(crate) redirects: RedirectCache,
 
-    /// The client of the origin, through `http.proxy` when configured, for
-    /// token fetches.
-    pub(crate) http_client: Http,
+    /// The transport of token fetches, never Dragonfly: `http.proxy` when
+    /// configured, falling back to the origin, or the origin.
+    pub(crate) auth_transport: Transport,
 
     /// The transport of blob `GET`s: the Dragonfly seed peers or `http.proxy`
     /// when configured, falling back to the origin, or the origin.
@@ -121,7 +121,7 @@ impl Client {
         };
 
         self.authorizer
-            .authenticate(&self.http_client, challenge)
+            .authenticate(&self.auth_transport, challenge)
             .await?;
         self.authorizer.authorize(&mut headers);
         request(headers).await
@@ -136,7 +136,10 @@ impl Client {
         range: &Range,
     ) -> io::Result<Response> {
         let response = self.get_from(&self.transport, blob_id, range).await?;
-        if response.fallback.load(Ordering::Relaxed) || !response.status.is_success() {
+        if response.fallback.load(Ordering::Relaxed)
+            || !response.status.is_success()
+            || matches!(self.transport, Transport::Direct { .. })
+        {
             return Ok(response);
         }
 
