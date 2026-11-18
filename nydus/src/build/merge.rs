@@ -2146,14 +2146,15 @@ mod tests {
         path
     }
 
-    /// Lcluster indexes of a COMPRESSED_FULL tail as (type, blkaddr) pairs;
-    /// NONHEAD entries report `None`.
-    fn lcluster_addrs(tail: &[u8]) -> Vec<Option<u32>> {
+    /// The block address of every lcluster index of a file of `size` bytes,
+    /// `None` for indexes that address no data (NONHEAD and EOF indexes).
+    fn lcluster_addrs(tail: &[u8], size: u64) -> Vec<Option<u32>> {
         tail[Z_EROFS_MAP_HEADER_SIZE + 8..]
             .chunks_exact(8)
-            .map(|index| {
-                let advise = u16::from_le_bytes([index[0], index[1]]);
-                (advise & 0x3 != 2).then(|| u32::from_le_bytes(index[4..8].try_into().unwrap()))
+            .enumerate()
+            .map(|(i, index)| {
+                let index = nydus_format::erofs::ZErofsLclusterIndex::from_bytes(index).unwrap();
+                index.addresses_data(i, size).then_some(index.blkaddr())
             })
             .collect()
     }
@@ -2301,8 +2302,14 @@ mod tests {
         ] {
             let (size, tail) = lookup(name);
             assert_eq!(size, 100_000);
-            let addrs = lcluster_addrs(&tail);
+            let addrs = lcluster_addrs(&tail, size);
             assert_eq!(addrs.len(), 25);
+            // An EOF index survives the merge with its block address 0.
+            let last = &tail[tail.len() - 8..];
+            if u16::from_le_bytes([last[2], last[3]]) != 0 {
+                assert_eq!(addrs[24], None);
+                assert_eq!(&last[4..8], &[0; 4]);
+            }
             for addr in addrs.into_iter().flatten() {
                 let addr = addr as u64;
                 assert!(
@@ -2334,7 +2341,7 @@ mod tests {
         let packed = reader.inode(packed_nid).unwrap();
         assert_eq!(packed.size(), layer_packed_sizes.iter().sum::<u64>());
         let packed_tail = reader.read_z_inode_tail(packed_nid, &packed).unwrap();
-        let packed_addrs = lcluster_addrs(packed_tail);
+        let packed_addrs = lcluster_addrs(packed_tail, packed.size());
         assert_eq!(
             packed_addrs.len(),
             (packed.size() / EROFS_BLOCK_SIZE as u64) as usize

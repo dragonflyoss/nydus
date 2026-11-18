@@ -28,11 +28,13 @@ pub struct Startup {
 }
 
 impl Startup {
-    /// Resolves mountpoint aliases and validates paths for startup coordination.
+    /// Resolves mountpoint aliases and validates paths for startup coordination
+    /// under `runtime_dir`.
     ///
     /// An API endpoint requires an image digest for handoff.
     pub fn new(
         mountpoint: &Path,
+        runtime_dir: &Path,
         api_socket: Option<PathBuf>,
         image_digest: Option<&[u8]>,
         metrics: Arc<Metrics>,
@@ -45,7 +47,7 @@ impl Startup {
                 "mountpoint must be valid UTF-8 for FUSE session continuity".into(),
             )
         })?;
-        let state_base = ownership_state_base(&mountpoint)?;
+        let state_base = ownership_state_base(runtime_dir, &mountpoint)?;
         startup::validate_socket_paths(api_socket.as_deref(), None, Some(&mountpoint))?;
         let info = InstanceInfo::new(mountpoint_id, image_digest);
         if api_socket.is_some() {
@@ -267,11 +269,11 @@ fn resolve_directory_path(path: &Path) -> Result<PathBuf> {
     })
 }
 
-fn ownership_state_base(mountpoint: &Path) -> Result<PathBuf> {
+fn ownership_state_base(runtime_dir: &Path, mountpoint: &Path) -> Result<PathBuf> {
     let resource = mountpoint.to_str().ok_or_else(|| {
         Error::InvalidParameter("mountpoint must be valid UTF-8 for FUSE session continuity".into())
     })?;
-    let base = crate::continuity::ownership::state_base("fuse", resource)?;
+    let base = crate::continuity::ownership::state_base(runtime_dir, "fuse", resource)?;
     if base
         .parent()
         .is_some_and(|directory| directory.starts_with(mountpoint))
@@ -289,21 +291,31 @@ mod tests {
     use crate::continuity::ownership::prepare_state_directory;
     use crate::continuity::test_support::{metrics, ondemand};
     use crate::fuse::upgrade::test_support::empty_filesystem;
+    use nydus_config::default_runtime_dir;
 
     #[test]
     fn startup_validates_mountpoint_and_api_paths() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent");
         assert_eq!(
-            Startup::new(&absent, None, None, metrics(), ondemand(), None)
-                .unwrap()
-                .mountpoint,
+            Startup::new(
+                &absent,
+                &default_runtime_dir(),
+                None,
+                None,
+                metrics(),
+                ondemand(),
+                None
+            )
+            .unwrap()
+            .mountpoint,
             absent
         );
         assert!(normalize_mountpoint(&dir.path().join("../other")).is_err());
         for mountpoint in ["/", "/run", "/run/nydus", "/run/nydus/fuse"] {
             assert!(Startup::new(
                 Path::new(mountpoint),
+                &default_runtime_dir(),
                 None,
                 None,
                 metrics(),
@@ -314,6 +326,7 @@ mod tests {
         }
         assert!(Startup::new(
             dir.path(),
+            &default_runtime_dir(),
             Some(dir.path().join("api.sock")),
             Some(&[0; 32]),
             metrics(),
@@ -334,6 +347,7 @@ mod tests {
         for api in [None, Some(dir.path().join("missing-api.sock"))] {
             let mut startup = Startup::new(
                 &dir.path().join("absent"),
+                &default_runtime_dir(),
                 api,
                 Some(&[0; 32]),
                 metrics(),

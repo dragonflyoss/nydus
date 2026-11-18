@@ -121,8 +121,14 @@ func TestPack(t *testing.T) {
 				}
 
 				cancel()
-				_, err = writer.Write([]byte("x"))
-				assert.Error(err)
+				var writeErr error
+				for range 64 {
+					if _, writeErr = writer.Write(make([]byte, 1<<20)); writeErr != nil {
+						break
+					}
+				}
+
+				assert.Error(writeErr)
 				assert.Error(writer.Close())
 			},
 		},

@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -19,10 +19,11 @@ use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobM
 use nydus_format::erofs::{
     ErofsChunkAddr, ErofsDeviceSlot, ErofsInode, ErofsInodeExtended, ErofsSuperblock, XattrEntry,
     ZErofsComprCfgs, ZErofsCompressor, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE,
-    EROFS_INODE_COMPRESSED_FULL, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
-    EROFS_XATTR_INDEX_USER, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG,
-    Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-    Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_MAP_HEADER_SIZE,
+    EROFS_INODE_COMPRESSED_FULL, EROFS_INODE_FLAT_INLINE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE,
+    EROFS_SUPER_OFFSET, EROFS_XATTR_INDEX_USER, Z_EROFS_ADVISE_FRAGMENT_PCLUSTER,
+    Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_HEAD1,
+    Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT,
+    Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::sha256_reader;
 use nydus_telemetry::metrics::Metrics;
@@ -34,12 +35,10 @@ struct CountingBackend {
     fail_next: AtomicBool,
 }
 
-#[test]
-fn flat_inline_streaming_crosses_the_block_tail_boundary_and_propagates_write_errors() {
+fn build_flat_inline_reader() -> (TempDir, ErofsReader) {
     let dir = tempdir().unwrap();
     let source = dir.path().join("source");
     fs::create_dir(&source).unwrap();
-    // The builder emits flat-inline data for directories, including a block-backed prefix.
     for index in 0..300 {
         fs::write(source.join(format!("entry-{index:04}")), []).unwrap();
     }
@@ -59,17 +58,45 @@ fn flat_inline_streaming_crosses_the_block_tail_boundary_and_propagates_write_er
     let bootstrap = dir.path().join("image.boot");
     fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
     let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let inode = reader.inode(reader.superblock().root_nid()).unwrap();
+    assert_eq!(inode.data_layout(), EROFS_INODE_FLAT_INLINE);
+    assert!(inode.size() >= EROFS_BLOCK_SIZE as u64);
+    assert!(inode.size() % EROFS_BLOCK_SIZE as u64 > 32);
+    (dir, reader)
+}
+
+struct FailingWriter {
+    writes_left: usize,
+    output: Vec<u8>,
+}
+
+impl Write for FailingWriter {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.writes_left == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected sink failure",
+            ));
+        }
+        self.writes_left -= 1;
+        self.output.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn write_file_data_to_streams_flat_inline_data_across_the_block_tail_boundary() {
+    let (_dir, reader) = build_flat_inline_reader();
     let nid = reader.superblock().root_nid();
     let inode = reader.inode(nid).unwrap();
-    assert_eq!(
-        inode.data_layout(),
-        nydus_format::erofs::EROFS_INODE_FLAT_INLINE
-    );
     let size = inode.size() as usize;
     let boundary = size / EROFS_BLOCK_SIZE as usize * EROFS_BLOCK_SIZE as usize;
-    assert!(boundary > 0 && size > boundary + 32);
     let expected = reader.read_file_data(nid, &inode, 0, size as u32).unwrap();
-    for (offset, requested) in [
+    let test_cases = vec![
         (0, size),
         (boundary - 23, 55),
         (boundary - 23, 23),
@@ -77,53 +104,49 @@ fn flat_inline_streaming_crosses_the_block_tail_boundary_and_propagates_write_er
         (boundary + 7, size),
         (size, 1),
         (0, 0),
-    ] {
+    ];
+
+    for (offset, len) in test_cases {
         let mut output = Vec::new();
         let written = reader
-            .write_file_data_to(nid, &inode, offset as u64, requested as u32, &mut output)
+            .write_file_data_to(nid, &inode, offset as u64, len as u32, &mut output)
             .unwrap();
-        let end = (offset + requested).min(size);
+
         assert_eq!(
             output,
-            expected[offset..end],
-            "offset={offset} size={requested}"
+            expected[offset..(offset + len).min(size)],
+            "{offset} {len}"
         );
-        assert_eq!(written, output.len());
+        assert_eq!(written, output.len(), "{offset} {len}");
     }
+}
 
-    struct FailWriter {
-        writes_left: usize,
-        output: Vec<u8>,
-    }
-    impl Write for FailWriter {
-        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-            if self.writes_left == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "injected sink failure",
-                ));
-            }
-            self.writes_left -= 1;
-            self.output.extend_from_slice(data);
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    for writes_left in [0, 1] {
-        let mut sink = FailWriter {
+#[test]
+fn write_file_data_to_propagates_sink_errors_after_partial_writes() {
+    let (_dir, reader) = build_flat_inline_reader();
+    let nid = reader.superblock().root_nid();
+    let inode = reader.inode(nid).unwrap();
+    let size = inode.size() as usize;
+    let boundary = size / EROFS_BLOCK_SIZE as usize * EROFS_BLOCK_SIZE as usize;
+    let expected = reader.read_file_data(nid, &inode, 0, size as u32).unwrap();
+    let test_cases = vec![(0, 0), (1, 23)];
+
+    for (writes_left, written) in test_cases {
+        let mut sink = FailingWriter {
             writes_left,
             output: Vec::new(),
         };
-        let error = reader
+
+        let err = reader
             .write_file_data_to(nid, &inode, (boundary - 23) as u64, 55, &mut sink)
             .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
-        assert_eq!(error.to_string(), "injected sink failure");
+
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(err.to_string(), "injected sink failure");
         assert_eq!(
             sink.output,
-            expected[boundary - 23..boundary - 23 + writes_left * 23]
+            expected[boundary - 23..boundary - 23 + written],
+            "{writes_left}"
         );
     }
 }
@@ -192,6 +215,86 @@ fn read_z_fixture_range(
     let written = reader.write_file_data_to(nid, &inode, offset, size, &mut output)?;
     assert_eq!(written, output.len());
     Ok(output)
+}
+
+#[test]
+fn z_reader_reads_the_last_extent_with_or_without_an_eof_index() {
+    let index = |kind: u16, clusterofs: u16, word: u32| {
+        let mut e = kind.to_le_bytes().to_vec();
+        e.extend_from_slice(&clusterofs.to_le_bytes());
+        e.extend_from_slice(&word.to_le_bytes());
+        e
+    };
+    for algorithm in [ZErofsCompressor::Lz4, ZErofsCompressor::Zstd] {
+        let (dir, mut bootstrap) = build_z_reader_fixture(algorithm);
+        let reader = ErofsReader::open_metadata_only(&dir.path().join("bootstrap")).unwrap();
+        let nid = z_fixture_nid(&reader, b"large");
+        let inode = reader.inode(nid).unwrap();
+        let size = inode.size();
+        assert_eq!(size, 73 * 4096 + 700);
+        let tail = reader.read_z_inode_tail(nid, &inode).unwrap();
+        let entry = |i: usize| {
+            tail[Z_EROFS_MAP_HEADER_SIZE + 8 + i * Z_EROFS_LCLUSTER_INDEX_SIZE..]
+                [..Z_EROFS_LCLUSTER_INDEX_SIZE]
+                .to_vec()
+        };
+        // The compressed last pcluster ends 700 bytes into lcluster 73.
+        assert_eq!(entry(73), index(Z_EROFS_LCLUSTER_TYPE_PLAIN, 700, 0));
+        let head = (0..73)
+            .rev()
+            .find(|&i| {
+                u16::from_le_bytes([entry(i)[0], entry(i)[1]]) & 3 != Z_EROFS_LCLUSTER_TYPE_NONHEAD
+            })
+            .unwrap();
+        assert_eq!(
+            u16::from_le_bytes([entry(head)[0], entry(head)[1]]),
+            Z_EROFS_LCLUSTER_TYPE_HEAD1
+        );
+
+        let ranges = [
+            (0, size),
+            (73 * 4096 - 10, 710),
+            (73 * 4096, 700),
+            (73 * 4096 + 100, 600),
+            (size - 1, 1),
+        ];
+        let check = |bootstrap: &[u8]| {
+            for (offset, len) in ranges {
+                assert_eq!(
+                    read_z_fixture_range(&dir, bootstrap, nid, offset, len as u32).unwrap(),
+                    vec![51; len as usize],
+                    "range {offset}+{len}"
+                );
+            }
+        };
+        check(&bootstrap);
+
+        // Builders before the EOF index spanned the last pcluster over
+        // lcluster 73 as a NONHEAD and wrote each NONHEAD's delta1 one
+        // short (0 on the last); such images still read back.
+        let delta0 = if 73 - head == 1 {
+            Z_EROFS_LI_D0_CBLKCNT | 1
+        } else {
+            (73 - head) as u16
+        };
+        let index_at = |lcn: usize| {
+            z_fixture_tail_offset(&reader, nid)
+                + Z_EROFS_MAP_HEADER_SIZE
+                + 8
+                + lcn * Z_EROFS_LCLUSTER_INDEX_SIZE
+        };
+        let at = index_at(73);
+        bootstrap[at..at + Z_EROFS_LCLUSTER_INDEX_SIZE].copy_from_slice(&index(
+            Z_EROFS_LCLUSTER_TYPE_NONHEAD,
+            0,
+            u32::from(delta0),
+        ));
+        for lcn in head + 1..73 {
+            let at = index_at(lcn) + 6;
+            bootstrap[at..at + 2].copy_from_slice(&((73 - lcn) as u16).to_le_bytes());
+        }
+        check(&bootstrap);
+    }
 }
 
 #[test]
@@ -283,12 +386,6 @@ fn z_reader_rejects_malformed_indexes_and_packed_nids() {
                 index_offset + 12,
                 2u16.to_le_bytes().to_vec(),
                 4096,
-            ),
-            (
-                "tail past indexes",
-                index_offset + 14,
-                u16::MAX.to_le_bytes().to_vec(),
-                0,
             ),
             (
                 "missing CBLKCNT",
@@ -482,12 +579,15 @@ fn z_reader_validates_tail_fragments_and_packed_recursion() {
                 if kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
                     let delta1 =
                         u16::from_le_bytes(bytes[entry + 6..entry + 8].try_into().unwrap());
-                    let distance = usize::from(delta1).min(last_cluster - cluster - 1) as u16;
+                    let distance = usize::from(delta1).min(last_cluster - cluster) as u16;
                     bytes[entry + 6..entry + 8].copy_from_slice(&distance.to_le_bytes());
                 }
             }
             bytes[tail_index..tail_index + 2]
                 .copy_from_slice(&Z_EROFS_LCLUSTER_TYPE_HEAD1.to_le_bytes());
+            // The fixture closes its last pcluster with an EOF index; the
+            // tail fragment head starts on its lcluster instead.
+            bytes[tail_index + 2..tail_index + 4].copy_from_slice(&0u16.to_le_bytes());
             bytes[tail_index + 4..tail_index + 8]
                 .copy_from_slice(&((fragment_offset >> 32) as u32).to_le_bytes());
             bytes
@@ -702,20 +802,25 @@ impl Backend for CountingBackend {
         self.local.metrics()
     }
 
-    fn read_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
-        self.local.read_blob_metadata(blob_id)
+    fn get_blob_metadata(&self, blob_id: &[u8; 32]) -> io::Result<BlobMetadata> {
+        self.local.get_blob_metadata(blob_id)
     }
 
     fn is_raw_device(&self, blob_id: &[u8; 32]) -> io::Result<bool> {
         self.local.is_raw_device(blob_id)
     }
 
-    fn read_range_into(&self, blob_id: &[u8; 32], offset: u64, dst: &mut [u8]) -> io::Result<()> {
+    fn get(
+        &self,
+        blob_id: &[u8; 32],
+        offset: u64,
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         if self.fail_next.swap(false, Ordering::Relaxed) {
             return Err(io::Error::other("injected read failure"));
         }
-        self.local.read_range_into(blob_id, offset, dst)
+        self.local.get(blob_id, offset, len)
     }
 }
 

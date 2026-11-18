@@ -5,7 +5,7 @@
 //! when its data region starts at offset zero; streamed blobs remain
 //! unsupported by the cache-file interface.
 
-use std::io;
+use std::io::{self, Read};
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
@@ -49,7 +49,9 @@ impl BlobCache for RawDeviceBlobCache {
         if dst.is_empty() {
             return Ok(());
         }
-        self.backend.read_range_into(&self.blob_id, offset, dst)
+        self.backend
+            .get(&self.blob_id, offset, dst.len())?
+            .read_exact(dst)
     }
 
     /// A raw device holds no chunk groups to warm.
@@ -105,6 +107,7 @@ mod tests {
     use nydus_format::blob::BlobMetadata;
     use nydus_telemetry::metrics::Metrics;
     use nydus_test_utils::blob::FullBlob;
+    use std::io::BufRead;
     use tempfile::tempdir;
 
     fn write_raw_device_blob(dir: &std::path::Path) -> (Vec<u8>, [u8; SHA256_DIGEST_SIZE]) {
@@ -122,7 +125,7 @@ mod tests {
             Arc::new(Metrics::new()),
         ));
         assert!(backend.is_raw_device(&blob_id).unwrap());
-        assert!(backend.read_blob_metadata(&blob_id).is_err());
+        assert!(backend.get_blob_metadata(&blob_id).is_err());
 
         let cache = RawDeviceBlobCache::new(blob_id, backend);
         let mut out = vec![0u8; 100];
@@ -176,20 +179,20 @@ mod tests {
             self.0.metrics()
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
         ) -> io::Result<BlobMetadata> {
-            self.0.read_blob_metadata(blob_id)
+            self.0.get_blob_metadata(blob_id)
         }
 
-        fn read_range_into(
+        fn get(
             &self,
             blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
-            dst: &mut [u8],
-        ) -> io::Result<()> {
-            self.0.read_range_into(blob_id, offset, dst)
+            len: usize,
+        ) -> io::Result<Box<dyn BufRead + Send>> {
+            self.0.get(blob_id, offset, len)
         }
     }
 

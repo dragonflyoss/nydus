@@ -1,5 +1,9 @@
+#![allow(clippy::type_complexity)]
+
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -13,6 +17,7 @@ use nydus_format::erofs::{
     ErofsChunkAddr, ErofsChunkIndex, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_NULL_ADDR,
     EROFS_SLOTSIZE,
 };
+use tempfile::tempdir;
 
 const DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE: u32 = BlobMetadata::DEFAULT_CHUNK_SIZE;
 
@@ -84,7 +89,7 @@ fn incremental_writer_options_match_build_defaults() {
 }
 
 fn local_config(blob_dir: &Path, cache_dir: &Path) -> Config {
-    Config::from_yaml(&format!(
+    serde_yaml::from_str::<Config>(&format!(
         "backend:\n  type: local\n  config:\n    dir: {}\nstorage:\n  dir: {}\nprefetch:\n  scope: none\n",
         blob_dir.display(),
         cache_dir.display(),
@@ -118,6 +123,13 @@ fn open_data_writer(
     let core = NydusCore::new(parent_bootstrap, config, None).unwrap();
     let writer = core.writer(writer_options(output_dir.clone())).unwrap();
     (writer, output_dir)
+}
+
+fn file_names(dir: &Path) -> HashSet<OsString> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect()
 }
 
 fn assert_no_temporary_blob(output_dir: &Path) {
@@ -570,16 +582,17 @@ fn incremental_writer_create_file_rejects_invalid_paths() {
 
 #[test]
 fn incremental_writer_failed_commit_cleans_temporary_blob() {
-    let temp = tempfile::tempdir().unwrap();
+    let dir = tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
     let parent_data = vec![b'P'; chunk_size * 2];
-    let (parent_bootstrap, parent_digest) = build_parent_blob(&temp, &parent_data);
-    let bootstrap_before = fs::read(&parent_bootstrap).unwrap();
-    let parent_blob = temp.path().join(hex::encode(parent_digest));
-    let blob_before = fs::read(&parent_blob).unwrap();
-    let (mut writer, output_dir) = open_metadata_writer(&temp, &parent_bootstrap);
-    let source_path = temp.path().join("short-commit-source");
-    // Fail after the first chunk has already been materialized.
+    let (parent_bootstrap, parent_digest) = build_parent_blob(&dir, &parent_data);
+    let parent_blob = dir.path().join(hex::encode(parent_digest));
+    let parent_before = (
+        fs::read(&parent_bootstrap).unwrap(),
+        fs::read(&parent_blob).unwrap(),
+    );
+    let (mut writer, output_dir) = open_metadata_writer(&dir, &parent_bootstrap);
+    let source_path = dir.path().join("short-commit-source");
     fs::write(&source_path, vec![b'S'; chunk_size + 5]).unwrap();
     let source = Arc::new(fs::File::open(source_path).unwrap());
     writer
@@ -591,28 +604,21 @@ fn incremental_writer_failed_commit_cleans_temporary_blob() {
             parent_data.len() as u64,
         )
         .unwrap();
-    let entries_before: HashSet<_> = fs::read_dir(&output_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
+    let entries = file_names(&output_dir);
 
-    assert!(writer
-        .commit()
-        .unwrap_err()
+    let err = writer.commit().unwrap_err();
+
+    assert!(err
         .to_string()
         .contains("short read from source file range"));
     assert_no_temporary_blob(&output_dir);
-    let entries_after: HashSet<_> = fs::read_dir(&output_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    assert_eq!(entries_after, entries_before);
+    assert_eq!(file_names(&output_dir), entries);
     assert!(!output_dir.join("image.boot").exists());
-    assert_eq!(fs::read(&parent_bootstrap).unwrap(), bootstrap_before);
-    assert_eq!(fs::read(&parent_blob).unwrap(), blob_before);
+    assert_eq!(fs::read(&parent_bootstrap).unwrap(), parent_before.0);
+    assert_eq!(fs::read(&parent_blob).unwrap(), parent_before.1);
     let core = NydusCore::new(
         &parent_bootstrap,
-        local_config(temp.path(), &temp.path().join("cache")),
+        local_config(dir.path(), &dir.path().join("cache")),
         None,
     )
     .unwrap();
@@ -624,11 +630,11 @@ fn incremental_writer_failed_commit_cleans_temporary_blob() {
 
 #[test]
 fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
-    let temp = tempfile::tempdir().unwrap();
+    let dir = tempdir().unwrap();
     let parent_data = vec![b'P'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
     let replacement = vec![b'U'; parent_data.len()];
-    let (parent_bootstrap, parent_digest) = build_parent_blob(&temp, &parent_data);
-    let parent_blob = temp.path().join(hex::encode(parent_digest));
+    let (parent_bootstrap, parent_digest) = build_parent_blob(&dir, &parent_data);
+    let parent_blob = dir.path().join(hex::encode(parent_digest));
     let parent_before = (
         fs::read(&parent_bootstrap).unwrap(),
         fs::read(&parent_blob).unwrap(),
@@ -644,94 +650,85 @@ fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
             .unwrap();
         writer
     };
-    let reference = temp.path().join("reference");
+    let reference = dir.path().join("reference");
     let image = commit_upper_blob(&reference, stage(&reference));
     let blob = image.blob_path.unwrap();
     let sidecar = image.blob_metadata_path.unwrap();
-
-    for (name, obstruction, context, has_blob, has_sidecar, errno) in [
+    let test_cases = vec![
         (
-            "rename",
             blob.file_name().unwrap(),
-            "failed to rename blob",
-            false,
-            false,
             libc::EISDIR,
+            Some("failed to rename blob"),
+            vec![],
         ),
         (
-            "sidecar",
             sidecar.file_name().unwrap(),
-            "",
-            true,
-            false,
             libc::EISDIR,
+            None,
+            vec![&blob],
         ),
         (
-            "bootstrap",
-            std::ffi::OsStr::new("image.boot"),
-            "failed to publish bootstrap",
-            true,
-            true,
-            libc::EISDIR,
-        ),
-        (
-            "sidecar-full",
             sidecar.file_name().unwrap(),
-            "",
-            true,
-            false,
             libc::ENOSPC,
+            None,
+            vec![&blob],
         ),
-    ] {
-        let output = temp.path().join(name);
-        fs::create_dir(&output).unwrap();
-        let obstruction = output.join(obstruction);
+        (
+            OsStr::new("image.boot"),
+            libc::EISDIR,
+            Some("failed to publish bootstrap"),
+            vec![&blob, &sidecar],
+        ),
+    ];
+
+    for (obstruction, errno, context, published) in test_cases {
+        let output = tempdir().unwrap();
+        let obstruction = output.path().join(obstruction);
         if errno == libc::EISDIR {
             fs::create_dir(&obstruction).unwrap();
         } else {
-            std::os::unix::fs::symlink("/dev/full", &obstruction).unwrap();
+            symlink("/dev/full", &obstruction).unwrap();
         }
-        let error = stage(&output).commit().unwrap_err();
-        if !context.is_empty() {
-            assert!(error.to_string().contains(context), "{name}: {error}");
+
+        let err = stage(output.path()).commit().unwrap_err();
+
+        if let Some(context) = context {
+            assert!(err.to_string().contains(context), "{err}");
         }
-        assert_eq!(
-            error.io_error().unwrap().raw_os_error(),
-            Some(errno),
-            "{name}"
-        );
-        assert_no_temporary_blob(&output);
-        assert!(!output.join("image.boot").is_file(), "{name}");
-        assert_eq!(output.join(blob.file_name().unwrap()).is_file(), has_blob);
-        assert_eq!(
-            output.join(sidecar.file_name().unwrap()).is_file(),
-            has_sidecar
-        );
-        if has_blob {
-            assert_eq!(
-                fs::read(output.join(blob.file_name().unwrap())).unwrap(),
-                fs::read(&blob).unwrap()
-            );
-        }
-        if has_sidecar {
-            assert_eq!(
-                fs::read(output.join(sidecar.file_name().unwrap())).unwrap(),
-                fs::read(&sidecar).unwrap()
-            );
+        assert_eq!(err.io_error().unwrap().raw_os_error(), Some(errno), "{err}");
+        assert_no_temporary_blob(output.path());
+        assert!(!output.path().join("image.boot").is_file(), "{err}");
+        for artifact in [&blob, &sidecar] {
+            let path = output.path().join(artifact.file_name().unwrap());
+            if published.contains(&artifact) {
+                assert_eq!(
+                    fs::read(path).unwrap(),
+                    fs::read(artifact).unwrap(),
+                    "{err}"
+                );
+            } else {
+                assert!(!path.is_file(), "{err}");
+            }
         }
         assert_eq!(fs::read(&parent_bootstrap).unwrap(), parent_before.0);
         assert_eq!(fs::read(&parent_blob).unwrap(), parent_before.1);
+
         if errno == libc::EISDIR {
-            fs::remove_dir(obstruction).unwrap();
+            fs::remove_dir(&obstruction).unwrap();
         } else {
-            fs::remove_file(obstruction).unwrap();
+            fs::remove_file(&obstruction).unwrap();
         }
-        stage(&output).commit().unwrap();
-        assert_no_temporary_blob(&output);
-        fs::copy(&parent_blob, output.join(parent_blob.file_name().unwrap())).unwrap();
+        stage(output.path()).commit().unwrap();
+
+        assert_no_temporary_blob(output.path());
+        fs::copy(
+            &parent_blob,
+            output.path().join(parent_blob.file_name().unwrap()),
+        )
+        .unwrap();
         let core = NydusCore::new(
-            &output.join("image.boot"),
-            local_config(&output, &output.join("cache")),
+            &output.path().join("image.boot"),
+            local_config(output.path(), &output.path().join("cache")),
             None,
         )
         .unwrap();
@@ -740,9 +737,10 @@ fn incremental_writer_finalization_failures_allow_a_fresh_retry() {
             replacement
         );
     }
+
     let parent = NydusCore::new(
         &parent_bootstrap,
-        local_config(temp.path(), &temp.path().join("parent-cache")),
+        local_config(dir.path(), &dir.path().join("parent-cache")),
         None,
     )
     .unwrap();
@@ -1321,125 +1319,160 @@ fn incremental_writer_open_file_reuses_resolved_inode_for_writes() {
 
 #[test]
 fn incremental_writer_rejects_empty_commit() {
-    let temp = tempfile::tempdir().unwrap();
-    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
-    let parent_data = vec![b'A'; chunk_size];
-    let (parent_bootstrap, _parent_digest) = build_parent_blob(&temp, &parent_data);
-    for parentless in [false, true] {
-        let output_dir = temp.path().join(format!("empty-output-{parentless}"));
+    let dir = tempdir().unwrap();
+    let parent_data = vec![b'A'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
+    let (parent_bootstrap, _) = build_parent_blob(&dir, &parent_data);
+    let test_cases = vec![false, true];
+
+    for parentless in test_cases {
+        let output_dir = dir.path().join(format!("empty-output-{parentless}"));
         let options = writer_options(output_dir.clone());
-        let mut writer = if parentless {
+        let writer = if parentless {
             IncrementalWriter::create(options).unwrap()
         } else {
             IncrementalWriter::open_metadata_only(&parent_bootstrap, options).unwrap()
         };
-        let mut memory = [b'X'];
-        let ptr = NonNull::new(memory.as_mut_ptr()).unwrap();
-        if !parentless {
-            let source =
-                Arc::new(fs::File::open(temp.path().join("source-parent/memory.bin")).unwrap());
-            for (offset, len) in [(0, 0), (chunk_size as u64, 1), (u64::MAX, 1)] {
-                let path = Path::new("memory.bin");
-                assert_eq!(writer.write_at(path, offset, &memory[..len]).unwrap(), 0);
-                assert_eq!(
-                    writer
-                        .write_at_owned(path, offset, memory[..len].to_vec())
-                        .unwrap(),
-                    0
-                );
-                assert_eq!(
-                    writer
-                        .write_file_range(path, offset, source.clone(), 0, len as u64)
-                        .unwrap(),
-                    0
-                );
-                // The allocation stays alive and unchanged through commit.
-                assert_eq!(
-                    unsafe { writer.write_memory_range(path, offset, ptr, len) }.unwrap(),
-                    0
-                );
-            }
-        }
 
-        assert!(writer
-            .commit()
-            .unwrap_err()
-            .to_string()
-            .contains("no changes"));
-        assert!(!output_dir.exists());
+        let err = writer.commit().unwrap_err();
+
+        assert!(err.to_string().contains("no changes"), "{parentless}");
+        assert!(!output_dir.exists(), "{parentless}");
     }
 }
 
 #[test]
-fn incremental_writer_commits_empty_file_changes_without_upper_blob() {
-    let temp = tempfile::tempdir().unwrap();
-    let parent_data = vec![b'P'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
-    let (parent_bootstrap, parent_digest) = build_parent_blob(&temp, &parent_data);
+fn incremental_writer_ignores_empty_and_out_of_bounds_writes() {
+    let dir = tempdir().unwrap();
+    let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as u64;
+    let (parent_bootstrap, _) = build_parent_blob(&dir, &vec![b'A'; chunk_size as usize]);
+    let source = Arc::new(fs::File::open(dir.path().join("source-parent/memory.bin")).unwrap());
+    let mut memory = [b'X'];
+    let ptr = NonNull::new(memory.as_mut_ptr()).unwrap();
+    let output_dir = dir.path().join("noop-output");
+    let mut writer = IncrementalWriter::open_metadata_only(
+        &parent_bootstrap,
+        writer_options(output_dir.clone()),
+    )
+    .unwrap();
+    let path = Path::new("memory.bin");
+    let test_cases = vec![(0, 0), (chunk_size, 1), (u64::MAX, 1)];
 
-    for replace in [false, true] {
-        let output_dir = temp.path().join(format!("empty-file-{replace}"));
+    for (offset, len) in test_cases {
+        assert_eq!(
+            writer.write_at(path, offset, &memory[..len]).unwrap(),
+            0,
+            "{offset} {len}"
+        );
+        assert_eq!(
+            writer
+                .write_at_owned(path, offset, memory[..len].to_vec())
+                .unwrap(),
+            0,
+            "{offset} {len}"
+        );
+        assert_eq!(
+            writer
+                .write_file_range(path, offset, source.clone(), 0, len as u64)
+                .unwrap(),
+            0,
+            "{offset} {len}"
+        );
+        // SAFETY: `memory` outlives the writer and is not mutated before commit.
+        let written = unsafe { writer.write_memory_range(path, offset, ptr, len) }.unwrap();
+        assert_eq!(written, 0, "{offset} {len}");
+    }
+
+    assert!(writer
+        .commit()
+        .unwrap_err()
+        .to_string()
+        .contains("no changes"));
+    assert!(!output_dir.exists());
+}
+
+#[test]
+fn incremental_writer_commits_empty_file_changes_without_upper_blob() {
+    let dir = tempdir().unwrap();
+    let parent_data = vec![b'P'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
+    let (parent_bootstrap, parent_digest) = build_parent_blob(&dir, &parent_data);
+    let test_cases: Vec<(&str, fn(&mut IncrementalWriter, &Path), Vec<u8>)> = vec![
+        (
+            "empty.bin",
+            |writer, path| {
+                writer
+                    .create_file(path, 0, CreateFileOptions::default())
+                    .unwrap();
+            },
+            parent_data.clone(),
+        ),
+        (
+            "memory.bin",
+            |writer, path| writer.replace_file(path, Vec::new()).unwrap(),
+            Vec::new(),
+        ),
+    ];
+
+    for (path, change, memory) in test_cases {
+        let output = tempdir().unwrap();
         let mut writer = IncrementalWriter::open_metadata_only(
             &parent_bootstrap,
-            writer_options(output_dir.clone()),
+            writer_options(output.path().to_path_buf()),
         )
         .unwrap();
-        let path = if replace { "memory.bin" } else { "empty.bin" };
-        if replace {
-            writer.replace_file(Path::new(path), Vec::new()).unwrap();
-        } else {
-            writer
-                .create_file(Path::new(path), 0, CreateFileOptions::default())
-                .unwrap();
-        }
+        change(&mut writer, Path::new(path));
+
         writer.commit().unwrap();
 
-        let entries: Vec<_> = fs::read_dir(&output_dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(entries, vec!["image.boot"]);
-        let bootstrap = output_dir.join("image.boot");
+        assert_eq!(
+            file_names(output.path()),
+            HashSet::from([OsString::from("image.boot")]),
+            "{path}"
+        );
+        let bootstrap = output.path().join("image.boot");
         let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
         let blobs = reader.blob_infos().unwrap();
-        assert_eq!(blobs.len(), 1);
-        assert_eq!(blobs[0].blob_id, parent_digest);
+        assert_eq!(blobs.len(), 1, "{path}");
+        assert_eq!(blobs[0].blob_id, parent_digest, "{path}");
         let nid = find_path(&reader, path);
         let inode = reader.inode(nid).unwrap();
-        assert_eq!(inode.size(), 0);
+        assert_eq!(inode.size(), 0, "{path}");
         assert!(reader
             .read_chunk_index_entries(nid, &inode)
             .unwrap()
             .is_empty());
         let core = NydusCore::new(
             &bootstrap,
-            local_config(temp.path(), &temp.path().join(format!("cache-{replace}"))),
+            local_config(dir.path(), &output.path().join("cache")),
             None,
         )
         .unwrap();
-        assert!(core.fs.open(path).unwrap().read().unwrap().is_empty());
-        if !replace {
-            assert_eq!(
-                core.fs.open("memory.bin").unwrap().read().unwrap(),
-                parent_data
-            );
-        }
+        assert!(
+            core.fs.open(path).unwrap().read().unwrap().is_empty(),
+            "{path}"
+        );
+        assert_eq!(
+            core.fs.open("memory.bin").unwrap().read().unwrap(),
+            memory,
+            "{path}"
+        );
     }
 }
 
 #[test]
 fn incremental_writer_rejects_source_range_overflow_without_staging_changes() {
-    let temp = tempfile::tempdir().unwrap();
+    let dir = tempdir().unwrap();
     let parent_data = vec![b'P'; DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize];
-    let (parent_bootstrap, _) = build_parent_blob(&temp, &parent_data);
-    let output_dir = temp.path().join("overflow-output");
+    let (parent_bootstrap, _) = build_parent_blob(&dir, &parent_data);
+    let output_dir = dir.path().join("overflow-output");
     let mut writer = IncrementalWriter::open_metadata_only(
         &parent_bootstrap,
         writer_options(output_dir.clone()),
     )
     .unwrap();
-    let source = Arc::new(fs::File::open(temp.path().join("source-parent/memory.bin")).unwrap());
+    let source = Arc::new(fs::File::open(dir.path().join("source-parent/memory.bin")).unwrap());
+    let test_cases = vec![(u64::MAX, 1), (u64::MAX - 1, 2)];
 
-    for (source_offset, len) in [(u64::MAX, 1), (u64::MAX - 1, 2)] {
+    for (source_offset, len) in test_cases {
         let err = writer
             .write_file_range(
                 Path::new("memory.bin"),
@@ -1449,8 +1482,13 @@ fn incremental_writer_rejects_source_range_overflow_without_staging_changes() {
                 len,
             )
             .unwrap_err();
-        assert!(err.to_string().contains("source file range overflow"));
+
+        assert!(
+            err.to_string().contains("source file range overflow"),
+            "{source_offset} {len}"
+        );
     }
+
     assert!(writer
         .commit()
         .unwrap_err()
@@ -1461,29 +1499,38 @@ fn incremental_writer_rejects_source_range_overflow_without_staging_changes() {
 
 #[test]
 fn incremental_writer_deferred_partial_writes_require_parent_reader() {
-    let temp = tempfile::tempdir().unwrap();
+    let dir = tempdir().unwrap();
     let chunk_size = DEFAULT_NYDUS_BLOB_METADATA_CHUNK_SIZE as usize;
-    let (parent_bootstrap, _) = build_parent_blob(&temp, &vec![b'P'; chunk_size]);
-    let source = Arc::new(fs::File::open(temp.path().join("source-parent/memory.bin")).unwrap());
+    let (parent_bootstrap, _) = build_parent_blob(&dir, &vec![b'P'; chunk_size]);
+    let source = Arc::new(fs::File::open(dir.path().join("source-parent/memory.bin")).unwrap());
     let mut memory = vec![b'M'; chunk_size];
     let ptr = NonNull::new(memory.as_mut_ptr()).unwrap();
+    let test_cases = vec![false, true];
 
-    for from_memory in [false, true] {
-        let (mut writer, output_dir) = open_metadata_writer(&temp, &parent_bootstrap);
+    for from_memory in test_cases {
+        let (mut writer, output_dir) = open_metadata_writer(&dir, &parent_bootstrap);
+
         let err = if from_memory {
-            // The allocation stays alive and unchanged until commit consumes the writer.
+            // SAFETY: `memory` outlives the writer and is not mutated before commit.
             unsafe { writer.write_memory_range(Path::new("memory.bin"), 1, ptr, 1) }
         } else {
             writer.write_file_range(Path::new("memory.bin"), 1, source.clone(), 0, 1)
         }
         .unwrap_err();
-        assert!(err.to_string().contains("data-capable parent reader"));
-        assert!(writer
-            .commit()
-            .unwrap_err()
-            .to_string()
-            .contains("no changes"));
-        assert!(!output_dir.join("image.boot").exists());
+
+        assert!(
+            err.to_string().contains("data-capable parent reader"),
+            "{from_memory}"
+        );
+        assert!(
+            writer
+                .commit()
+                .unwrap_err()
+                .to_string()
+                .contains("no changes"),
+            "{from_memory}"
+        );
+        assert!(!output_dir.join("image.boot").exists(), "{from_memory}");
         assert_no_temporary_blob(&output_dir);
     }
 }

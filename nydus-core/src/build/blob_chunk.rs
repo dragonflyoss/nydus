@@ -5,8 +5,8 @@ use nydus_format::blob::{
     BlobMetadataCompressor, BlobMetadataDigester,
 };
 use nydus_format::erofs::{
-    ErofsChunkAddr, ZErofsComprCfgs, ZErofsCompressor, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
-    EROFS_NULL_ADDR, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
+    ErofsChunkAddr, ZErofsComprCfgs, ZErofsCompressor, ZErofsLclusterIndex, EROFS_BLOB_ID_SIZE,
+    EROFS_BLOCK_SIZE, EROFS_NULL_ADDR, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
 };
 use nydus_storage::io::write_zeros;
 use sha2::{Digest, Sha256};
@@ -301,6 +301,9 @@ struct ZJob {
 struct ZSegment {
     data: Vec<u8>,
     indexes: Vec<u8>,
+    /// The EOF index closing a compressed last pcluster that ends inside an
+    /// lcluster; it follows `indexes` and addresses no data.
+    eof_index: Option<ZErofsLclusterIndex>,
     phys_blocks: u32,
     src: Vec<u8>,
 }
@@ -583,6 +586,11 @@ impl ZCompressor {
 /// PLAIN. Compressed payloads are tail-aligned in their pcluster
 /// (ZERO_PADDING). Index block addresses are relative to the segment; the
 /// committer adds the segment's position.
+///
+/// A compressed last pcluster that stops inside an lcluster indexes only its
+/// whole lclusters and is closed by the EOF index, as mkfs.erofs writes it:
+/// kernels before 6.0 size an extent up to the next HEAD/PLAIN index and
+/// fail to decompress one that runs past EOF.
 fn z_compress_segment(
     src: Vec<u8>,
     at_eof: bool,
@@ -590,13 +598,13 @@ fn z_compress_segment(
     compressor: &mut ZCompressor,
 ) -> ZSegment {
     use nydus_format::erofs::{
-        Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
-        Z_EROFS_LI_D0_CBLKCNT,
+        Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_PLAIN, Z_EROFS_LI_D0_CBLKCNT,
     };
     let block_size = EROFS_BLOCK_SIZE as usize;
     let mut data = Vec::with_capacity(src.len() / 2 + pcluster);
     let mut indexes = Vec::with_capacity(src.len() / block_size * Z_EROFS_LCLUSTER_INDEX_SIZE);
     let mut rel_blk: u32 = 0;
+    let mut eof_index = None;
     let mut pos = 0;
     let mut suggested_len = 4 * pcluster;
     while pos < src.len() {
@@ -622,30 +630,37 @@ fn z_compress_segment(
         // Lcluster indexes for this pcluster. An incompressible window
         // becomes per-lcluster single-block PLAIN pclusters (the layout
         // mkfs.erofs emits); multi-block raw pclusters are avoided.
+        let mut push = |index: ZErofsLclusterIndex| indexes.extend_from_slice(index.as_bytes());
         if head_type == Z_EROFS_LCLUSTER_TYPE_PLAIN {
             for i in 0..lclusters {
-                indexes.extend_from_slice(&Z_EROFS_LCLUSTER_TYPE_PLAIN.to_le_bytes());
-                indexes.extend_from_slice(&0u16.to_le_bytes());
-                indexes.extend_from_slice(&(rel_blk + i as u32).to_le_bytes());
+                push(ZErofsLclusterIndex::new(
+                    Z_EROFS_LCLUSTER_TYPE_PLAIN,
+                    0,
+                    rel_blk + i as u32,
+                ));
             }
         } else {
-            for i in 0..lclusters {
-                if i == 0 {
-                    indexes.extend_from_slice(&head_type.to_le_bytes());
-                    indexes.extend_from_slice(&0u16.to_le_bytes()); // clusterofs
-                    indexes.extend_from_slice(&rel_blk.to_le_bytes());
+            // Only the final pcluster at EOF can end inside an lcluster.
+            let whole = take / block_size;
+            let eof_ofs = take % block_size;
+            debug_assert!(eof_ofs == 0 || (at_eof && pos + take == src.len()));
+            push(ZErofsLclusterIndex::new(head_type, 0, rel_blk));
+            for i in 1..whole {
+                let delta0 = if i == 1 {
+                    Z_EROFS_LI_D0_CBLKCNT | cblkcnt
                 } else {
-                    let delta0 = if i == 1 {
-                        Z_EROFS_LI_D0_CBLKCNT | cblkcnt
-                    } else {
-                        i as u16
-                    };
-                    let delta1 = (lclusters - 1 - i) as u16;
-                    indexes.extend_from_slice(&Z_EROFS_LCLUSTER_TYPE_NONHEAD.to_le_bytes());
-                    indexes.extend_from_slice(&0u16.to_le_bytes());
-                    indexes.extend_from_slice(&delta0.to_le_bytes());
-                    indexes.extend_from_slice(&delta1.to_le_bytes());
-                }
+                    i as u16
+                };
+                // delta[1]: the distance to the next HEAD/PLAIN index.
+                let delta1 = (whole - i) as u16;
+                push(ZErofsLclusterIndex::new_nonhead([delta0, delta1]));
+            }
+            if eof_ofs != 0 {
+                eof_index = Some(ZErofsLclusterIndex::new(
+                    Z_EROFS_LCLUSTER_TYPE_PLAIN,
+                    eof_ofs as u16,
+                    0,
+                ));
             }
         }
 
@@ -665,6 +680,7 @@ fn z_compress_segment(
     ZSegment {
         data,
         indexes,
+        eof_index,
         phys_blocks: rel_blk,
         src,
     }
@@ -1332,6 +1348,9 @@ impl<W: Write> BlobWriter<W> {
             }
         };
         accum.tail.extend_from_slice(&segment.indexes);
+        if let Some(eof_index) = segment.eof_index {
+            accum.tail.extend_from_slice(eof_index.as_bytes());
+        }
         accum.blocks += segment.phys_blocks as u64;
         if placement.at_eof && placement.target == ZTarget::File {
             let accum = self.z_open_files.pop_front().expect("checked above");
@@ -2899,45 +2918,72 @@ mod tests {
             .collect()
     }
 
-    /// Decodes a COMPRESSED_FULL file the way the kernel does: PLAIN lclusters
-    /// are raw blocks, HEAD1 pclusters span the following NONHEAD lclusters,
+    /// Decodes a COMPRESSED_FULL file the way the kernel does: the extent of
+    /// a HEAD/PLAIN index starts `clusterofs` into its lcluster and runs to
+    /// the next one or EOF. PLAIN extents are raw blocks; HEAD1 pclusters
     /// take their physical size from the first NONHEAD's CBLKCNT (one block
-    /// when there is none) and hold LZ4 data tail-aligned behind zero padding.
+    /// when there is none) and hold LZ4 data tail-aligned behind zero
+    /// padding. Only the EOF index (PLAIN, block 0) may carry a clusterofs.
     fn decode_z_file(data: &[u8], tail: &[u8], size: usize) -> Vec<u8> {
         let indexes = lclusters(tail);
         assert_eq!(indexes.len(), size.div_ceil(BLOCK));
+        let start_of = |i: usize| i * BLOCK + indexes[i].1 as usize;
         let mut out = Vec::with_capacity(size);
         let mut i = 0;
-        while i < indexes.len() {
+        while i < indexes.len() && start_of(i) < size {
             let (kind, clusterofs, blkaddr) = indexes[i];
             assert_eq!(clusterofs, 0);
+            let mut j = i + 1;
+            while j < indexes.len() && indexes[j].0 == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
+                j += 1;
+            }
+            let eof_index = j < indexes.len() && start_of(j) >= size;
+            if eof_index {
+                assert_eq!(j + 1, indexes.len());
+                assert_eq!(
+                    indexes[j],
+                    (Z_EROFS_LCLUSTER_TYPE_PLAIN, (size % BLOCK) as u16, 0)
+                );
+            }
+            let end = if j < indexes.len() {
+                start_of(j).min(size)
+            } else {
+                size
+            };
+            let logical = end - start_of(i);
             let phys = |blkaddr: u32| (blkaddr as u64 - Z_BASE) as usize * BLOCK;
-            let remaining = size - i * BLOCK;
             match kind {
                 Z_EROFS_LCLUSTER_TYPE_PLAIN => {
+                    assert!(logical <= BLOCK);
                     let start = phys(blkaddr);
-                    out.extend_from_slice(&data[start..start + remaining.min(BLOCK)]);
-                    i += 1;
+                    out.extend_from_slice(&data[start..start + logical]);
                 }
                 Z_EROFS_LCLUSTER_TYPE_HEAD1 => {
-                    let mut j = i + 1;
-                    while j < indexes.len() && indexes[j].0 == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
-                        j += 1;
-                    }
                     let lclusters = j - i;
-                    assert!(lclusters >= 2, "a compressed pcluster spans >= 2 lclusters");
-                    let delta0 = indexes[i + 1].2 as u16;
-                    assert_ne!(delta0 & Z_EROFS_LI_D0_CBLKCNT, 0);
-                    let cblkcnt = (delta0 & !Z_EROFS_LI_D0_CBLKCNT) as usize;
-                    for k in 2..lclusters {
+                    assert!(
+                        lclusters >= 2 || eof_index,
+                        "a compressed pcluster spans >= 2 lclusters unless EOF ends it"
+                    );
+                    let cblkcnt = if lclusters >= 2 {
+                        let delta0 = indexes[i + 1].2 as u16;
+                        assert_ne!(delta0 & Z_EROFS_LI_D0_CBLKCNT, 0);
+                        (delta0 & !Z_EROFS_LI_D0_CBLKCNT) as usize
+                    } else {
+                        1
+                    };
+                    assert!(cblkcnt * BLOCK < logical);
+                    for k in 1..lclusters {
                         let delta0 = indexes[i + k].2 as u16;
                         let delta1 = (indexes[i + k].2 >> 16) as u16;
-                        assert_eq!((delta0 as usize, delta1 as usize), (k, lclusters - 1 - k));
+                        if k >= 2 {
+                            assert_eq!(delta0 as usize, k);
+                        }
+                        // Distance to the next HEAD or EOF lcluster.
+                        assert_eq!(delta1 as usize, lclusters - k);
                     }
                     let start = phys(blkaddr);
                     let pcluster = &data[start..start + cblkcnt * BLOCK];
                     let payload_start = pcluster.iter().position(|b| *b != 0).unwrap();
-                    let logical = remaining.min(lclusters * BLOCK);
                     let payload = &pcluster[payload_start..];
                     let decoded = match ZErofsCompressor::from_code(tail[6] & 0x0f).unwrap() {
                         ZErofsCompressor::Lz4 => {
@@ -2945,13 +2991,15 @@ mod tests {
                         }
                         ZErofsCompressor::Zstd => zstd::bulk::decompress(payload, logical).unwrap(),
                     };
+                    // The pcluster holds exactly the extent, no bytes past EOF.
                     assert_eq!(decoded.len(), logical);
                     out.extend_from_slice(&decoded);
-                    i = j;
                 }
                 other => panic!("unexpected lcluster type {other}"),
             }
+            i = j;
         }
+        assert_eq!(out.len(), size);
         out
     }
 
@@ -3136,6 +3184,37 @@ mod tests {
             "compressed to less than half"
         );
         assert_eq!(decode_z_file(&data, &meta.tail, src.len()), src);
+    }
+
+    #[test]
+    fn z_erofs_compressed_last_pcluster_ends_with_an_eof_index() {
+        // A compressed last pcluster ending inside an lcluster indexes only
+        // its whole lclusters; a PLAIN index at the EOF offset with block
+        // address 0 ends it, as mkfs.erofs does.
+        for (size, whole) in [
+            (BLOCK + 1, 1),
+            (3 * BLOCK + 700, 3),
+            (13 * BLOCK + BLOCK - 1, 13),
+        ] {
+            let mut writer = z_writer();
+            let src: Vec<u8> = (0..size).map(|i| b'a' + (i / 64 % 7) as u8).collect();
+            let meta = writer.write_reader_z(&mut &src[..], size as u64).unwrap();
+            writer.finish().unwrap();
+            let meta = meta.resolve().unwrap();
+            let (data, _) = writer.into_parts();
+
+            let indexes = lclusters(&meta.tail);
+            assert_eq!(indexes.len(), whole + 1, "size {size}");
+            assert_eq!(indexes[0].0, Z_EROFS_LCLUSTER_TYPE_HEAD1);
+            assert!(indexes[1..whole]
+                .iter()
+                .all(|(kind, ..)| *kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD));
+            assert_eq!(
+                indexes[whole],
+                (Z_EROFS_LCLUSTER_TYPE_PLAIN, (size % BLOCK) as u16, 0)
+            );
+            assert_eq!(decode_z_file(&data, &meta.tail, size), src);
+        }
     }
 
     #[test]

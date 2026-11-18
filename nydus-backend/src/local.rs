@@ -1,9 +1,8 @@
-//! The local directory backend: full blobs stored under their digest in one
-//! directory.
+//! The local backend, full blobs named by digest in one directory.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -15,16 +14,14 @@ use nydus_telemetry::metrics::Metrics;
 
 use crate::{Backend, RawDeviceFile, ReadKind, Source};
 
-/// An open full blob file, its footer locating the data and blob metadata
-/// regions inside it.
+/// An open full blob file and its footer.
 #[derive(Debug)]
 struct FullBlob {
     /// The path of the file.
     path: PathBuf,
 
-    /// The digest of the whole file, the full blob digest the blob's cache
-    /// files are named by. Trusted from the file name in a content-addressed
-    /// directory, hashed once from the file for a self-contained full blob.
+    /// The full blob digest, from the file name in a directory, hashed from
+    /// the file for a self-contained full blob.
     id: [u8; SHA256_DIGEST_SIZE],
 
     /// The validated footer, the layout of the file.
@@ -36,8 +33,7 @@ struct FullBlob {
 
 /// Implements the full blob file.
 impl FullBlob {
-    /// Opens the full blob at `path`, the whole file digesting to `id`, its
-    /// footer read and validated.
+    /// Opens the full blob at `path` and validates its footer.
     fn new(path: &Path, id: [u8; SHA256_DIGEST_SIZE]) -> io::Result<Self> {
         let footer = BlobFooter::from_blob_path(path).map_err(|err| {
             io::Error::other(format!("invalid nydus blob {}: {err}", path.display()))
@@ -67,8 +63,7 @@ pub struct Local {
 
 /// Implements the local directory backend.
 impl Local {
-    /// Creates a backend over the full blobs in `dir`, recording into
-    /// `metrics`.
+    /// Creates a backend over the full blobs in `dir`.
     pub fn new(dir: PathBuf, metrics: Arc<Metrics>) -> Self {
         Self {
             dir,
@@ -78,15 +73,10 @@ impl Local {
     }
 
     /// Creates a backend from the self-contained full blob at `path`, serving
-    /// `blob_id` from the file itself and any other blob from the file's
-    /// directory, recording into `metrics`.
+    /// other blobs from its directory.
     ///
-    /// `blob_id` comes from the bootstrap embedded in the file, which names
-    /// the blob by the digest of its data region rather than of the whole
-    /// file, see [`Backend::full_blob_id`]. This reads the file twice before
-    /// serving anything: once whole, for the full blob digest its cache files
-    /// are named by, and once over the data region, to verify it against
-    /// `blob_id`.
+    /// The file is read twice up front: whole, for its full blob digest, and
+    /// over the data region, to verify it against `blob_id`.
     pub fn from_full_blob(
         blob_id: [u8; SHA256_DIGEST_SIZE],
         path: &Path,
@@ -123,13 +113,10 @@ impl Local {
         Ok(backend)
     }
 
-    /// Returns the full blob of `blob_id`, opened from `dir/<hex>` on first
-    /// use.
+    /// Returns the full blob of `blob_id`, opened from `dir/<hex>` on first use.
     ///
-    /// The directory is content-addressed, so `blob_id` is the full blob
-    /// digest and the file name is trusted rather than the file hashed on
-    /// every daemon start, corruption being caught by the CRC over every chunk
-    /// group read.
+    /// The file name is trusted rather than hashed; the CRC of every chunk group
+    /// read catches corruption.
     fn full_blob(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<FullBlob>> {
         if let Some(full_blob) = self.full_blobs.read().unwrap().get(blob_id).cloned() {
             return Ok(full_blob);
@@ -215,9 +202,9 @@ impl Backend for Local {
         }))
     }
 
-    /// Reads the blob's metadata for an on-demand read from the sidecar file
-    /// when present, otherwise from the region embedded in the full blob.
-    fn read_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
+    /// Reads the blob's metadata for an on-demand read, from the sidecar file
+    /// when present.
+    fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let full_blob = self.full_blob(blob_id)?;
         let blob_metadata_path = self.blob_metadata_path(&full_blob.path)?;
         let buf = if blob_metadata_path.is_file() {
@@ -233,8 +220,8 @@ impl Backend for Local {
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
     }
 
-    /// Reads the blob's metadata for a prefetch read from the sidecar file
-    /// when present, otherwise from the region embedded in the full blob.
+    /// Reads the blob's metadata for a prefetch read, from the sidecar file
+    /// when present.
     fn prefetch_blob_metadata(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -254,18 +241,17 @@ impl Backend for Local {
         BlobMetadata::from_bytes(buf).map_err(io::Error::other)
     }
 
-    /// Fills `buf` from the data region for an on-demand read, recording the
-    /// read's metrics.
-    fn read_range_into(
+    /// Reads `len` bytes of the data region from `offset` for an on-demand read.
+    fn get(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        let start = Instant::now();
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        let now = Instant::now();
         self.full_blob(blob_id)
             .and_then(|full_blob| {
-                let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
+                let end = offset.checked_add(len as u64).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
                 })?;
                 if end > full_blob.footer.compressed_data_size() {
@@ -275,17 +261,15 @@ impl Backend for Local {
                     ));
                 }
 
-                full_blob
-                    .file
-                    .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
-            })
-            .inspect(|()| {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Ondemand,
-                    Source::Local,
-                    buf.len() as u64,
-                    start.elapsed(),
-                )
+                Ok(Box::new(BufReader::new(RangeReader {
+                    file: full_blob.file.clone(),
+                    offset: full_blob.footer.compressed_data_offset() + offset,
+                    remaining: len,
+                    len,
+                    kind: ReadKind::Ondemand,
+                    metrics: self.metrics.clone(),
+                    created_at: now,
+                })) as Box<dyn BufRead + Send>)
             })
             .inspect_err(|_| {
                 self.metrics
@@ -294,18 +278,17 @@ impl Backend for Local {
             })
     }
 
-    /// Fills `buf` from the data region for a prefetch read, recording the
-    /// read's metrics.
-    fn prefetch_range_into(
+    /// Reads `len` bytes of the data region from `offset` for a prefetch read.
+    fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
-        buf: &mut [u8],
-    ) -> io::Result<()> {
-        let start = Instant::now();
+        len: usize,
+    ) -> io::Result<Box<dyn BufRead + Send>> {
+        let now = Instant::now();
         self.full_blob(blob_id)
             .and_then(|full_blob| {
-                let end = offset.checked_add(buf.len() as u64).ok_or_else(|| {
+                let end = offset.checked_add(len as u64).ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
                 })?;
                 if end > full_blob.footer.compressed_data_size() {
@@ -315,17 +298,15 @@ impl Backend for Local {
                     ));
                 }
 
-                full_blob
-                    .file
-                    .read_exact_at(buf, full_blob.footer.compressed_data_offset() + offset)
-            })
-            .inspect(|()| {
-                self.metrics.backend.collect_read_finished_metrics(
-                    ReadKind::Prefetch,
-                    Source::Local,
-                    buf.len() as u64,
-                    start.elapsed(),
-                )
+                Ok(Box::new(BufReader::new(RangeReader {
+                    file: full_blob.file.clone(),
+                    offset: full_blob.footer.compressed_data_offset() + offset,
+                    remaining: len,
+                    len,
+                    kind: ReadKind::Prefetch,
+                    metrics: self.metrics.clone(),
+                    created_at: now,
+                })) as Box<dyn BufRead + Send>)
             })
             .inspect_err(|_| {
                 self.metrics
@@ -335,8 +316,67 @@ impl Backend for Local {
     }
 }
 
+/// Reads a blob range with positional reads and records the read metrics
+/// when it is dropped.
+struct RangeReader {
+    /// The open file.
+    file: Arc<File>,
+
+    /// The offset of the next read.
+    offset: u64,
+
+    /// The bytes of the range left to read.
+    remaining: usize,
+
+    /// The length of the range.
+    len: usize,
+
+    /// What triggered the read, the `type` label of its metrics.
+    kind: ReadKind,
+
+    /// The metrics of the image.
+    metrics: Arc<Metrics>,
+
+    /// The time when the reader was created.
+    created_at: Instant,
+}
+
+/// Implements [Read] by `pread(2)`.
+impl Read for RangeReader {
+    /// Reads the next bytes of the range into `buf`.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let len = buf.len().min(self.remaining);
+        let len = self.file.read_at(&mut buf[..len], self.offset)?;
+        self.offset += len as u64;
+        self.remaining -= len;
+        Ok(len)
+    }
+}
+
+/// Implements [Drop] by recording the read metrics once.
+impl Drop for RangeReader {
+    /// Records a failed read unless the whole range was read.
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.metrics
+                .backend
+                .collect_read_failure_metrics(self.kind, Source::Local);
+            return;
+        }
+
+        self.metrics.backend.collect_read_finished_metrics(
+            self.kind,
+            Source::Local,
+            self.len as u64,
+            self.created_at.elapsed(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::type_complexity)]
+
     use super::*;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
@@ -344,7 +384,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn read_blob_metadata_uses_the_sidecar_file_or_the_embedded_region() {
+    fn get_blob_metadata_uses_the_sidecar_file_or_the_embedded_region() {
         let test_cases = vec![true, false];
 
         for sidecar in test_cases {
@@ -359,15 +399,59 @@ mod tests {
             let data_blob_id: [u8; SHA256_DIGEST_SIZE] = Sha256::digest(&payload).into();
             let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
 
-            let blob_metadata = backend.read_blob_metadata(&full_blob_id).unwrap();
+            let blob_metadata = backend.get_blob_metadata(&full_blob_id).unwrap();
             let mut data = vec![0u8; 4096];
             backend
-                .read_range_into(&full_blob_id, 0, &mut data)
+                .get(&full_blob_id, 0, data.len())
+                .unwrap()
+                .read_exact(&mut data)
                 .unwrap();
 
-            assert_eq!(blob_metadata.chunk_count(), 1, "sidecar={sidecar}");
-            assert_eq!(data, payload, "sidecar={sidecar}");
-            assert!(backend.read_blob_metadata(&data_blob_id).is_err());
+            assert_eq!(blob_metadata.chunk_count(), 1);
+            assert_eq!(data, payload);
+            assert!(backend.get_blob_metadata(&data_blob_id).is_err());
+        }
+    }
+
+    #[test]
+    fn read_records_its_metrics_once_whether_its_reader_finishes_or_drops() {
+        let test_cases: Vec<(fn(Box<dyn BufRead + Send>), f64, f64)> = vec![
+            (
+                |mut reader| {
+                    let mut data = Vec::new();
+                    reader.read_to_end(&mut data).unwrap();
+                    assert_eq!(data.len(), 4096);
+                },
+                0.0,
+                4096.0,
+            ),
+            (drop, 1.0, 0.0),
+        ];
+
+        for (consume, failures, bytes) in test_cases {
+            let dir = tempdir().unwrap();
+            let payload = vec![0xabu8; 4096];
+            let full_blob_id = FullBlob::new(&payload)
+                .with_blob_metadata(&single_chunk_group(&payload))
+                .save_in(dir.path());
+            let backend = Local::new(dir.path().to_path_buf(), Arc::new(Metrics::new()));
+            let counter = |name: &str| -> f64 {
+                backend
+                    .metrics
+                    .registry()
+                    .gather()
+                    .iter()
+                    .filter(|family| family.get_name() == name)
+                    .flat_map(|family| family.get_metric())
+                    .map(|metric| metric.get_counter().get_value())
+                    .sum()
+            };
+
+            consume(backend.get(&full_blob_id, 0, 4096).unwrap());
+
+            assert_eq!(counter("nydus_backend_read_total"), 1.0);
+            assert_eq!(counter("nydus_backend_read_failure_total"), failures);
+            assert_eq!(counter("nydus_backend_read_bytes_total"), bytes);
         }
     }
 

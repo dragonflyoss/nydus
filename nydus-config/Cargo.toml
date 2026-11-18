@@ -16,12 +16,13 @@ dragonfly = []
 
 [dependencies]
 clap = { workspace = true }
-humantime-serde = "1"
+humantime-serde = { workspace = true }
 nydus-error = { version = "3.0.0-beta.3", path = "../nydus-error" }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { workspace = true }
 serde_yaml = "0.9"
 url = { version = "2", features = ["serde"] }
+validator = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

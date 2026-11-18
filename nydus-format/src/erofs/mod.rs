@@ -12,6 +12,7 @@ pub mod chunk;
 pub mod compressor;
 pub mod dirent;
 pub mod inode;
+pub mod lcluster;
 pub mod superblock;
 pub use chunk::{ErofsChunkAddr, ErofsChunkIndex, ErofsDeviceSlot};
 pub use compressor::{ZErofsComprCfgs, ZErofsCompressor};
@@ -19,6 +20,7 @@ pub use dirent::ErofsDirent;
 pub use inode::{
     ErofsInode, ErofsInodeChunkFormat, ErofsInodeCompact, ErofsInodeExtended, XattrEntry,
 };
+pub use lcluster::ZErofsLclusterIndex;
 pub use superblock::ErofsSuperblock;
 
 /// The superblock magic.

@@ -13,13 +13,13 @@
 
 use std::fmt::Debug;
 
-/// Classify the outcome of a test pinned to known issue `id` (`"KI-5"`).
+/// Classifies the outcome of a test pinned to known issue `id`, e.g. `"KI-5"`:
+/// under CI only the correct behavior passes, elsewhere only the bug.
 ///
-/// `correct` says whether `observed` is the behavior the issue expects,
-/// `reproduces` whether it is the documented bug. In strict CI mode only
-/// correct, unambiguous behavior passes. Otherwise it passes only when the bug
-/// reproduces; panics when the issue is fixed (`correct`), when the outcome
-/// is neither, or when the two classifiers overlap.
+/// # Panics
+///
+/// When the outcome is not the one accepted, or `correct` and `reproduces`
+/// both hold.
 #[track_caller]
 pub fn assert_known_issue(id: &str, observed: impl Debug, correct: bool, reproduces: bool) {
     classify(
@@ -31,6 +31,7 @@ pub fn assert_known_issue(id: &str, observed: impl Debug, correct: bool, reprodu
     );
 }
 
+/// Classifies the outcome as [`assert_known_issue`] does, strictly under CI.
 #[track_caller]
 fn classify(id: &str, observed: impl Debug, correct: bool, reproduces: bool, strict: bool) {
     if strict {
@@ -40,6 +41,7 @@ fn classify(id: &str, observed: impl Debug, correct: bool, reproduces: bool, str
         );
         return;
     }
+
     match (correct, reproduces) {
         (true, true) => panic!(
             "{id}: the outcome classifies as both correct and the known bug, fix the test: {observed:?}"
@@ -57,39 +59,44 @@ fn classify(id: &str, observed: impl Debug, correct: bool, reproduces: bool, str
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
+    use super::*;
 
     #[test]
-    fn passes_while_the_bug_reproduces() {
-        classify("KI-0", "bug", false, true, false);
+    fn classify_passes_the_bug_or_the_strict_fix() {
+        let test_cases = vec![("bug", false, true, false), ("fixed", true, false, true)];
+
+        for (observed, correct, reproduces, strict) in test_cases {
+            classify("KI-0", observed, correct, reproduces, strict);
+        }
     }
 
     #[test]
     #[should_panic(expected = "KI-0 no longer reproduces")]
-    fn fails_once_the_bug_is_fixed() {
+    fn classify_fails_once_the_bug_is_fixed() {
         classify("KI-0", "fixed", true, false, false);
     }
 
     #[test]
     #[should_panic(expected = "neither the correct behavior nor the known bug")]
-    fn fails_on_an_unexpected_outcome() {
+    fn classify_fails_on_an_unexpected_outcome() {
         classify("KI-0", "other", false, false, false);
     }
 
     #[test]
+    #[should_panic(expected = "both correct and the known bug")]
+    fn classify_fails_on_an_ambiguous_outcome() {
+        classify("KI-0", "ambiguous", true, true, false);
+    }
+
+    #[test]
     #[should_panic(expected = "expected correct behavior")]
-    fn strict_mode_fails_when_the_bug_reproduces() {
+    fn classify_strict_fails_when_the_bug_reproduces() {
         classify("KI-0", "bug", false, true, true);
     }
 
     #[test]
-    fn strict_mode_passes_correct_behavior() {
-        classify("KI-0", "fixed", true, false, true);
-    }
-
-    #[test]
     #[should_panic(expected = "expected correct behavior")]
-    fn strict_mode_rejects_an_ambiguous_outcome() {
+    fn classify_strict_fails_on_an_ambiguous_outcome() {
         classify("KI-0", "ambiguous", true, true, true);
     }
 }

@@ -12,7 +12,8 @@
 //! `Backend` trait of a second copy of the crate).
 
 pub mod blob;
-#[cfg(feature = "fault-backend")]
-pub mod fault;
 pub mod known_issue;
 pub mod metadata;
+
+#[cfg(feature = "fault-backend")]
+pub mod fault;

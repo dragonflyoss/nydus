@@ -1,6 +1,3 @@
-//! Deterministically stop a real set_ready immediately after its bitmap
-//! write, reset from another process, then let its stale counter update run.
-//! Linux x86-64 hardware watchpoints avoid production scheduling hooks.
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn main() {
     assert!(
@@ -12,7 +9,7 @@ fn main() {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn main() {
-    linux::run();
+    linux::set_ready_racing_a_reset_leaves_the_group_cold();
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -22,14 +19,25 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use nydus_storage::chunk_group_map::ChunkGroupMap;
+    use tempfile::tempdir;
 
     const CHILD_MAP: &str = "NYDUS_TEST_GROUP_MAP_CHILD";
 
-    fn group_map_child() {
+    struct TracedChild(Child);
+
+    impl Drop for TracedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn set_ready_under_trace() {
         let Some(path) = std::env::var_os(CHILD_MAP) else {
             return;
         };
         let map = ChunkGroupMap::open(path.as_ref(), 1).unwrap();
+        // SAFETY: PTRACE_TRACEME takes no pointers; null addr and data are ignored.
         let result = unsafe {
             libc::ptrace(
                 libc::PTRACE_TRACEME,
@@ -42,35 +50,28 @@ mod linux {
             eprintln!("ptrace precondition: {}", io::Error::last_os_error());
             std::process::exit(77);
         }
+        // SAFETY: raise only delivers SIGSTOP to this process.
         unsafe { libc::raise(libc::SIGSTOP) };
         map.set_ready(0).unwrap();
-    }
-
-    struct TracedChild(Child);
-
-    impl Drop for TracedChild {
-        fn drop(&mut self) {
-            // waitpid may already have reaped it. Kill only this owned child.
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
     }
 
     fn wait(pid: i32) -> i32 {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let mut status = 0;
+            // SAFETY: `status` is a valid, writable i32 for the duration of the call.
             let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG | libc::__WALL) };
             assert!(result >= 0, "waitpid: {}", io::Error::last_os_error());
             if result == pid {
                 return status;
             }
-            assert!(Instant::now() < deadline, "traced child stalled");
+            assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(1));
         }
     }
 
     fn trace(request: u32, pid: i32, address: usize, data: usize) {
+        // SAFETY: the requests used here pass addr and data as plain integers, not pointers.
         let result = unsafe {
             libc::ptrace(
                 request,
@@ -82,12 +83,12 @@ mod linux {
         assert_ne!(result, -1, "ptrace: {}", io::Error::last_os_error());
     }
 
-    pub fn run() {
+    pub fn set_ready_racing_a_reset_leaves_the_group_cold() {
         if std::env::var_os(CHILD_MAP).is_some() {
-            group_map_child();
+            set_ready_under_trace();
             return;
         }
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let path = dir.path().join("group-map");
         let map = ChunkGroupMap::open(&path, 1).unwrap();
         let child = TracedChild(
@@ -113,34 +114,34 @@ mod linux {
         let line = maps
             .lines()
             .find(|line| line.ends_with(canonical.to_str().unwrap()))
-            .expect("child shared group-map mapping");
+            .unwrap();
         let start = usize::from_str_radix(line.split('-').next().unwrap(), 16).unwrap();
         let debug = std::mem::offset_of!(libc::user, u_debugreg);
-        trace(libc::PTRACE_POKEUSER, pid, debug, start + 4096);
-        // DR7: local DR0 enabled, break on one-byte writes.
-        trace(libc::PTRACE_POKEUSER, pid, debug + 7 * 8, 1 | (1 << 16));
+        let dr0 = debug;
+        let dr7 = debug + 7 * 8;
+        let dr0_local_one_byte_write = 1 | (1 << 16);
+        trace(libc::PTRACE_POKEUSER, pid, dr0, start + 4096);
+        trace(libc::PTRACE_POKEUSER, pid, dr7, dr0_local_one_byte_write);
+
         trace(libc::PTRACE_CONT, pid, 0, 0);
         let status = wait(pid);
+
         assert!(libc::WIFSTOPPED(status));
         assert_eq!(libc::WSTOPSIG(status), libc::SIGTRAP);
-        assert!(
-            map.is_ready(0).unwrap(),
-            "watchpoint must follow the bitmap write"
-        );
-        assert!(!map.is_all_ready(), "counter update must not yet have run");
+        assert!(map.is_ready(0).unwrap());
+        assert!(!map.is_all_ready());
+
         map.reset().unwrap();
+
         assert!(!map.is_ready(0).unwrap());
-        trace(libc::PTRACE_POKEUSER, pid, debug + 7 * 8, 0);
+
+        trace(libc::PTRACE_POKEUSER, pid, dr7, 0);
         trace(libc::PTRACE_CONT, pid, 0, 0);
         let status = wait(pid);
+
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);
-        let cold = !map.is_ready(0).unwrap();
-        let published = map.is_range_ready(0..1).unwrap();
-        assert!(
-            cold && !published,
-            "reset group advertised as ready: {:?}",
-            (cold, published)
-        );
+        assert!(!map.is_ready(0).unwrap());
+        assert!(!map.is_range_ready(0..1).unwrap());
     }
 }

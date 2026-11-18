@@ -155,3 +155,20 @@ func TestWriteRegistryConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestRegistryBackendConfigDragonfly(t *testing.T) {
+	assert := assert.New(t)
+	render := func(df *dragonflySection) string {
+		out, err := yaml.Marshal(storageConfig{Backend: backendSection{
+			Type:   "registry",
+			Config: registryBackendConfig{Addr: "https://reg.example.com", Dragonfly: df},
+		}})
+		assert.NoError(err)
+		return string(out)
+	}
+
+	assert.NotContains(render(nil), "dragonfly")
+	out := render(&dragonflySection{SchedulerEndpoint: "http://127.0.0.1:8002"})
+	assert.Contains(out, "dragonfly:\n")
+	assert.Contains(out, "scheduler_endpoint: http://127.0.0.1:8002")
+}

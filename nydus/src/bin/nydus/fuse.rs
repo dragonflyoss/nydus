@@ -6,7 +6,8 @@ use nydus::fuse::ErofsFs;
 use nydus::signal;
 use nydus_backend::{Backend, Local};
 use nydus_config::{
-    default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, Config, PrefetchScope,
+    default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, default_runtime_dir,
+    Config, PrefetchScope,
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -230,7 +231,7 @@ impl FuseCommand {
             Some(Arc::new(Local::new(dir.clone(), metrics.clone())))
         } else if let Some(config) = storage_config.as_ref() {
             Some(
-                <dyn Backend>::new(&config.backend, &config.prefetch, None, metrics.clone())
+                <dyn Backend>::new(config, None, metrics.clone())
                     .context("failed to build blob backend")?,
             )
         } else {
@@ -294,8 +295,12 @@ impl FuseCommand {
         config.n_threads = Some(self.threads);
         config.clone_fd = true;
         let image_digest = api_socket.as_ref().map(|_| reader.image_digest());
+        let runtime_dir = storage_config
+            .as_ref()
+            .map_or_else(default_runtime_dir, |config| config.runtime_dir.clone());
         let startup = Startup::new(
             &self.mountpoint,
+            &runtime_dir,
             api_socket,
             image_digest.as_ref().map(|digest| digest.as_slice()),
             reader.metrics().clone(),

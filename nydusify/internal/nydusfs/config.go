@@ -26,6 +26,12 @@ type registryBackendConfig struct {
 	Repository string      `yaml:"repository"`
 	Auth       string      `yaml:"auth,omitempty"`
 	HTTP       httpSection `yaml:"http"`
+	// Dragonfly routes blob reads through the Dragonfly P2P network.
+	Dragonfly *dragonflySection `yaml:"dragonfly,omitempty"`
+}
+
+type dragonflySection struct {
+	SchedulerEndpoint string `yaml:"scheduler_endpoint"`
 }
 
 type httpSection struct {
@@ -94,6 +100,11 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 		auth = basicAuthConfig(username, password)
 	}
 
+	var dragonfly *dragonflySection
+	if endpoint := remote.DragonflyEndpoint(); endpoint != "" {
+		dragonfly = &dragonflySection{SchedulerEndpoint: endpoint}
+	}
+
 	cfg := storageConfig{
 		Backend: backendSection{
 			Type: "registry",
@@ -104,6 +115,7 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 				HTTP: httpSection{
 					TLS: tlsSection{SkipVerify: provider.Insecure(reg)},
 				},
+				Dragonfly: dragonfly,
 			},
 		},
 		Storage:  storageSection{Dir: cacheDir},

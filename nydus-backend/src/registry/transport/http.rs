@@ -1,0 +1,337 @@
+//! The direct HTTP transport to the origin registry.
+
+use std::io;
+use std::ops::RangeInclusive;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt};
+use rand::Rng;
+use reqwest::header::HeaderMap;
+use reqwest::redirect::Policy;
+use reqwest::{Certificate, Client};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tracing::{debug, warn};
+
+use nydus_config::{ProxyConfig, TlsConfig};
+
+use crate::Source;
+
+use crate::registry::response::Response;
+
+use super::middleware::{CircuitBreaker, RateLimit};
+use super::Fetcher;
+
+/// The HTTP client of the origin registry.
+///
+/// ```text
+/// GET ──▶ origin ──▶ 2xx / 3xx / 4xx ────────────────────────────────▶ handed back as is
+///           │ 429 / 5xx / 408 / transport failure
+///           ├─ again, max_retries times, exponential backoff
+///           ├─ on-demand ─▶ error
+///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more after the retry interval ─▶ error
+///                         └─ transport failure ───────────────────────────▶ error
+/// ```
+///
+/// A proxy that fails to connect is never tried again at once, see
+/// [`CircuitBreaker`].
+#[derive(Clone)]
+pub(crate) struct Http {
+    /// The reqwest client behind the retry, rate limit and circuit breaker
+    /// middleware.
+    client: ClientWithMiddleware,
+
+    /// The random wait before a prefetch read is sent once more.
+    prefetch_retry_interval: RangeInclusive<Duration>,
+
+    /// The proxy the requests go through.
+    proxy: Option<ProxyConfig>,
+}
+
+/// Implements the origin HTTP client.
+impl Http {
+    /// Creates a client, through `proxy` and limited by `rate_limit` when
+    /// given.
+    pub(crate) fn new(
+        request_timeout: Duration,
+        request_read_timeout: Duration,
+        max_retries: u32,
+        proxy: Option<&ProxyConfig>,
+        tls: &TlsConfig,
+        prefetch_retry_interval: Duration,
+        rate_limit: Option<RateLimit>,
+    ) -> io::Result<Self> {
+        // Return redirects so the caller caches them, and keep rustls even when
+        // another crate enables reqwest's `default-tls`.
+        let mut builder = Client::builder()
+            .use_rustls_tls()
+            .redirect(Policy::none())
+            .hickory_dns(true);
+
+        builder = match proxy {
+            Some(proxy) => builder.proxy(reqwest::Proxy::all(&proxy.addr).map_err(|err| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid proxy addr {}: {err}", proxy.addr),
+                )
+            })?),
+            None => builder.no_proxy(),
+        };
+
+        // Bound the whole request, and each wait within it: for the
+        // connection, the response and every part of the body.
+        builder = builder
+            .timeout(request_timeout)
+            .read_timeout(request_read_timeout)
+            .connect_timeout(request_read_timeout);
+
+        if tls.skip_verify {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        if let Some(certs) = tls.load_ca_cert_der().map_err(io::Error::other)? {
+            for cert in certs {
+                builder = builder
+                    .add_root_certificate(Certificate::from_der(&cert).map_err(io::Error::other)?);
+            }
+        }
+
+        let client = builder.build().map_err(io::Error::other)?;
+        let retry_policy = ExponentialBackoff::builder().build_with_max_retries(max_retries);
+        let mut client = ClientBuilder::new(client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy));
+
+        if let Some(rate_limit) = rate_limit {
+            client = client.with(rate_limit);
+        }
+
+        if let Some(proxy) = proxy {
+            client = client.with(CircuitBreaker::new(&proxy.addr));
+        }
+
+        Ok(Self {
+            client: client.build(),
+            prefetch_retry_interval: prefetch_retry_interval
+                ..=prefetch_retry_interval.saturating_mul(2),
+            proxy: proxy.cloned(),
+        })
+    }
+
+    /// Converts the reqwest answer to a `GET` into a response.
+    fn response(result: reqwest_middleware::Result<reqwest::Response>) -> io::Result<Response> {
+        result
+            .map(|response| Response {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: response.bytes_stream().map_err(io::Error::other).boxed(),
+                fallback: Arc::default(),
+            })
+            .map_err(io::Error::other)
+    }
+}
+
+/// Implements the fetcher over the origin HTTP client.
+#[async_trait]
+impl Fetcher for Http {
+    /// Sends the `GET` of an on-demand read, the body left streaming.
+    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let now = Instant::now();
+        let result = Self::response(self.client.get(url).headers(headers).send().await);
+
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (ondemand) from the origin returned {} in {:?}",
+                response.status,
+                now.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (ondemand) from the origin failed in {:?}: {err}",
+                now.elapsed()
+            ),
+        }
+        result
+    }
+
+    /// Sends the `GET` of a prefetch read, the body left streaming.
+    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        let mut retried = false;
+        loop {
+            let now = Instant::now();
+            let result = Self::response(self.client.get(url).headers(headers.clone()).send().await);
+
+            match &result {
+                Ok(response) => debug!(
+                    "GET {url} (prefetch) from the origin returned {} in {:?}",
+                    response.status,
+                    now.elapsed()
+                ),
+                Err(err) => debug!(
+                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                    now.elapsed()
+                ),
+            }
+
+            // Serve a definitive answer, or the second transient one.
+            let response = result?;
+            if !response.is_transient() || retried {
+                return Ok(response);
+            }
+
+            // Retry once after a random interval in the configured window.
+            let err = response.into_io_error().await;
+            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
+            warn!("origin request failed, retrying in {delay:?}: {err}");
+            tokio::time::sleep(delay).await;
+            retried = true;
+        }
+    }
+
+    /// Returns the `source` label of the reads, `http_proxy` through a proxy.
+    fn source(&self) -> Source {
+        match &self.proxy {
+            Some(_) => Source::HttpProxy,
+            None => Source::Http,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::CertifiedKey;
+    use std::fs;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio_rustls::rustls::crypto::ring;
+    use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    #[tokio::test]
+    async fn prefetch_fails_at_once_on_a_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        drop(listener);
+        let retry_interval = Duration::from_secs(60 * 60);
+        let http = Http::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            0,
+            None,
+            &TlsConfig::default(),
+            retry_interval,
+            None,
+        )
+        .unwrap();
+
+        let now = Instant::now();
+        assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
+        assert!(now.elapsed() < retry_interval);
+    }
+
+    #[cfg(feature = "dragonfly")]
+    #[test]
+    fn new_accepts_an_optional_rate_limit() {
+        let tls = TlsConfig::default();
+        assert!(Http::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            3,
+            None,
+            &tls,
+            Duration::from_secs(1),
+            None,
+        )
+        .is_ok());
+        assert!(Http::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            3,
+            None,
+            &tls,
+            Duration::from_secs(1),
+            Some(RateLimit::new(10, Duration::from_secs(1))),
+        )
+        .is_ok());
+    }
+
+    async fn start_https_server(cert: CertifiedKey) -> String {
+        let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.cert.der().clone()],
+                PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()).into(),
+            )
+            .unwrap();
+
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let Ok(stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    while stream.read_line(&mut line).await.unwrap() > 2 {
+                        line.clear();
+                    }
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                        )
+                        .await
+                        .unwrap();
+                    stream.flush().await.unwrap();
+                });
+            }
+        });
+
+        format!("https://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn new_trusts_the_ca_cert_or_skips_verification() {
+        let dir = tempdir().unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let wrong_cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let ca_cert = dir.path().join("ca.pem");
+        let wrong_ca_cert = dir.path().join("wrong_ca.pem");
+        fs::write(&ca_cert, cert.cert.pem()).unwrap();
+        fs::write(&wrong_ca_cert, wrong_cert.cert.pem()).unwrap();
+        let test_cases = vec![
+            (false, Some(ca_cert), true),
+            (false, Some(wrong_ca_cert), false),
+            (false, None, false),
+            (true, None, true),
+        ];
+
+        let url = start_https_server(cert).await;
+        for (skip_verify, ca_cert, expected) in test_cases {
+            let http = Http::new(
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                0,
+                None,
+                &TlsConfig {
+                    skip_verify,
+                    ca_cert,
+                },
+                Duration::from_secs(1),
+                None,
+            )
+            .unwrap();
+            assert_eq!(http.get(&url, HeaderMap::new()).await.is_ok(), expected);
+        }
+    }
+}

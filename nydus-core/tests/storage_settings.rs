@@ -1,23 +1,22 @@
-//! `storage.skip_verify_checksums` and `storage.fetch_size` as cores see
-//! them. Each core keeps its own cache options, even when another core
-//! uses different settings.
-
 mod common;
 
 use std::fs;
+use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 
-use common::{read_flat, Image};
+use common::{read_flat, Image, FILE_NAME};
 use nydus_core::NydusCore;
+use nydus_storage::cache::is_chunk_group_crc_mismatch;
+use nydus_storage::chunk_group_map::current_boot_tag;
 use tempfile::tempdir;
 
 const VERIFY: &str = "skip_verify_checksums: false";
 const SKIP_VERIFY: &str = "skip_verify_checksums: true";
 const ONE_GROUP: &str = "fetch_size: 0";
 const WHOLE_BLOB: &str = "fetch_size: 1048576";
+const GROUP_MAP_BOOT_TAG_OFFSET: u64 = 28;
 
-/// Fetch group `group` of the core's one blob through the flat view.
 fn fetch_group(core: &NydusCore, image: &Image, group: usize) -> nydus_error::Result<Vec<u8>> {
     let blob = &core.blobs.flat_layout()?[0];
     let range = image.logical(group);
@@ -28,7 +27,6 @@ fn fetch_group(core: &NydusCore, image: &Image, group: usize) -> nydus_error::Re
     )
 }
 
-/// The blob's resident ranges, without fetching.
 fn ready(core: &NydusCore) -> Vec<Range<u64>> {
     let blob = &core.blobs.flat_layout().unwrap()[0];
     core.blobs
@@ -36,119 +34,132 @@ fn ready(core: &NydusCore) -> Vec<Range<u64>> {
         .unwrap()
 }
 
-/// Verification rejects a mismatched checksum; explicitly disabling it
-/// serves the same data.
 #[test]
-fn verification_rejects_a_wrong_chunk_group_checksum() {
+fn skip_verify_checksums_false_rejects_a_wrong_checksum_even_beside_a_skipping_core() {
     let image = Image::build();
     image.tamper_chunk_group_checksum(1);
-
-    let cache_dir = tempdir().unwrap();
-    let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
-    let err = fetch_group(&core, &image, 1).expect_err("a wrong checksum must fail the read");
-    let io = err.io_error().expect("an I/O error");
-    assert_eq!(io.kind(), std::io::ErrorKind::InvalidData, "{err:?}");
-    assert!(
-        nydus_storage::cache::is_chunk_group_crc_mismatch(io),
-        "{err:?}"
-    );
     let group = image.logical(0);
-    assert_eq!(
-        fetch_group(&core, &image, 0).unwrap(),
-        image.dense[group.start as usize..group.end as usize]
-    );
-    assert_eq!(ready(&core), [group]);
-    drop(core);
+    let test_cases = vec![None, Some(SKIP_VERIFY)];
 
+    for second_core_setting in test_cases {
+        let cache_dir = tempdir().unwrap();
+        let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
+        let second_cache_dir = tempdir().unwrap();
+        let _second_core = second_core_setting
+            .map(|storage| image.core(second_cache_dir.path(), &[storage, ONE_GROUP]));
+
+        let err = fetch_group(&core, &image, 1).unwrap_err();
+        let io_err = err.io_error().unwrap();
+        assert_eq!(
+            io_err.kind(),
+            io::ErrorKind::InvalidData,
+            "second_core_setting={second_core_setting:?}"
+        );
+        assert!(
+            is_chunk_group_crc_mismatch(io_err),
+            "second_core_setting={second_core_setting:?}"
+        );
+        assert!(
+            ready(&core).is_empty(),
+            "second_core_setting={second_core_setting:?}"
+        );
+
+        assert_eq!(
+            fetch_group(&core, &image, 0).unwrap(),
+            image.dense[group.start as usize..group.end as usize],
+            "second_core_setting={second_core_setting:?}"
+        );
+        assert_eq!(
+            ready(&core),
+            [group.clone()],
+            "second_core_setting={second_core_setting:?}"
+        );
+    }
+}
+
+#[test]
+fn skip_verify_checksums_true_serves_a_group_with_a_wrong_checksum() {
+    let image = Image::build();
+    image.tamper_chunk_group_checksum(1);
     let cache_dir = tempdir().unwrap();
     let core = image.core(cache_dir.path(), &[SKIP_VERIFY, ONE_GROUP]);
     let group = image.logical(1);
-    assert_eq!(
-        fetch_group(&core, &image, 1).unwrap(),
-        image.dense[group.start as usize..group.end as usize]
-    );
+
+    let data = fetch_group(&core, &image, 1).unwrap();
+
+    assert_eq!(data, image.dense[group.start as usize..group.end as usize]);
 }
 
-/// A second core does not disable the first core's verification.
 #[test]
-fn a_second_core_preserves_the_first_cores_verification() {
+fn fetch_size_zero_fetches_only_the_missed_group_even_beside_a_wide_core() {
     let image = Image::build();
-    image.tamper_chunk_group_checksum(1);
+    let test_cases = vec![None, Some(WHOLE_BLOB)];
 
-    let verifying_dir = tempdir().unwrap();
-    let verifying = image.core(verifying_dir.path(), &[VERIFY, ONE_GROUP]);
-    let skipping_dir = tempdir().unwrap();
-    let _skipping = image.core(skipping_dir.path(), &[SKIP_VERIFY, ONE_GROUP]);
+    for second_core_setting in test_cases {
+        let cache_dir = tempdir().unwrap();
+        let core = image.core(cache_dir.path(), &[ONE_GROUP]);
+        let second_cache_dir = tempdir().unwrap();
+        let _second_core =
+            second_core_setting.map(|storage| image.core(second_cache_dir.path(), &[storage]));
 
-    let err = fetch_group(&verifying, &image, 1).unwrap_err();
-    assert!(nydus_storage::cache::is_chunk_group_crc_mismatch(
-        err.io_error().unwrap()
-    ));
-    assert!(ready(&verifying).is_empty());
+        fetch_group(&core, &image, 0).unwrap();
+
+        assert_eq!(
+            ready(&core),
+            [image.logical(0)],
+            "second_core_setting={second_core_setting:?}"
+        );
+    }
 }
 
-/// A second core does not enlarge the first core's fetch window.
 #[test]
-fn a_second_core_preserves_the_first_cores_fetch_size() {
-    let image = Image::build();
-
-    // Alone, the core fetches the missed group only.
-    let alone_dir = tempdir().unwrap();
-    let alone = image.core(alone_dir.path(), &[ONE_GROUP]);
-    fetch_group(&alone, &image, 0).unwrap();
-    assert_eq!(ready(&alone), [image.logical(0)]);
-    drop(alone);
-
-    let narrow_dir = tempdir().unwrap();
-    let narrow = image.core(narrow_dir.path(), &[ONE_GROUP]);
-    let wide_dir = tempdir().unwrap();
-    let _wide = image.core(wide_dir.path(), &[WHOLE_BLOB]);
-    fetch_group(&narrow, &image, 0).unwrap();
-
-    assert_eq!(ready(&narrow), [image.logical(0)]);
-}
-
-/// Ready groups are trusted within the boot that published them, so a hit
-/// costs no checksum. A restart clears the bits: a group corrupted in the
-/// cache file (a crash kept part of it from the disk) fails the check it then
-/// gets on its next read and is fetched again, while intact groups are
-/// reused as they are.
-#[test]
-fn corrupted_cache_is_recovered_after_a_restart() {
+fn read_at_refetches_a_corrupted_cache_group_after_a_restart() {
     let image = Image::build();
     let cache_dir = tempdir().unwrap();
     let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
     let blob = core.blobs.prepare_all().unwrap().remove(0);
     let group = image.logical(1);
-    let good = image.dense[group.start as usize..group.end as usize].to_vec();
-    assert_eq!(fetch_group(&core, &image, 1).unwrap(), good);
+    assert_eq!(
+        fetch_group(&core, &image, 1).unwrap(),
+        image.dense[group.start as usize..group.end as usize]
+    );
     drop(core);
 
-    let cache = fs::OpenOptions::new()
+    let corrupted_offset = group.start + 100;
+    fs::OpenOptions::new()
         .write(true)
         .open(&blob.cache_path)
+        .unwrap()
+        .write_all_at(
+            &[image.dense[corrupted_offset as usize] ^ 0xff],
+            corrupted_offset,
+        )
         .unwrap();
-    let at = group.start + 100;
-    cache
-        .write_all_at(&[image.dense[at as usize] ^ 0xff], at)
-        .unwrap();
-    // The group map beside the data file now names an earlier boot.
     let map = blob
         .cache_path
         .with_extension("")
         .with_extension("group.map");
-    let tag = nydus_storage::chunk_group_map::current_boot_tag().unwrap();
+    let boot_tag = current_boot_tag().unwrap();
     fs::OpenOptions::new()
         .write(true)
         .open(&map)
         .unwrap()
-        .write_all_at(&tag.wrapping_add(1).max(1).to_le_bytes(), 28)
+        .write_all_at(
+            &boot_tag.wrapping_add(1).max(1).to_le_bytes(),
+            GROUP_MAP_BOOT_TAG_OFFSET,
+        )
         .unwrap();
 
     let core = image.core(cache_dir.path(), &[VERIFY, ONE_GROUP]);
     assert!(ready(&core).is_empty());
-    let node = core.fs.open(common::FILE_NAME).unwrap();
     let mut buf = vec![0u8; 16];
-    node.read_at(at, &mut buf).unwrap();
-    assert_eq!(buf, image.dense[at as usize..at as usize + 16]);
+    core.fs
+        .open(FILE_NAME)
+        .unwrap()
+        .read_at(corrupted_offset, &mut buf)
+        .unwrap();
+    assert_eq!(
+        buf,
+        image.dense[corrupted_offset as usize..corrupted_offset as usize + 16]
+    );
 }

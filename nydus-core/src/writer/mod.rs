@@ -31,6 +31,18 @@ use nydus_format::erofs::{
     EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_NULL_ADDR,
 };
 
+// Replacement buffers describe a prefix; truncate extension stays sparse.
+fn replacement_chunk(data: &[u8], start: usize, len: usize) -> std::borrow::Cow<'_, [u8]> {
+    if start <= data.len() && len <= data.len() - start {
+        return std::borrow::Cow::Borrowed(&data[start..start + len]);
+    }
+    let mut chunk = vec![0; len];
+    if start < data.len() {
+        chunk[..data.len() - start].copy_from_slice(&data[start..]);
+    }
+    std::borrow::Cow::Owned(chunk)
+}
+
 struct FinishedUpperBlob {
     full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     blob_metadata: BlobMetadata,
@@ -110,6 +122,22 @@ struct ChunkOverlay {
     patches: Vec<ChunkPatch>,
 }
 
+impl ChunkOverlay {
+    fn truncate(&mut self, size: usize) -> bool {
+        if let Some(source) = &mut self.source {
+            source.truncate(size);
+        }
+        self.patches.retain_mut(|patch| {
+            if patch.offset >= size {
+                return false;
+            }
+            patch.source.truncate(size - patch.offset);
+            true
+        });
+        self.source.is_some() || !self.patches.is_empty()
+    }
+}
+
 struct ChunkPatch {
     offset: usize,
     source: DirtyChunk,
@@ -129,6 +157,13 @@ enum DirtyChunk {
 }
 
 impl DirtyChunk {
+    fn truncate(&mut self, size: usize) {
+        match self {
+            Self::Owned(data) => data.truncate(size),
+            Self::FileRange { len, .. } | Self::MemoryRange { len, .. } => *len = (*len).min(size),
+        }
+    }
+
     fn len(&self) -> usize {
         match self {
             Self::Owned(data) => data.len(),
@@ -420,9 +455,9 @@ impl IncrementalWriter {
 
     /// Create a zero-filled regular file with a fixed logical size.
     ///
-    /// The parent directory must already exist. Creating directories and
-    /// extending a file after creation are intentionally outside this API. The
-    /// returned handle can stage writes without resolving `path` again.
+    /// The parent directory must already exist; creating directories is outside
+    /// this API. Use [`truncate_file`](Self::truncate_file) to change the length
+    /// later. The returned handle stages writes without resolving `path` again.
     pub fn create_file(
         &mut self,
         path: &Path,
@@ -780,6 +815,97 @@ impl IncrementalWriter {
         Ok(written)
     }
 
+    /// Set an existing regular file's length, preserving the retained prefix.
+    /// Extension reads as zero, including bytes discarded by an earlier truncation.
+    /// A non-aligned extension may need a data-capable parent reader to preserve
+    /// the previous EOF chunk. Aligned extension and shrinking are metadata-only.
+    pub fn truncate_file(&mut self, path: &Path, size: u64) -> Result<()> {
+        let key = normalize_relative_path(path)?;
+        let index = self.regular_inode_index_by_key(&key, path)?;
+        self.validate_inode_chunk_size(index, path)?;
+        let old_size = self.current_file_size(index);
+        if size == old_size {
+            return Ok(());
+        }
+        let chunk_size = u64::from(self.chunk_size);
+        let count = usize::try_from(size.div_ceil(chunk_size))
+            .map_err(|err| Error::Overflow(format!("file chunk count exceeds usize: {err}")))?;
+
+        // Read the old writer view before changing EOF. Only this boundary chunk
+        // needs copying; aligned growth and truncate-to-zero never read RAM/data.
+        let tail = if size > old_size && old_size % chunk_size != 0 {
+            let chunk_index = (old_size / chunk_size) as usize;
+            let overlay = self.overlay.get(&index);
+            let has_staged_chunk =
+                overlay.is_some_and(|file| file.chunks.contains_key(&chunk_index));
+            let has_base_data = match overlay.and_then(|file| file.replace.as_ref()) {
+                Some(data) => chunk_index as u64 * chunk_size < data.len() as u64,
+                None => self.chunk_has_parent_data(index, chunk_index)?,
+            };
+            if has_staged_chunk || has_base_data {
+                let new_len = (size - chunk_index as u64 * chunk_size).min(chunk_size) as usize;
+                let data = self.current_chunk_data(index, chunk_index, new_len)?;
+                Some((chunk_index, data))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let inode = &mut self.inodes[index];
+        let InodeData::RegularFile {
+            chunk_index_entries,
+            ..
+        } = &mut inode.data
+        else {
+            unreachable!()
+        };
+        chunk_index_entries
+            .try_reserve(count.saturating_sub(chunk_index_entries.len()))
+            .map_err(|err| Error::Overflow(format!("file chunk allocation failed: {err}")))?;
+        chunk_index_entries.resize(
+            count,
+            ErofsChunkAddr {
+                blkaddr: EROFS_NULL_ADDR,
+                device_id: 0,
+            },
+        );
+        inode.size = size;
+        inode.is_extended |=
+            ErofsInodeExtended::is_needed(size, inode.uid, inode.gid, u64::from(inode.nlink));
+
+        if size == 0 {
+            self.overlay.remove(&index);
+        } else if size < old_size {
+            if let Some(overlay) = self.overlay.get_mut(&index) {
+                if let Some(data) = &mut overlay.replace {
+                    if size < data.len() as u64 {
+                        data.truncate(size as usize);
+                    }
+                }
+                overlay.chunks.retain(|&chunk_index, chunk| {
+                    if chunk_index >= count {
+                        return false;
+                    }
+                    let len = (size - chunk_index as u64 * chunk_size).min(chunk_size) as usize;
+                    chunk.truncate(len)
+                });
+            }
+        }
+        if let Some((chunk_index, data)) = tail {
+            self.overlay.entry(index).or_default().chunks.insert(
+                chunk_index,
+                ChunkOverlay {
+                    source: Some(DirtyChunk::Owned(data)),
+                    patches: Vec::new(),
+                },
+            );
+        }
+        self.has_changes = true;
+        Ok(())
+    }
+
     /// Replace the whole file contents in the upper image.
     ///
     /// If `path` does not exist, a regular file is created with
@@ -800,6 +926,7 @@ impl IncrementalWriter {
             })?;
             self.create_file_inode(key, path, size, CreateFileOptions::default())?
         };
+        self.inodes[inode_index].size = data.len() as u64;
         self.overlay.insert(
             inode_index,
             FileOverlay {
@@ -1301,26 +1428,33 @@ impl IncrementalWriter {
 
     fn materialize_file_overlay(&mut self, inode_index: usize, overlay: FileOverlay) -> Result<()> {
         if let Some(data) = overlay.replace {
-            let replacement_size = u64::try_from(data.len()).map_err(|err| {
-                Error::Overflow(format!("replacement file size exceeds u64: {err}"))
-            })?;
-            let chunk_count = data.len().div_ceil(self.chunk_size as usize);
+            let replacement_size = self.inodes[inode_index].size;
+            let chunk_count = replacement_size.div_ceil(u64::from(self.chunk_size)) as usize;
             let mut chunk_index_entries = Vec::with_capacity(chunk_count);
             let mut chunks = overlay.chunks;
             for chunk_index in 0..chunk_count {
                 let start = chunk_index * self.chunk_size as usize;
-                let end = (start + self.chunk_size as usize).min(data.len());
+                let len = self.logical_chunk_len(inode_index, chunk_index)?;
                 let mut addr = match chunks.remove(&chunk_index) {
                     Some(chunk) => {
+                        let replacement = if chunk.source.is_none() {
+                            Some(replacement_chunk(&data, start, len))
+                        } else {
+                            None
+                        };
                         let source = self.materialize_chunk_overlay(
                             inode_index,
                             chunk_index,
-                            Some(&data[start..end]),
+                            replacement,
                             chunk,
                         )?;
                         self.write_upper_source_chunk_addr(source)?
                     }
-                    None => self.write_upper_chunk_addr(&data[start..end])?,
+                    None if start >= data.len() => ErofsChunkAddr {
+                        blkaddr: EROFS_NULL_ADDR,
+                        device_id: 0,
+                    },
+                    None => self.write_upper_chunk_addr(&replacement_chunk(&data, start, len))?,
                 };
                 self.resolve_or_track_blob_chunk(inode_index, chunk_index, &mut addr)?;
                 chunk_index_entries.push(addr);
@@ -1372,7 +1506,7 @@ impl IncrementalWriter {
         &self,
         inode_index: usize,
         chunk_index: usize,
-        replacement: Option<&[u8]>,
+        replacement: Option<std::borrow::Cow<'_, [u8]>>,
         chunk: ChunkOverlay,
     ) -> Result<DirtyChunk> {
         if chunk.patches.is_empty() {
@@ -1383,14 +1517,14 @@ impl IncrementalWriter {
             });
         }
 
-        let chunk_len = match replacement {
+        let chunk_len = match &replacement {
             Some(data) => data.len(),
             None => self.logical_chunk_len(inode_index, chunk_index)?,
         };
         let mut data = match chunk.source {
             Some(source) => source.into_vec()?,
             None => match replacement {
-                Some(data) => data.to_vec(),
+                Some(data) => data.into_owned(),
                 None => self.materialize_base_chunk(inode_index, chunk_index, chunk_len)?,
             },
         };
@@ -1408,14 +1542,57 @@ impl IncrementalWriter {
         Ok(DirtyChunk::Owned(data))
     }
 
+    fn current_chunk_data(
+        &self,
+        inode_index: usize,
+        chunk_index: usize,
+        target_len: usize,
+    ) -> Result<Vec<u8>> {
+        let len = self.logical_chunk_len(inode_index, chunk_index)?;
+        let overlay = self.overlay.get(&inode_index);
+        let chunk = overlay.and_then(|file| file.chunks.get(&chunk_index));
+        let mut data = vec![0; target_len];
+        if let Some(source) = chunk.and_then(|chunk| chunk.source.as_ref()) {
+            source.read_into(&mut data[..len])?;
+        } else if let Some(replace) = overlay.and_then(|file| file.replace.as_ref()) {
+            let start = chunk_index * self.chunk_size as usize;
+            let count = replace.len().saturating_sub(start).min(len);
+            if count > 0 {
+                data[..count].copy_from_slice(&replace[start..start + count]);
+            }
+        } else {
+            self.read_base_chunk_into(inode_index, chunk_index, &mut data[..len])?;
+        }
+        if let Some(chunk) = chunk {
+            for patch in &chunk.patches {
+                patch
+                    .source
+                    .read_into(&mut data[patch.offset..patch.offset + patch.source.len()])?;
+            }
+        }
+        Ok(data)
+    }
+
     fn materialize_base_chunk(
         &self,
         inode_index: usize,
         chunk_index: usize,
         chunk_len: usize,
     ) -> Result<Vec<u8>> {
+        let mut data = vec![0; chunk_len];
+        self.read_base_chunk_into(inode_index, chunk_index, &mut data)?;
+        Ok(data)
+    }
+
+    fn read_base_chunk_into(
+        &self,
+        inode_index: usize,
+        chunk_index: usize,
+        data: &mut [u8],
+    ) -> Result<()> {
         if !self.chunk_has_parent_data(inode_index, chunk_index)? {
-            return Ok(vec![0; chunk_len]);
+            data.fill(0);
+            return Ok(());
         }
         if inode_index >= self.parent_nids.len() {
             return Err(Error::InvalidImage(
@@ -1435,16 +1612,22 @@ impl IncrementalWriter {
         let inode = reader
             .inode(nid)
             .with_context(|| format!("failed to read parent inode {nid}"))?;
-        let data = reader
-            .read_file_data(nid, &inode, chunk_start, chunk_len as u32)
+        let chunk_len = data.len();
+        let count = reader
+            .write_file_data_to(
+                nid,
+                &inode,
+                chunk_start,
+                chunk_len as u32,
+                &mut &mut data[..],
+            )
             .with_context(|| format!("failed to read parent chunk at offset {chunk_start}"))?;
-        if data.len() != chunk_len {
+        if count != chunk_len {
             return Err(Error::InvalidImage(format!(
-                "short parent chunk read at offset {chunk_start}: got {}, expected {chunk_len}",
-                data.len()
+                "short parent chunk read at offset {chunk_start}: got {count}, expected {chunk_len}"
             )));
         }
-        Ok(data)
+        Ok(())
     }
 
     fn chunk_has_parent_data(&self, inode_index: usize, chunk_index: usize) -> Result<bool> {
@@ -1536,10 +1719,7 @@ impl IncrementalWriter {
     }
 
     fn current_file_size(&self, inode_index: usize) -> u64 {
-        self.overlay
-            .get(&inode_index)
-            .and_then(|overlay| overlay.replace.as_ref().map(|data| data.len() as u64))
-            .unwrap_or(self.inodes[inode_index].size)
+        self.inodes[inode_index].size
     }
 
     fn logical_chunk_len(&self, inode_index: usize, chunk_index: usize) -> Result<usize> {
@@ -1959,5 +2139,632 @@ mod prune_tests {
             reader.read_chunk_index_entries(nid, &inode).unwrap()[0].device_id,
             1
         );
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+    use nydus_backend::Local;
+    const FILE: &str = "memory.bin";
+
+    fn options(dir: &Path) -> IncrementalWriterOptions {
+        let mut options = IncrementalWriterOptions::new(dir.to_path_buf());
+        options.chunk_size = 4096;
+        options
+    }
+
+    fn reader(dir: &Path) -> Arc<ErofsReader> {
+        Arc::new(
+            ErofsReader::open_bootstrap(
+                &dir.join("image.boot"),
+                Arc::new(Local::new(
+                    dir.to_path_buf(),
+                    Arc::new(nydus_telemetry::metrics::Metrics::new()),
+                )),
+                Some(&dir.join("cache")),
+                None,
+                nydus_storage::cache::CacheOptions::default(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn contents(image: &ErofsReader) -> Vec<u8> {
+        let root = image.superblock().root_nid();
+        let nid = image
+            .lookup_dir_entry(root, &image.inode(root).unwrap(), FILE.as_bytes())
+            .unwrap()
+            .unwrap();
+        let inode = image.inode(nid).unwrap();
+        image
+            .read_file_data(nid, &inode, 0, inode.size() as u32)
+            .unwrap()
+    }
+
+    fn seed(dir: &Path, data: &[u8]) -> Arc<ErofsReader> {
+        let mut writer = IncrementalWriter::create(options(dir)).unwrap();
+        writer.replace_file(Path::new(FILE), data.to_vec()).unwrap();
+        writer.commit().unwrap();
+        reader(dir)
+    }
+
+    fn pattern(size: usize) -> Vec<u8> {
+        (0..size).map(|i| (i % 251 + 1) as u8).collect()
+    }
+
+    #[test]
+    fn truncate_aligned_growth_inherits_chunks_and_zero_extends() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = pattern(8192);
+        let parent = seed(root.path(), &initial);
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &root.path().join("image.boot"),
+            options(root.path()),
+        )
+        .unwrap();
+        let index = writer
+            .regular_inode_index_by_key(Path::new(FILE), Path::new(FILE))
+            .unwrap();
+        let refs = match &writer.inodes[index].data {
+            InodeData::RegularFile {
+                chunk_index_entries,
+                ..
+            } => chunk_index_entries
+                .iter()
+                .map(|v| (v.device_id, v.blkaddr))
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        writer.truncate_file(Path::new(FILE), 12288).unwrap();
+        let InodeData::RegularFile {
+            chunk_index_entries,
+            ..
+        } = &writer.inodes[index].data
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            refs,
+            chunk_index_entries[..2]
+                .iter()
+                .map(|v| (v.device_id, v.blkaddr))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(chunk_index_entries[2].blkaddr, EROFS_NULL_ADDR);
+        writer.commit().unwrap();
+        let mut expected = initial.clone();
+        expected.resize(12288, 0);
+        assert_eq!(contents(&reader(root.path())), expected);
+        assert_eq!(contents(&parent), initial);
+    }
+
+    #[test]
+    fn truncate_repeated_aligned_growth_preserves_staged_source_and_patches() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = IncrementalWriter::create(options(root.path())).unwrap();
+        writer.replace_file(Path::new(FILE), vec![7; 8192]).unwrap();
+        writer
+            .write_at_owned(Path::new(FILE), 0, vec![3; 4096])
+            .unwrap();
+        writer.write_at(Path::new(FILE), 100, &[5; 20]).unwrap();
+        let index = writer.path_index[Path::new(FILE)];
+        let source_ptr = match writer.overlay[&index].chunks[&0].source.as_ref().unwrap() {
+            DirtyChunk::Owned(data) => data.as_ptr(),
+            _ => unreachable!(),
+        };
+        for chunks in 3..20 {
+            writer
+                .truncate_file(Path::new(FILE), chunks * 4096)
+                .unwrap();
+        }
+        let chunk = &writer.overlay[&index].chunks[&0];
+        match chunk.source.as_ref().unwrap() {
+            DirtyChunk::Owned(data) => assert_eq!(data.as_ptr(), source_ptr),
+            _ => unreachable!(),
+        }
+        assert_eq!(chunk.patches.len(), 1);
+        assert_eq!(chunk.patches[0].source.len(), 20);
+        assert_eq!(writer.overlay[&index].replace.as_ref().unwrap().len(), 8192);
+        writer.commit().unwrap();
+        let mut expected = vec![7; 8192];
+        expected[..4096].fill(3);
+        expected[100..120].fill(5);
+        expected.resize(19 * 4096, 0);
+        assert_eq!(contents(&reader(root.path())), expected);
+    }
+
+    #[test]
+    fn truncate_sparse_replacement_with_overriding_source_and_patches() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = IncrementalWriter::create(options(root.path())).unwrap();
+        writer.replace_file(Path::new(FILE), vec![7; 1]).unwrap();
+        writer.truncate_file(Path::new(FILE), 12288).unwrap();
+        // Sources override both a padded replacement chunk and an entirely sparse chunk.
+        writer
+            .write_at_owned(Path::new(FILE), 0, vec![3; 4096])
+            .unwrap();
+        writer
+            .write_at_owned(Path::new(FILE), 8192, vec![4; 4096])
+            .unwrap();
+        writer.write_at(Path::new(FILE), 100, &[5; 20]).unwrap();
+        writer.write_at(Path::new(FILE), 8200, &[6; 20]).unwrap();
+        // A patch without a source still needs a zero-padded replacement base.
+        writer.write_at(Path::new(FILE), 5000, &[8; 20]).unwrap();
+        writer.commit().unwrap();
+        let mut expected = vec![0; 12288];
+        expected[..4096].fill(3);
+        expected[8192..].fill(4);
+        expected[100..120].fill(5);
+        expected[8200..8220].fill(6);
+        expected[5000..5020].fill(8);
+        assert_eq!(contents(&reader(root.path())), expected);
+    }
+
+    #[test]
+    fn truncate_shrink_and_regrow_do_not_resurrect_parent_bytes() {
+        for length in [0usize, 1, 4095, 4096, 4097, 5000, 8191] {
+            let root = tempfile::tempdir().unwrap();
+            let initial = pattern(8192);
+            let parent = seed(root.path(), &initial);
+            let mut writer =
+                IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+            writer
+                .truncate_file(Path::new(FILE), length as u64)
+                .unwrap();
+            writer.truncate_file(Path::new(FILE), 10003).unwrap();
+            writer.commit().unwrap();
+            let mut expected = initial[..length].to_vec();
+            expected.resize(10003, 0);
+            assert_eq!(contents(&reader(root.path())), expected, "EOF={length}");
+        }
+    }
+
+    #[test]
+    fn truncate_committed_partial_tail_then_extend() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = pattern(8192);
+        seed(root.path(), &initial);
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &root.path().join("image.boot"),
+            options(root.path()),
+        )
+        .unwrap();
+        writer.truncate_file(Path::new(FILE), 5000).unwrap();
+        writer.commit().unwrap();
+        let parent = reader(root.path());
+        assert_eq!(contents(&parent), initial[..5000]);
+        let mut writer =
+            IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+        writer.truncate_file(Path::new(FILE), 8192).unwrap();
+        writer.commit().unwrap();
+        let mut expected = initial[..5000].to_vec();
+        expected.resize(8192, 0);
+        assert_eq!(contents(&reader(root.path())), expected);
+    }
+
+    #[test]
+    fn truncate_partial_growth_reads_staged_patches_and_clips_truncated_patches() {
+        let root = tempfile::tempdir().unwrap();
+        let mut expected = pattern(8192);
+        let parent = seed(root.path(), &expected);
+        let mut writer =
+            IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+        writer.write_at(Path::new(FILE), 4100, &[9; 500]).unwrap();
+        expected[4100..4600].fill(9);
+        writer.write_at(Path::new(FILE), 6800, &[7; 1000]).unwrap();
+        writer.truncate_file(Path::new(FILE), 4300).unwrap();
+        expected.truncate(4300);
+        writer.truncate_file(Path::new(FILE), 8000).unwrap();
+        expected.resize(8000, 0);
+        writer.write_at(Path::new(FILE), 4600, &[3; 100]).unwrap();
+        expected[4600..4700].fill(3);
+        writer.commit().unwrap();
+        assert_eq!(contents(&reader(root.path())), expected);
+    }
+
+    #[test]
+    fn truncate_discards_an_empty_partial_chunk_overlay() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = pattern(8192);
+        let parent = seed(root.path(), &initial);
+        let mut writer =
+            IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+        writer.write_at(Path::new(FILE), 4100, &[9; 10]).unwrap();
+        writer.truncate_file(Path::new(FILE), 4097).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(contents(&reader(root.path())), initial[..4097]);
+    }
+
+    #[test]
+    fn truncate_owned_file_and_borrowed_memory_sources() {
+        for source in ["owned", "file", "memory"] {
+            let root = tempfile::tempdir().unwrap();
+            let data = pattern(8192);
+            let mut writer = IncrementalWriter::create(options(root.path())).unwrap();
+            writer
+                .create_file(Path::new(FILE), 8192, CreateFileOptions::default())
+                .unwrap();
+            match source {
+                "owned" => {
+                    writer
+                        .write_at_owned(Path::new(FILE), 0, data[..4096].to_vec())
+                        .unwrap();
+                    writer
+                        .write_at_owned(Path::new(FILE), 4096, data[4096..].to_vec())
+                        .unwrap();
+                }
+                "file" => {
+                    let path = root.path().join("source");
+                    fs::write(&path, &data).unwrap();
+                    writer
+                        .write_file_range(
+                            Path::new(FILE),
+                            0,
+                            Arc::new(File::open(path).unwrap()),
+                            0,
+                            8192,
+                        )
+                        .unwrap();
+                }
+                "memory" => unsafe {
+                    writer
+                        .write_memory_range(
+                            Path::new(FILE),
+                            0,
+                            NonNull::new(data.as_ptr() as *mut u8).unwrap(),
+                            data.len(),
+                        )
+                        .unwrap();
+                },
+                _ => unreachable!(),
+            }
+            writer.truncate_file(Path::new(FILE), 5000).unwrap();
+            writer.truncate_file(Path::new(FILE), 7000).unwrap();
+            writer.commit().unwrap();
+            let mut expected = data[..5000].to_vec();
+            expected.resize(7000, 0);
+            assert_eq!(contents(&reader(root.path())), expected, "source={source}");
+        }
+    }
+
+    #[test]
+    fn truncate_pending_replacement_stays_sparse_when_extended() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = seed(root.path(), &pattern(8192));
+        let mut writer =
+            IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+        writer.replace_file(Path::new(FILE), vec![7; 5000]).unwrap();
+        writer.write_at(Path::new(FILE), 4090, &[3; 30]).unwrap();
+        writer.truncate_file(Path::new(FILE), 4210).unwrap();
+        writer.truncate_file(Path::new(FILE), 10000).unwrap();
+        let index = writer
+            .regular_inode_index_by_key(Path::new(FILE), Path::new(FILE))
+            .unwrap();
+        assert_eq!(writer.overlay[&index].replace.as_ref().unwrap().len(), 4210);
+        assert_eq!(
+            writer.write_at(Path::new(FILE), 9000, &[5; 10]).unwrap(),
+            10
+        );
+        writer.commit().unwrap();
+        let mut expected = vec![7; 4210];
+        expected[4090..4120].fill(3);
+        expected.resize(10000, 0);
+        expected[9000..9010].fill(5);
+        assert_eq!(contents(&reader(root.path())), expected);
+    }
+
+    #[test]
+    fn truncate_zero_discards_all_staged_and_inherited_data() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = seed(root.path(), &[9; 8192]);
+        let mut writer =
+            IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+        writer.replace_file(Path::new(FILE), vec![7; 8192]).unwrap();
+        writer.write_at(Path::new(FILE), 0, &[3; 4096]).unwrap();
+        writer.truncate_file(Path::new(FILE), 0).unwrap();
+        assert!(writer.overlay.is_empty());
+        writer.truncate_file(Path::new(FILE), 1 << 30).unwrap();
+        assert!(writer.overlay.is_empty());
+        let index = writer
+            .regular_inode_index_by_key(Path::new(FILE), Path::new(FILE))
+            .unwrap();
+        let InodeData::RegularFile {
+            chunk_index_entries,
+            ..
+        } = &writer.inodes[index].data
+        else {
+            unreachable!()
+        };
+        assert!(chunk_index_entries
+            .iter()
+            .all(|v| v.blkaddr == EROFS_NULL_ADDR));
+        writer.truncate_file(Path::new(FILE), 7000).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(contents(&reader(root.path())), vec![0; 7000]);
+    }
+
+    #[test]
+    fn truncate_metadata_only_growth_failure_leaves_file_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = pattern(3000);
+        seed(root.path(), &initial);
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &root.path().join("image.boot"),
+            options(root.path()),
+        )
+        .unwrap();
+        assert!(writer.truncate_file(Path::new(FILE), 8192).is_err());
+        assert_eq!(
+            writer.current_file_size(writer.path_index[Path::new(FILE)]),
+            3000
+        );
+        assert!(!writer.has_changes);
+        writer.truncate_file(Path::new(FILE), 0).unwrap();
+        writer.truncate_file(Path::new(FILE), 8192).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(contents(&reader(root.path())), vec![0; 8192]);
+    }
+
+    #[test]
+    fn truncate_empty_partial_hole_and_missing_file() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = IncrementalWriter::create(options(root.path())).unwrap();
+        assert!(writer.truncate_file(Path::new("missing"), 10).is_err());
+        assert!(writer.truncate_file(Path::new(""), 10).is_err());
+        writer
+            .create_file(Path::new(FILE), 3, CreateFileOptions::default())
+            .unwrap();
+        writer.truncate_file(Path::new(FILE), 8192).unwrap();
+        writer.truncate_file(Path::new(FILE), 0).unwrap();
+        writer.truncate_file(Path::new(FILE), 0).unwrap();
+        writer.commit().unwrap();
+        assert!(contents(&reader(root.path())).is_empty());
+    }
+
+    #[test]
+    fn truncate_promotes_compact_inode_past_four_gib() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = IncrementalWriter::create(options(root.path())).unwrap();
+        writer
+            .create_file(Path::new(FILE), 4096, CreateFileOptions::default())
+            .unwrap();
+        let index = writer.path_index[Path::new(FILE)];
+        assert!(!writer.inodes[index].is_extended);
+        writer
+            .truncate_file(Path::new(FILE), (1u64 << 32) + 4096)
+            .unwrap();
+        assert!(writer.inodes[index].is_extended);
+        writer.commit().unwrap();
+        let image = ErofsReader::open_metadata_only(&root.path().join("image.boot")).unwrap();
+        let root_nid = image.superblock().root_nid();
+        let nid = image
+            .lookup_dir_entry(root_nid, &image.inode(root_nid).unwrap(), FILE.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert_eq!(image.inode(nid).unwrap().size(), (1u64 << 32) + 4096);
+    }
+
+    #[test]
+    fn replacement_patch_reuses_owned_padding_buffer() {
+        for padded in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut writer = IncrementalWriter::create(options(root.path())).unwrap();
+            writer
+                .create_file(Path::new(FILE), 4096, CreateFileOptions::default())
+                .unwrap();
+            let index = writer.path_index[Path::new(FILE)];
+            let prefix = vec![7; if padded { 1 } else { 4096 }];
+            let base = replacement_chunk(&prefix, 0, 4096);
+            assert_eq!(matches!(&base, std::borrow::Cow::Owned(_)), padded);
+            let ptr = base.as_ptr();
+            let result = writer
+                .materialize_chunk_overlay(
+                    index,
+                    0,
+                    Some(base),
+                    ChunkOverlay {
+                        source: None,
+                        patches: vec![ChunkPatch {
+                            offset: 100,
+                            source: DirtyChunk::Owned(vec![9; 20]),
+                        }],
+                    },
+                )
+                .unwrap();
+            let DirtyChunk::Owned(data) = result else {
+                unreachable!()
+            };
+            if padded {
+                assert_eq!(data.as_ptr(), ptr);
+            } else {
+                assert_ne!(data.as_ptr(), prefix.as_ptr());
+            }
+            let mut expected = prefix;
+            expected.resize(4096, 0);
+            expected[100..120].fill(9);
+            assert_eq!(data, expected);
+        }
+    }
+
+    #[test]
+    fn truncate_sparse_replacement_eof_does_not_materialize_parent_or_zeroes() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = pattern(12288);
+        let parent = seed(root.path(), &initial);
+        let mut writer = IncrementalWriter::open_metadata_only(
+            &root.path().join("image.boot"),
+            options(root.path()),
+        )
+        .unwrap();
+        writer.replace_file(Path::new(FILE), vec![7]).unwrap();
+        writer.truncate_file(Path::new(FILE), 4097).unwrap();
+        let index = writer.path_index[Path::new(FILE)];
+        assert_eq!(writer.overlay[&index].chunks.len(), 1);
+        for size in [5000, 7000, 8192, 8193, 12288] {
+            writer.truncate_file(Path::new(FILE), size).unwrap();
+            assert_eq!(writer.overlay[&index].chunks.len(), 1);
+            assert!(writer.overlay[&index].chunks.contains_key(&0));
+        }
+        writer.commit().unwrap();
+        let mut expected = vec![0; 12288];
+        expected[0] = 7;
+        assert_eq!(contents(&reader(root.path())), expected);
+        // In-place publication must keep the original reader's mmap valid.
+        assert_eq!(contents(&parent), initial);
+    }
+
+    #[test]
+    fn truncate_prune_remaps_surviving_parent_and_prefetch_then_extends() {
+        for prune in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let original = seed(root.path(), &pattern(8192));
+            let mut writer =
+                IncrementalWriter::from_parent_reader(original.clone(), options(root.path()))
+                    .unwrap();
+            writer.write_at(Path::new(FILE), 0, &[7; 4096]).unwrap();
+            writer.commit().unwrap();
+            let parent = reader(root.path());
+            let parent_blobs = parent.blob_infos().unwrap();
+            assert_eq!(parent_blobs.len(), 2);
+            let mut settings = options(root.path());
+            settings.prune = prune;
+            let mut writer =
+                IncrementalWriter::from_parent_reader(parent.clone(), settings).unwrap();
+            crate::build::inode::set_root_prefetch_blobs_xattr(&mut writer.inodes[0], &[1, 2])
+                .unwrap();
+            writer.truncate_file(Path::new(FILE), 4096).unwrap();
+            writer.commit().unwrap();
+            let child = reader(root.path());
+            let blobs = child.blob_infos().unwrap();
+            if prune {
+                assert_eq!(blobs.len(), 1);
+                assert_eq!(blobs[0].blob_id, parent_blobs[1].blob_id);
+                assert_eq!(child.read_prefetch_order(), vec![1]);
+            } else {
+                assert_eq!(blobs.len(), 2);
+                assert_eq!(child.read_prefetch_order(), vec![1, 2]);
+            }
+            let root_nid = child.superblock().root_nid();
+            let nid = child
+                .lookup_dir_entry(root_nid, &child.inode(root_nid).unwrap(), FILE.as_bytes())
+                .unwrap()
+                .unwrap();
+            let chunks = child
+                .read_chunk_index_entries(nid, &child.inode(nid).unwrap())
+                .unwrap();
+            assert_eq!(chunks[0].device_id, if prune { 1 } else { 2 });
+            assert_eq!(contents(&child), vec![7; 4096]);
+            assert_eq!(contents(&parent).len(), 8192);
+            assert_eq!(contents(&original), pattern(8192));
+
+            let mut settings = options(root.path());
+            settings.prune = prune;
+            let mut writer = IncrementalWriter::from_parent_reader(child, settings).unwrap();
+            writer.truncate_file(Path::new(FILE), 8192).unwrap();
+            writer.write_at(Path::new(FILE), 6000, &[9]).unwrap();
+            writer.commit().unwrap();
+            let final_image = reader(root.path());
+            let mut expected = vec![7; 4096];
+            expected.resize(8192, 0);
+            expected[6000] = 9;
+            assert_eq!(contents(&final_image), expected);
+            assert_eq!(
+                final_image.blob_infos().unwrap().len(),
+                if prune { 2 } else { 3 }
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_prune_drops_last_parent_reference_and_handles_sparse_rewrite() {
+        for prune in [false, true] {
+            for size in [0, 8192] {
+                for rewrite in [false, true] {
+                    if rewrite && size == 0 {
+                        continue;
+                    }
+                    let root = tempfile::tempdir().unwrap();
+                    let initial = pattern(8192);
+                    let parent = seed(root.path(), &initial);
+                    let mut settings = options(root.path());
+                    settings.prune = prune;
+                    let mut writer =
+                        IncrementalWriter::from_parent_reader(parent.clone(), settings).unwrap();
+                    writer.truncate_file(Path::new(FILE), 0).unwrap();
+                    writer.truncate_file(Path::new(FILE), size).unwrap();
+                    let mut expected = vec![0; size as usize];
+                    if rewrite {
+                        writer.write_at(Path::new(FILE), 100, &[9; 20]).unwrap();
+                        expected[100..120].fill(9);
+                    }
+                    writer.commit().unwrap();
+                    let child = reader(root.path());
+                    assert_eq!(contents(&child), expected);
+                    assert_eq!(
+                        child.blob_infos().unwrap().len(),
+                        usize::from(!prune) + usize::from(rewrite)
+                    );
+                    assert_eq!(contents(&parent), initial);
+                    let mut settings = options(root.path());
+                    settings.prune = prune;
+                    let mut writer =
+                        IncrementalWriter::from_parent_reader(child, settings).unwrap();
+                    writer.truncate_file(Path::new(FILE), size + 4096).unwrap();
+                    writer.commit().unwrap();
+                    expected.resize((size + 4096) as usize, 0);
+                    assert_eq!(contents(&reader(root.path())), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_matches_a_byte_vector_across_repeated_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let mut expected = pattern(9000);
+        let parent = seed(root.path(), &expected);
+        let mut writer =
+            IncrementalWriter::from_parent_reader(parent, options(root.path())).unwrap();
+        let mut random = 7u64;
+        for iteration in 0..180 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let size = ((random >> 32) % 12000) as usize;
+            match random % 3 {
+                0 => {
+                    writer.truncate_file(Path::new(FILE), size as u64).unwrap();
+                    expected.resize(size, 0);
+                }
+                1 => {
+                    let offset = ((random >> 16) % 13000) as usize;
+                    let data = vec![iteration as u8; size % 5000];
+                    let written = writer
+                        .write_at(Path::new(FILE), offset as u64, &data)
+                        .unwrap();
+                    let count = expected.len().saturating_sub(offset).min(data.len());
+                    assert_eq!(written, count);
+                    if count > 0 {
+                        expected[offset..offset + count].copy_from_slice(&data[..count]);
+                    }
+                }
+                _ => {
+                    expected = vec![iteration as u8; size];
+                    writer
+                        .replace_file(Path::new(FILE), expected.clone())
+                        .unwrap();
+                }
+            }
+            if iteration % 11 == 0 && writer.has_changes {
+                writer.commit().unwrap();
+                let image = reader(root.path());
+                assert_eq!(contents(&image), expected, "iteration={iteration}");
+                writer =
+                    IncrementalWriter::from_parent_reader(image, options(root.path())).unwrap();
+            }
+        }
+        if writer.has_changes {
+            writer.commit().unwrap();
+        }
+        assert_eq!(contents(&reader(root.path())), expected);
     }
 }

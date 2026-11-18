@@ -13,8 +13,8 @@ use super::{lock_exclusive, CONTROL_RESPONSE_TIMEOUT};
 
 const MAX_RECORD_BYTES: u64 = 64 * 1024;
 
-/// Derives a stable coordination key from the frontend and native resource, never the image or API path.
-pub fn state_base(frontend: &str, resource: &str) -> Result<PathBuf> {
+/// Derives a stable coordination key under `runtime_dir` from the frontend and native resource, never the image or API path.
+pub fn state_base(runtime_dir: &Path, frontend: &str, resource: &str) -> Result<PathBuf> {
     if frontend.is_empty()
         || !frontend
             .bytes()
@@ -25,9 +25,9 @@ pub fn state_base(frontend: &str, resource: &str) -> Result<PathBuf> {
         ));
     }
     // SAFETY: geteuid takes no pointers and cannot fail.
-    let directory = PathBuf::from(format!("/run/nydus/{frontend}/{}", unsafe {
-        libc::geteuid()
-    }));
+    let directory = runtime_dir
+        .join(frontend)
+        .join(unsafe { libc::geteuid() }.to_string());
     Ok(directory.join(format!("{:x}", Sha256::digest(resource.as_bytes()))))
 }
 
@@ -227,11 +227,13 @@ fn read_record<T: DeserializeOwned>(file: &File) -> Result<T> {
 mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
+    use nydus_config::default_runtime_dir;
+
     use super::*;
 
     #[test]
     fn coordination_keys_separate_frontends_and_resources() {
-        let fuse = state_base("fuse", "/mnt/image").unwrap();
+        let fuse = state_base(&default_runtime_dir(), "fuse", "/mnt/image").unwrap();
         let hash = format!("{:x}", Sha256::digest(b"/mnt/image"));
         assert_eq!(
             fuse,
@@ -239,9 +241,15 @@ mod tests {
                 libc::geteuid()
             }))
         );
-        assert_ne!(fuse, state_base("nbd", "/mnt/image").unwrap());
-        assert_ne!(fuse, state_base("fuse", "/mnt/other").unwrap());
-        assert!(state_base("../other", "device").is_err());
+        assert_ne!(
+            fuse,
+            state_base(&default_runtime_dir(), "nbd", "/mnt/image").unwrap()
+        );
+        assert_ne!(
+            fuse,
+            state_base(&default_runtime_dir(), "fuse", "/mnt/other").unwrap()
+        );
+        assert!(state_base(&default_runtime_dir(), "../other", "device").is_err());
     }
 
     #[test]
