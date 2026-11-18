@@ -26,7 +26,7 @@ func newInstallCmd() *cobra.Command {
 				return err
 			}
 
-			manager := systemd.New(installer.DefaultJobTimeout)
+			manager := systemd.New(installer.JobTimeout)
 			defer manager.Close()
 
 			return installer.New(&cfg, manager).Run(cmd.Context())
@@ -36,7 +36,7 @@ func newInstallCmd() *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&cfg.HostRoot, "host-root", installer.DefaultHostRoot, "path the host root is mounted at, / on the host")
 	flags.StringVar(&cfg.PayloadDir, "payload-dir", installer.DefaultPayloadDir, "directory holding bin/, systemd/ and config/ to install")
-	flags.StringVar(&cfg.TokenDir, "token-dir", installer.DefaultTokenDir, "service account token directory to copy to the host when kubesecret is enabled")
+	flags.StringVar(&cfg.TokenDir, "token-dir", installer.DefaultTokenDir, "service account token directory to copy to the host when kube_secret is enabled")
 	flags.DurationVar(&cfg.SyncInterval, "sync-interval", installer.DefaultSyncInterval, "how often the token and the config are copied to the host")
 
 	return cmd

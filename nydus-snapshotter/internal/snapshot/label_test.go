@@ -24,28 +24,32 @@ func TestSnapshotKey_isUnpack(t *testing.T) {
 			name: "unpack key of the metadata store",
 			key:  "default/12/extract-123-sha256:ab",
 			expect: func(t *testing.T, unpack bool) {
-				assert.True(t, unpack)
+				assert := assert.New(t)
+				assert.True(unpack)
 			},
 		},
 		{
 			name: "bare unpack key",
 			key:  "extract-123-sha256:ab",
 			expect: func(t *testing.T, unpack bool) {
-				assert.True(t, unpack)
+				assert := assert.New(t)
+				assert.True(unpack)
 			},
 		},
 		{
 			name: "container key",
 			key:  "default/13/container",
 			expect: func(t *testing.T, unpack bool) {
-				assert.False(t, unpack)
+				assert := assert.New(t)
+				assert.False(unpack)
 			},
 		},
 		{
 			name: "container key named like an unpack key below the prefix",
 			key:  "default/14/app/extract-123",
 			expect: func(t *testing.T, unpack bool) {
-				assert.False(t, unpack)
+				assert := assert.New(t)
+				assert.False(unpack)
 			},
 		},
 	}
@@ -85,7 +89,8 @@ func TestLabels_prefetchScope(t *testing.T) {
 			name:   "unknown scope",
 			labels: labels{labelNydusPrefetch: "some"},
 			expect: func(t *testing.T, scope string, err error) {
-				assert.ErrorIs(t, err, errdefs.ErrInvalidArgument)
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
 			},
 		},
 	}
@@ -128,17 +133,43 @@ func TestLabels_rootPair(t *testing.T) {
 			},
 		},
 		{
+			name:   "gid mapping alone leaves the uid as it is",
+			labels: labels{snapshots.LabelSnapshotGIDMapping: "0:200000:65536"},
+			expect: func(t *testing.T, uid, gid int, ok bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(ok)
+				assert.Zero(uid)
+				assert.Equal(200000, gid)
+			},
+		},
+		{
+			name: "gid mapping that does not parse",
+			labels: labels{
+				snapshots.LabelSnapshotUIDMapping: "0:100000:65536",
+				snapshots.LabelSnapshotGIDMapping: "root",
+			},
+			expect: func(t *testing.T, uid, gid int, ok bool, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+				assert.ErrorContains(err, snapshots.LabelSnapshotGIDMapping)
+				assert.False(ok)
+			},
+		},
+		{
 			name:   "mapping without container root",
 			labels: labels{snapshots.LabelSnapshotUIDMapping: "1:100000:10"},
 			expect: func(t *testing.T, uid, gid int, ok bool, err error) {
-				assert.ErrorIs(t, err, errdefs.ErrInvalidArgument)
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
 			},
 		},
 		{
 			name:   "unparsable mapping",
 			labels: labels{snapshots.LabelSnapshotUIDMapping: "root"},
 			expect: func(t *testing.T, uid, gid int, ok bool, err error) {
-				assert.ErrorIs(t, err, errdefs.ErrInvalidArgument)
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
 			},
 		},
 	}

@@ -35,7 +35,7 @@ and run through `sudo -E`.
 | `soak/`                     | Long parallel reads and mount cycles leak no fd, thread, mount or process.                                                              |
 | `dragonfly/`                | Reads through Dragonfly P2P, and fallback to the origin when it fails.                                                                  |
 | `registry/`                 | Origin reads, Basic/Bearer auth, redirects, HTTP retries/proxies, TLS trust and prefetch retries. |
-| `snapshotter/`              | nydus-snapshotter behind a real containerd (1.6, 2.x) and runc: blobs never pulled, nydus and OCI containers side by side, shared daemons stopped after GC, daemon kill and snapshotter restart, prefetch label, private registry, unlabelled pulls refused. |
+| `snapshotter/`              | nydus-snapshotter behind a real containerd (1.6, 2.x) and runc: blobs never pulled, nydus and OCI containers side by side, shared daemons stopped after GC, daemon kill and snapshotter restart, many daemons started at once, daemon metrics served by the snapshotter, prefetch label, private registry, unlabelled pulls refused, a pod over CRI, the shipped socket and service units, one daemon across containerd namespaces, a credential rotated through a Kubernetes secret, the health endpoints, a config reload reaching a running daemon, a registry host sent to another server by `hosts.toml`, a container in a user namespace, the installer on a systemd node container (install, rerun, reboot, upgrade, token sync). |
 | `experimental/<transport>/` | The nbd, fanotify and ublk adapters and their transport specifics; the uffd page-fault protocol.                                        |
 | `bench/`                    | Go benchmarks (`BenchmarkMount/<mode>`); they run only with `-bench`, as `make benchmark` does.                                                                    |
 
@@ -309,6 +309,9 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
 | `NYDUS_SNAPSHOTTER_BIN` | nydus-snapshotter under test (default the in-tree `nydus-snapshotter/bin/nydus-snapshotter`). |
 | `NYDUS_E2E_CONTAINERD` | containerd binary the snapshotter suite runs, 1.6 or 2.x; without it the suite skips locally and fails under CI. |
 | `NYDUS_E2E_RUNC` | runc binary of the snapshotter suite's containers (default `runc` on PATH). |
+| `NYDUS_E2E_DAEMONS` | Images the snapshotter suite starts at once, one daemon each (default 16). |
+| `NYDUS_E2E_KUBECONFIG` | Admin kubeconfig of a cluster the snapshotter suite's kube secret test creates its namespace, account and secret in, with `kubectl`; without it that test skips locally and fails under CI. |
+| `NYDUS_E2E_NODE_IMAGE` | Image the snapshotter suite's installer tests boot with `docker` as a systemd host, a Kind node image such as `kindest/node:v1.34.0`; without it those tests skip locally and fail under CI. |
 | `NYDUS_E2E_SOAK_DURATION` | Soak duration per workload (default 30s). |
 | `NYDUS_E2E_SOAK_CYCLES` | Mount cycles per soak workload (default 6). |
 | `NYDUS_E2E_SOAK_RSS_MIB` | Optional peak RSS growth budget in MiB. |

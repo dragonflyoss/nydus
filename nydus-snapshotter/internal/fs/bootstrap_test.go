@@ -7,6 +7,7 @@
 package fs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
+
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/cache"
 )
 
 func TestBootstrapLayer_Blobs(t *testing.T) {
@@ -22,6 +25,7 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 		name    string
 		files   []string
 		hostDir bool
+		prepare func(t *testing.T, fsDir string)
 		expect  func(t *testing.T, blobs []string, err error)
 	}{
 		{
@@ -35,7 +39,7 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 		},
 		{
 			name:  "list blob metas",
-			files: []string{bootstrapFile, mockBlobID + blobMetaSuffix, mockOtherBlobID + blobMetaSuffix},
+			files: []string{bootstrapFile, mockBlobID + cache.BlobMetaSuffix, mockOtherBlobID + cache.BlobMetaSuffix},
 			expect: func(t *testing.T, blobs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -44,7 +48,7 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 		},
 		{
 			name:  "skip names that are no blob id",
-			files: []string{"aaaa" + blobMetaSuffix, "..%2f" + mockBlobID + blobMetaSuffix, strings.ToUpper(mockBlobID) + blobMetaSuffix},
+			files: []string{"aaaa" + cache.BlobMetaSuffix, "..%2f" + mockBlobID + cache.BlobMetaSuffix, strings.ToUpper(mockBlobID) + cache.BlobMetaSuffix},
 			expect: func(t *testing.T, blobs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -54,7 +58,49 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 		{
 			name: "missing image dir",
 			expect: func(t *testing.T, blobs []string, err error) {
-				assert.Error(t, err)
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.Empty(blobs)
+			},
+		},
+		{
+			name: "image dir that links to itself",
+			prepare: func(t *testing.T, fsDir string) {
+				assert.NoError(t, os.Symlink("image", filepath.Join(fsDir, "image")))
+			},
+			expect: func(t *testing.T, blobs []string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "resolve image dir")
+				assert.Empty(blobs)
+			},
+		},
+		{
+			name: "skip a directory named as a blob meta",
+			prepare: func(t *testing.T, fsDir string) {
+				assert.NoError(t, os.MkdirAll(filepath.Join(fsDir, "image", mockBlobID+cache.BlobMetaSuffix), 0o755))
+			},
+			expect: func(t *testing.T, blobs []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Empty(blobs)
+			},
+		},
+		{
+			name: "more blob metas than a bootstrap can reference",
+			prepare: func(t *testing.T, fsDir string) {
+				assert.NoError(t, os.Mkdir(filepath.Join(fsDir, "image"), 0o755))
+				for i := range maxBlobs + 1 {
+					f, err := os.Create(filepath.Join(fsDir, "image", fmt.Sprintf("%064x", i)+cache.BlobMetaSuffix))
+					if !assert.NoError(t, err) {
+						return
+					}
+					assert.NoError(t, f.Close())
+				}
+			},
+			expect: func(t *testing.T, blobs []string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+				assert.Empty(blobs)
 			},
 		},
 	}
@@ -69,6 +115,10 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 				assert.NoError(t, os.Symlink(filepath.Join(hostDir, "image"), filepath.Join(fsDir, "image")))
 			}
 
+			if tc.prepare != nil {
+				tc.prepare(t, fsDir)
+			}
+
 			blobs, err := NewBootstrapLayer(fsDir).Blobs()
 			tc.expect(t, blobs, err)
 		})
@@ -81,6 +131,7 @@ func TestBootstrapLayer_linkBootstrap(t *testing.T) {
 		existed     bool
 		symlink     bool
 		crossDevice bool
+		prepare     func(t *testing.T, src, dst string)
 		expect      func(t *testing.T, src, dst string, err error)
 	}{
 		{
@@ -126,6 +177,51 @@ func TestBootstrapLayer_linkBootstrap(t *testing.T) {
 				assert.Equal(bootstrapFile, string(data))
 			},
 		},
+		{
+			name: "stale bootstrap that cannot be removed",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.MkdirAll(filepath.Join(dst, "child"), 0o755))
+			},
+			expect: func(t *testing.T, src, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "remove "+dst)
+				assert.DirExists(dst)
+			},
+		},
+		{
+			name: "image dir that links to itself",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.RemoveAll(filepath.Dir(src)))
+				assert.NoError(t, os.Symlink("image", filepath.Dir(src)))
+			},
+			expect: func(t *testing.T, src, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "resolve image dir")
+				assert.NoFileExists(dst)
+			},
+		},
+		{
+			name: "layer without a bootstrap",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.Remove(src))
+			},
+			expect: func(t *testing.T, src, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.NoFileExists(dst)
+			},
+		},
+		{
+			name: "target dir that does not exist",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.Remove(filepath.Dir(dst)))
+			},
+			expect: func(t *testing.T, src, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "link "+src+" to "+dst)
+				assert.NoFileExists(dst)
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -147,8 +243,13 @@ func TestBootstrapLayer_linkBootstrap(t *testing.T) {
 				assert.NoError(t, os.WriteFile(dst, []byte("stale"), 0o644))
 			}
 
+			src := filepath.Join(fsDir, "image", bootstrapFile)
+			if tc.prepare != nil {
+				tc.prepare(t, src, dst)
+			}
+
 			err := NewBootstrapLayer(fsDir).linkBootstrap(dst)
-			tc.expect(t, filepath.Join(fsDir, "image", bootstrapFile), dst, err)
+			tc.expect(t, src, dst, err)
 		})
 	}
 }
@@ -157,10 +258,12 @@ func TestBootstrapLayer_seedCache(t *testing.T) {
 	tests := []struct {
 		name   string
 		cached map[string]string
+		blobs  []string
 		expect func(t *testing.T, cacheDir string, err error)
 	}{
 		{
-			name: "seed blob metas",
+			name:  "seed blob metas",
+			blobs: []string{"aaaa"},
 			expect: func(t *testing.T, cacheDir string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -171,11 +274,22 @@ func TestBootstrapLayer_seedCache(t *testing.T) {
 		{
 			name:   "keep a cached meta",
 			cached: map[string]string{"aaaa.blob.meta": "cached"},
+			blobs:  []string{"aaaa"},
 			expect: func(t *testing.T, cacheDir string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				data, _ := os.ReadFile(filepath.Join(cacheDir, "aaaa.blob.meta"))
 				assert.Equal("cached", string(data))
+			},
+		},
+		{
+			name:  "blob meta the layer does not ship",
+			blobs: []string{"aaaa", "bbbb"},
+			expect: func(t *testing.T, cacheDir string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.FileExists(filepath.Join(cacheDir, "aaaa.blob.meta"))
+				assert.NoFileExists(filepath.Join(cacheDir, "bbbb.blob.meta"))
 			},
 		},
 	}
@@ -188,7 +302,7 @@ func TestBootstrapLayer_seedCache(t *testing.T) {
 				assert.NoError(t, os.WriteFile(filepath.Join(cacheDir, name), []byte(content), 0o644))
 			}
 
-			tc.expect(t, cacheDir, NewBootstrapLayer(fsDir).seedCache(cacheDir, []string{"aaaa"}))
+			tc.expect(t, cacheDir, NewBootstrapLayer(fsDir).seedCache(cacheDir, tc.blobs))
 		})
 	}
 }
@@ -203,8 +317,9 @@ func writeLayer(t *testing.T, fsDir string, files []string) {
 
 func TestBootstrapLayer_copyFile(t *testing.T) {
 	tests := []struct {
-		name   string
-		expect func(t *testing.T, dst string, err error)
+		name    string
+		prepare func(t *testing.T, src, dst string)
+		expect  func(t *testing.T, dst string, err error)
 	}{
 		{
 			name: "copy through a temporary file",
@@ -222,14 +337,68 @@ func TestBootstrapLayer_copyFile(t *testing.T) {
 				assert.Len(entries, 1)
 			},
 		},
+		{
+			name: "source that does not exist",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.Remove(src))
+			},
+			expect: func(t *testing.T, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "open ")
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.NoFileExists(dst)
+			},
+		},
+		{
+			name: "target dir that does not exist",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.Remove(filepath.Dir(dst)))
+			},
+			expect: func(t *testing.T, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "create temporary file for "+dst)
+			},
+		},
+		{
+			name: "source that cannot be read leaves no temporary file",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.Remove(src))
+				assert.NoError(t, os.Mkdir(src, 0o755))
+			},
+			expect: func(t *testing.T, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "copy ")
+				entries, err := os.ReadDir(filepath.Dir(dst))
+				assert.NoError(err)
+				assert.Empty(entries)
+			},
+		},
+		{
+			name: "target that cannot be replaced leaves no temporary file",
+			prepare: func(t *testing.T, src, dst string) {
+				assert.NoError(t, os.MkdirAll(filepath.Join(dst, "child"), 0o755))
+			},
+			expect: func(t *testing.T, dst string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "rename ")
+				entries, err := os.ReadDir(filepath.Dir(dst))
+				assert.NoError(err)
+				assert.Len(entries, 1)
+				assert.DirExists(dst)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fsDir := t.TempDir()
 			writeLayer(t, fsDir, []string{bootstrapFile})
-			dst := filepath.Join(t.TempDir(), bootstrapFile)
-			tc.expect(t, dst, NewBootstrapLayer(fsDir).copyFile(filepath.Join(fsDir, "image", bootstrapFile), dst))
+			src, dst := filepath.Join(fsDir, "image", bootstrapFile), filepath.Join(t.TempDir(), bootstrapFile)
+			if tc.prepare != nil {
+				tc.prepare(t, src, dst)
+			}
+
+			tc.expect(t, dst, NewBootstrapLayer(fsDir).copyFile(src, dst))
 		})
 	}
 }

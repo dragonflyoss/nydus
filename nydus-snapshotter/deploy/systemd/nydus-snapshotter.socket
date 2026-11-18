@@ -7,7 +7,7 @@ Description=nydus snapshotter gRPC socket
 Documentation=https://github.com/dragonflyoss/nydus/blob/main/docs/snapshotter.md
 
 [Socket]
-ListenStream=/run/containerd-nydus-v3/containerd-nydus-grpc.sock
+ListenStream=/run/nydus-snapshotter/nydus-snapshotter.sock
 # Only root (containerd) may connect.
 SocketMode=0600
 # Created only when missing; the directory also holds daemon API sockets and

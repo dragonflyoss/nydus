@@ -2,6 +2,7 @@ package snapshotter
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -36,7 +37,7 @@ func TestNydusImage(t *testing.T) {
 			return r.Method == http.MethodGet && strings.HasSuffix(r.Path, "/blobs/"+layer.Digest.String())
 		})
 		_, err := n.client.ContentStore().Info(n.ctx, layer.Digest)
-		if layer.Annotations["containerd.io/snapshot/nydus-blob"] == "true" {
+		if layer.Annotations[labelNydusBlob] == "true" {
 			blobs++
 			assert.True(t, errdefs.IsNotFound(err))
 			assert.Zero(t, gets)
@@ -51,7 +52,11 @@ func TestNydusImage(t *testing.T) {
 	c := n.start(t, pulled)
 	assertFiles(t, c, img)
 	unit := n.unit(t, pulled)
-	n.runningDaemon(t, unit)
+	n.assertRunning(t, unit)
+	info := n.daemonInfo(t, pulled)
+	assert.NotEmpty(t, info.Version)
+	assert.Positive(t, info.PID)
+	assert.Contains(t, info.Capabilities, "backend_auth_basic")
 	assert.Equal(t, []string{unit}, n.units(t))
 }
 
@@ -66,7 +71,7 @@ func TestMixedImages(t *testing.T) {
 	assertFiles(t, oci, img)
 	assertFiles(t, nydus, img)
 	unit := n.unit(t, nydusImage)
-	n.runningDaemon(t, unit)
+	n.assertRunning(t, unit)
 	assert.Equal(t, []string{unit}, n.units(t))
 }
 
@@ -94,7 +99,7 @@ func TestPrefetchLabel(t *testing.T) {
 	t.Parallel()
 	n := newNode(t)
 	img := newImage(t, registry.Start(t), "snapshotter/prefetch")
-	pulled := n.pull(t, img.nydus, containerd.WithPullSnapshotter(plugin, snapshots.WithLabels(map[string]string{labelPrefetch: "all"})))
+	pulled := n.pull(t, img.nydus, withPrefetch("all"))
 	c := n.start(t, pulled)
 
 	assertFiles(t, c, img)
@@ -118,9 +123,29 @@ func TestPrivateRegistry(t *testing.T) {
 	assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("nydus:secret")), config.Backend.Config.Auth)
 }
 
+func TestRegistryHosts(t *testing.T) {
+	t.Parallel()
+	n := newNode(t)
+	origin := registry.Start(t)
+	host := "registry.nydus-e2e.test"
+	img := newImage(t, origin, "snapshotter/hosts").on(host)
+	n.writeHosts(t, host, fmt.Sprintf("server = %q\n", origin.URL))
+	pulled := n.pull(t, img.nydus, n.withHosts())
+	c := n.start(t, pulled)
+
+	assertFiles(t, c, img)
+	assert.Equal(t, origin.URL, n.renderedConfig(t, pulled).Backend.Config.Addr)
+	assert.Positive(t, origin.Faults.BlobGets())
+}
+
 type basicAuth struct {
 	host       string
 	challenges atomic.Int32
+	credential atomic.Value
+}
+
+func (b *basicAuth) rotate(user, password string) {
+	b.credential.Store(user + ":" + password)
 }
 
 func startBasicAuth(t *testing.T, origin *registry.Registry, user, password string) *basicAuth {
@@ -132,8 +157,9 @@ func startBasicAuth(t *testing.T, origin *registry.Registry, user, password stri
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	b := &basicAuth{}
+	b.rotate(user, password)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if u, p, ok := r.BasicAuth(); !ok || u != user || p != password {
+		if u, p, ok := r.BasicAuth(); !ok || u+":"+p != b.credential.Load() {
 			b.challenges.Add(1)
 			w.Header().Set("WWW-Authenticate", `Basic realm="e2e"`)
 			w.WriteHeader(http.StatusUnauthorized)
@@ -145,4 +171,8 @@ func startBasicAuth(t *testing.T, origin *registry.Registry, user, password stri
 	t.Cleanup(srv.Close)
 	b.host = strings.TrimPrefix(srv.URL, "http://")
 	return b
+}
+
+func withPrefetch(scope string) containerd.RemoteOpt {
+	return containerd.WithPullSnapshotter(plugin, snapshots.WithLabels(map[string]string{labelPrefetch: scope}))
 }

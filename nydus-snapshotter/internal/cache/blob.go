@@ -21,8 +21,9 @@ const (
 	// blobDataSuffix names a blob's sparse decoded data.
 	blobDataSuffix = ".blob.data"
 
-	// blobMetaSuffix names a blob's chunk table.
-	blobMetaSuffix = ".blob.meta"
+	// BlobMetaSuffix names a blob's chunk table, in the cache and in the
+	// image dir of a bootstrap layer.
+	BlobMetaSuffix = ".blob.meta"
 
 	// groupMapSuffix names a blob's chunk group bitmap.
 	groupMapSuffix = ".group.map"
@@ -31,13 +32,18 @@ const (
 	// blob.
 	prefetchLockSuffix = ".prefetch.lock"
 
+	// TempMetaPrefix prefixes the temporary file of a blob meta being written
+	// into the cache, by nydus or by a daemon start, which GC sweeps once a
+	// crash left it behind, refer to nydus-storage/src/cache/local.rs.
+	TempMetaPrefix = ".blob-meta-"
+
 	// blockSize is the unit of stat's block count.
 	blockSize = 512
 )
 
 // blobSuffixes are the cache files of one blob, refer to the Bootstrap plus
 // blob-dir mount section of docs/nydus.md.
-var blobSuffixes = []string{blobDataSuffix, blobMetaSuffix, groupMapSuffix, prefetchLockSuffix}
+var blobSuffixes = []string{blobDataSuffix, BlobMetaSuffix, groupMapSuffix, prefetchLockSuffix}
 
 // blob is one blob's cache files.
 type blob struct {
@@ -53,7 +59,8 @@ type blob struct {
 	// modTime is the latest file modification.
 	modTime time.Time
 
-	// accessTime is when a daemon referencing the blob last started or stopped.
+	// accessTime is when a daemon referencing the blob last started or
+	// stopped, modTime for a blob without a recorded time.
 	accessTime time.Time
 }
 
@@ -100,10 +107,14 @@ func (b *blob) lockPrefetch(dir string) (func(), bool, error) {
 	return func() { f.Close() }, true, nil
 }
 
-// blobID returns the blob ID of a cache file name.
-func blobID(name string) (string, bool) {
+// cacheFile is the name of a file in the blob cache.
+type cacheFile string
+
+// blobID returns the ID of the blob the file belongs to, false for a file of
+// no blob.
+func (f cacheFile) blobID() (string, bool) {
 	for _, suffix := range blobSuffixes {
-		if id, ok := strings.CutSuffix(name, suffix); ok && id != "" {
+		if id, ok := strings.CutSuffix(string(f), suffix); ok && id != "" {
 			return id, true
 		}
 	}

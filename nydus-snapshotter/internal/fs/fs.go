@@ -6,23 +6,28 @@
 
 //go:generate mockgen -destination mocks/fs_mock.go -source fs.go -package mocks
 
-// Package fs runs one nydus daemon per image and mounts it, the remote file
-// system behind the snapshotter, as stargz-snapshotter's FileSystem, refer to
-// https://github.com/containerd/stargz-snapshotter/blob/main/snapshot/snapshot.go.
+// Package fs is the remote file system behind the snapshotter: it runs one
+// nydus daemon per image as a systemd unit, mounts it and keeps its registry
+// credential current, as stargz-snapshotter's file system serves its
+// snapshotter, refer to
+// https://github.com/containerd/stargz-snapshotter/blob/main/fs/fs.go.
 package fs
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
-	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/client-go/util/workqueue"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
@@ -34,9 +39,27 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd"
 )
 
-// mountTimeoutFactor bounds a whole Mount, the wait for another start or
-// teardown of the image included, to that many mount timeouts.
-const mountTimeoutFactor = 2
+const (
+	// Version is the nydus format this package serves, the value nydusify
+	// gives the nydus-fs-version label of a Nydus v3 bootstrap layer.
+	Version = "7"
+
+	// mountTimeoutFactor is how many mount timeouts a Mount may take, its
+	// wait for another start or release of the image included. The stop after
+	// a failed start may take as many again.
+	mountTimeoutFactor = 2
+
+	// failedLogRetention keeps the logs of a daemon that failed to start,
+	// which no unit or record names, long enough to be read.
+	failedLogRetention = 24 * time.Hour
+
+	// daemonConcurrency bounds the daemons released, probed or scraped at
+	// once.
+	daemonConcurrency = 8
+
+	// sliceDescription describes the daemon slice in systemctl.
+	sliceDescription = "nydus daemons"
+)
 
 // Image identifies the nydus image a container rootfs is built on.
 type Image struct {
@@ -58,6 +81,9 @@ type UsedFunc func(ctx context.Context) (map[string]struct{}, error)
 
 // FileSystem serves the images of one nydus format version.
 type FileSystem interface {
+	// Gatherer gathers the metrics of the running daemons.
+	prometheus.Gatherer
+
 	// Mount ensures the daemon serving the image is ready and returns its
 	// mountpoint.
 	Mount(ctx context.Context, image *Image) (string, error)
@@ -66,12 +92,19 @@ type FileSystem interface {
 	// daemons that are gone.
 	Release(ctx context.Context, used UsedFunc) error
 
-	// RunningBlobs returns the IDs of the blobs running daemons reference.
+	// RunningBlobs returns the IDs of the blobs every recorded daemon
+	// references. It fails while a daemon runs without a record, because
+	// that daemon's blobs are unknown.
 	RunningBlobs(ctx context.Context) (map[string]struct{}, error)
 
-	// Reload applies a reloaded config: cgroup limits now, the dragonfly
-	// section to daemons started later.
+	// Reload switches to a reloaded config: its cgroup limits apply now, the
+	// rest to daemons started later.
 	Reload(ctx context.Context, cfg *config.Config) error
+
+	// Run keeps the registry credentials of the daemons current until ctx is
+	// done: it watches the keychain and pushes a changed credential to the
+	// daemons reading with it.
+	Run(ctx context.Context)
 }
 
 // fileSystem is the Nydus v3 FileSystem: one systemd unit per image, keyed
@@ -98,7 +131,7 @@ type fileSystem struct {
 	// newClient returns a client of a daemon API socket.
 	newClient func(socket string) nydusd.Client
 
-	// locker serializes the start and teardown of one image.
+	// locker serializes the start and release of one image.
 	locker kmutex.KeyedLocker
 
 	// startLock is held from linking a daemon's blob metas into the cache
@@ -109,15 +142,21 @@ type fileSystem struct {
 	// exited holds the daemons found exited while in use, counted once.
 	exited sync.Map
 
-	// slicesMu serializes startSlices, so the limits of the latest config
-	// are the ones applied last.
-	slicesMu sync.Mutex
+	// unresponsive holds the daemons that failed their last health check,
+	// reported once.
+	unresponsive sync.Map
 
-	// limitsDeferred reports a slice memory.max deferred until usage drops.
+	// limitsMu serializes applyLimits, so the limits of the latest config
+	// are the ones applied last.
+	limitsMu sync.Mutex
+
+	// limitsDeferred reports limits Release still has to apply: a
+	// slice memory.max deferred until usage drops, or limits that failed.
 	limitsDeferred atomic.Bool
 }
 
-// New Nydus v3 file system. It starts the daemon slices with their limits.
+// New returns the Nydus v3 file system. It starts the daemon slice with its
+// limits and applies the daemon limits to the daemons already running.
 func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s store.Store, keychain auth.Keychain, startLock sync.Locker) (FileSystem, error) {
 	driver, err := newDriver(cfg.Nydusd.Driver)
 	if err != nil {
@@ -142,9 +181,17 @@ func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s sto
 	}
 	f.cfg.Store(cfg)
 
-	if err := f.startSlices(ctx); err != nil {
+	deferred, err := f.startSlice(ctx, cfg)
+	if err != nil {
 		return nil, err
 	}
+
+	// Daemons that outlived a restart take the limits this start read.
+	if err := f.limitDaemons(ctx, cfg); err != nil {
+		log.G(ctx).WithError(err).Warn("apply daemon limits, retrying on release")
+		deferred = true
+	}
+	f.limitsDeferred.Store(deferred)
 
 	return f, nil
 }
@@ -152,14 +199,14 @@ func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s sto
 // Mount ensures the daemon serving the image is ready and returns its
 // mountpoint.
 func (f *fileSystem) Mount(ctx context.Context, image *Image) (string, error) {
-	id, err := parseDaemonID(image.ChainID)
+	id, err := daemonIDFromChainID(image.ChainID)
 	if err != nil {
 		return "", err
 	}
 
-	// Bound the whole mount, as stargz-snapshotter bounds its Mount:
-	// containerd holds its metadata lock across Prepare and View.
-	ctx, cancel := context.WithTimeout(ctx, mountTimeoutFactor*time.Duration(f.cfg.Load().Nydusd.MountTimeout))
+	// Bound the wait and the start: containerd holds its metadata lock across
+	// Prepare and View.
+	ctx, cancel := context.WithTimeout(ctx, f.mountBound(f.cfg.Load()))
 	defer cancel()
 	if err := f.locker.Lock(ctx, string(id)); err != nil {
 		return "", fmt.Errorf("lock daemon %s: %w", id.Unit(), err)
@@ -170,39 +217,29 @@ func (f *fileSystem) Mount(ctx context.Context, image *Image) (string, error) {
 	d := f.daemon(cfg, id)
 	state, err := f.settledState(ctx, cfg, d.Instance.Unit)
 	if err != nil {
+		return "", fmt.Errorf("wait for unit %s to settle: %w", d.Instance.Unit, err)
+	}
+
+	if state == systemd.ActiveStateActive {
+		return f.reuse(ctx, d, image)
+	}
+
+	// Fail fast before credentials are known, or the daemon could never get
+	// them, and before anything of the daemon exists.
+	if !f.keychain.Synced() {
+		return "", fmt.Errorf("registry credentials are not synced yet: %w", errdefs.ErrUnavailable)
+	}
+
+	ref, err := registry.ParseReference(image.Ref)
+	if err != nil {
 		return "", err
 	}
 
-	// Reuse a running daemon. One that does not answer may still serve
-	// containers, so it is reported unavailable and never stopped here;
-	// teardown stops it once unused.
-	if state == systemd.ActiveStateActive {
-		if err := f.ready(ctx, d); err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return "", ctxErr
-			}
-
-			// Only the class reaches containerd: a hung API's timeout would
-			// otherwise resolve to DeadlineExceeded.
-			return "", fmt.Errorf("daemon %s is not ready: %v: %w", d.Instance.Unit, err, errdefs.ErrUnavailable) //nolint:errorlint
-		}
-
-		if err := f.recordRunning(d.Instance, image); err != nil {
-			return "", err
-		}
-
-		return d.Instance.Mountpoint, nil
-	}
-
 	start := time.Now()
-	if err := f.start(ctx, cfg, d, image); err != nil {
-		metrics.DaemonStartFailureTotal.Inc()
-
-		// Never leave a half started daemon or its record behind.
-		if stopErr := f.stop(context.WithoutCancel(ctx), d); stopErr != nil {
-			log.G(ctx).WithError(stopErr).WithField("unit", d.Instance.Unit).Error("stop daemon after failed start")
-		}
-
+	metrics.DaemonStartsTotal.Inc()
+	if err := f.start(ctx, cfg, d, ref, image); err != nil {
+		metrics.DaemonStartFailuresTotal.Inc()
+		f.abortStart(ctx, cfg, d)
 		return "", err
 	}
 	metrics.DaemonStartDuration.Observe(time.Since(start).Seconds())
@@ -221,20 +258,21 @@ func (f *fileSystem) Mount(ctx context.Context, image *Image) (string, error) {
 // Release stops every daemon whose image is no longer used and forgets
 // daemons that are gone.
 func (f *fileSystem) Release(ctx context.Context, used UsedFunc) error {
-	// Retry a deferred memory.max now that usage may have dropped.
+	// Retry deferred limits: usage may have dropped below a memory.max, and
+	// what failed may work now.
 	if f.limitsDeferred.Load() {
-		if err := f.startSlices(ctx); err != nil {
-			log.G(ctx).WithError(err).Warn("apply deferred slice limits")
+		if err := f.applyLimits(ctx); err != nil {
+			log.G(ctx).WithError(err).Warn("apply deferred limits")
 		}
 	}
 
 	cfg := f.cfg.Load()
-	units, err := f.systemd.ListUnits(ctx, cfg.Cgroup.Slice, unitPattern)
+	units, err := f.daemonUnits(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	instances, err := f.store.ListInstances()
+	ids, err := f.daemonIDs(ctx, cfg, units)
 	if err != nil {
 		return err
 	}
@@ -247,41 +285,134 @@ func (f *fileSystem) Release(ctx context.Context, used UsedFunc) error {
 		return err
 	}
 
-	// Units are the source of truth; records cover daemons that already exited.
-	ids := make(map[daemonID]struct{}, len(units)+len(instances))
+	// A running daemon in use is kept, and probed once it is active. Any
+	// other is a candidate.
+	var candidates, active []daemonID
 	running := 0
-	for name, state := range units {
-		if id, ok := daemonIDOfUnit(name); ok {
-			ids[id] = struct{}{}
-			if state != systemd.ActiveStateInactive && state != systemd.ActiveStateFailed {
-				running++
-			}
+	for _, id := range ids {
+		state := units[id]
+		if state.Running() {
+			running++
+		}
+
+		if _, ok := inUse[id.ChainID()]; !ok || !state.Running() {
+			candidates = append(candidates, id)
+		} else if state == systemd.ActiveStateActive {
+			active = append(active, id)
 		}
 	}
-	metrics.DaemonRunning.Set(float64(running))
+	metrics.RunningDaemons.Set(float64(running))
 
+	// Release the candidates in parallel, each under the lock of its image,
+	// as kube-scheduler runs independent pieces of work, refer to
+	// https://github.com/kubernetes/client-go/blob/master/util/workqueue/parallelizer.go.
+	// One that fails keeps its error and does not hold up the others.
+	errs := make([]error, len(candidates))
+	workqueue.ParallelizeUntil(ctx, daemonConcurrency, len(candidates), func(i int) {
+		if err := f.releaseDaemon(ctx, cfg, candidates[i], used); err != nil {
+			errs[i] = fmt.Errorf("release %s: %w", candidates[i].Unit(), err)
+		}
+	})
+
+	f.probe(ctx, cfg, active)
+
+	// A pass that ended early says so; what it left, the next one picks up.
+	return errors.Join(append(errs, ctx.Err())...)
+}
+
+// RunningBlobs returns the IDs of the blobs every recorded daemon references.
+// It fails while a daemon runs without a record, because that daemon's blobs
+// are unknown.
+func (f *fileSystem) RunningBlobs(ctx context.Context) (map[string]struct{}, error) {
+	// A start records its instance before its unit and a release deletes the
+	// record after the unit, so the records hold the blobs of every daemon
+	// this snapshotter started, as containerd's GC marks from its own
+	// database.
+	instances, err := f.store.ListInstances()
+	if err != nil {
+		return nil, err
+	}
+
+	recorded := make(map[string]struct{}, len(instances))
+	blobs := map[string]struct{}{}
 	for _, instance := range instances {
-		if id, err := parseDaemonID(instance.ChainID); err == nil {
-			ids[id] = struct{}{}
+		recorded[instance.ChainID] = struct{}{}
+		for _, blob := range instance.Blobs {
+			blobs[blob] = struct{}{}
 		}
 	}
 
-	var errs []error
-	for id := range ids {
-		if _, ok := inUse[id.ChainID()]; ok && f.isRunning(units[id.Unit()]) {
+	// A daemon running without a record, as after nydusd.db was lost, reads
+	// blobs no record names until its next Mount records it. Fail rather
+	// than leave them out, so cache GC evicts nothing meanwhile.
+	units, err := f.daemonUnits(ctx, f.cfg.Load())
+	if err != nil {
+		return nil, err
+	}
+
+	for id, state := range units {
+		if !state.Running() {
 			continue
 		}
 
-		if err := f.release(ctx, cfg, id, used); err != nil {
-			errs = append(errs, fmt.Errorf("release %s: %w", id.Unit(), err))
+		if _, ok := recorded[id.ChainID()]; !ok {
+			return nil, fmt.Errorf("daemon %s runs without a record, its blobs are unknown: %w", id.Unit(), errdefs.ErrFailedPrecondition)
 		}
 	}
 
-	return errors.Join(errs...)
+	return blobs, nil
 }
 
-// release stops the daemon of an image when the image is unused.
-func (f *fileSystem) release(ctx context.Context, cfg *config.Config, id daemonID, used UsedFunc) error {
+// probe checks the health of the daemons in use, counts those that do not
+// answer and forgets those that are gone.
+func (f *fileSystem) probe(ctx context.Context, cfg *config.Config, ids []daemonID) {
+	workqueue.ParallelizeUntil(ctx, daemonConcurrency, len(ids), func(i int) {
+		f.probeDaemon(ctx, f.daemon(cfg, ids[i]))
+	})
+
+	unresponsive := 0
+	f.unresponsive.Range(func(id, _ any) bool {
+		if slices.Contains(ids, id.(daemonID)) {
+			unresponsive++
+		} else {
+			f.unresponsive.Delete(id)
+		}
+
+		return true
+	})
+	metrics.UnresponsiveDaemons.Set(float64(unresponsive))
+}
+
+// probeDaemon checks that the mount of a daemon is in place and its API
+// answers. It reports the daemon when it stops and when it resumes answering,
+// as kubelet's prober reports a result that changed, refer to
+// https://github.com/kubernetes/kubernetes/blob/master/pkg/kubelet/prober/worker.go.
+// A daemon that does not answer may still serve its containers, so it is
+// never stopped here.
+func (f *fileSystem) probeDaemon(ctx context.Context, d *Daemon) {
+	err := f.ready(ctx, d)
+
+	// A pass that ended tells nothing about the daemon.
+	if ctx.Err() != nil {
+		return
+	}
+
+	logger := log.G(ctx).WithField("unit", d.Instance.Unit)
+	if err != nil {
+		if _, reported := f.unresponsive.LoadOrStore(d.id, struct{}{}); !reported {
+			logger.WithError(err).Warn("daemon does not answer, its containers may hang")
+		}
+
+		return
+	}
+
+	if _, reported := f.unresponsive.LoadAndDelete(d.id); reported {
+		logger.Info("daemon answers again")
+	}
+}
+
+// releaseDaemon stops the daemon of an image when the image is unused.
+func (f *fileSystem) releaseDaemon(ctx context.Context, cfg *config.Config, id daemonID, used UsedFunc) error {
 	if err := f.locker.Lock(ctx, string(id)); err != nil {
 		return err
 	}
@@ -301,83 +432,116 @@ func (f *fileSystem) release(ctx context.Context, cfg *config.Config, id daemonI
 		return err
 	}
 
-	running := f.isRunning(state)
-	switch {
-	case inUse && running:
+	if inUse && state.Running() {
 		return nil
-	case inUse:
+	}
+
+	if inUse {
 		// Keep the record, so the daemon's files are cleaned up once unused.
 		// A daemon whose tmpfs runtime dir is gone went with a reboot, which
 		// is no crash.
-		if _, err := os.Stat(filepath.Dir(d.Config)); err != nil {
+		if _, err := os.Stat(d.RuntimeDir); err != nil {
 			return nil
 		}
 
 		if _, counted := f.exited.LoadOrStore(id, struct{}{}); !counted {
-			metrics.DaemonUnexpectedExitTotal.Inc()
+			metrics.DaemonUnexpectedExitsTotal.Inc()
 			log.G(ctx).WithField("unit", d.Instance.Unit).Warn("daemon exited while in use, its containers must be recreated")
 		}
 
 		return nil
-	default:
-		log.G(ctx).WithField("unit", d.Instance.Unit).Info("stopping unused daemon")
-		f.exited.Delete(id)
-		if err := f.stop(ctx, d); err != nil {
-			return err
-		}
-
-		if err := os.RemoveAll(d.LogDir); err != nil {
-			return fmt.Errorf("remove %s: %w", d.LogDir, err)
-		}
-
-		return nil
 	}
+
+	log.G(ctx).WithField("unit", d.Instance.Unit).Info("stopping unused daemon")
+	f.exited.Delete(id)
+	if err := f.stop(ctx, d); err != nil {
+		return err
+	}
+
+	if err := os.RemoveAll(d.LogDir); err != nil {
+		return fmt.Errorf("remove %s: %w", d.LogDir, err)
+	}
+
+	return nil
 }
 
-// isRunning reports whether a unit state is a daemon that runs or starts.
-func (f *fileSystem) isRunning(state string) bool {
-	return state == systemd.ActiveStateActive || state == systemd.ActiveStateActivating
-}
-
-// RunningBlobs returns the IDs of the blobs running daemons reference.
-func (f *fileSystem) RunningBlobs(ctx context.Context) (map[string]struct{}, error) {
-	// A start records its instance before its unit and teardown deletes the
-	// record after the unit, so the records hold every running daemon without
-	// asking systemd, as containerd's GC marks from its own database alone.
+// daemonIDs returns the IDs of every daemon something is left of: a unit,
+// the source of truth, a record, which covers a daemon that already exited,
+// or the expired logs of a failed start.
+func (f *fileSystem) daemonIDs(ctx context.Context, cfg *config.Config, units map[daemonID]systemd.ActiveState) ([]daemonID, error) {
 	instances, err := f.store.ListInstances()
 	if err != nil {
 		return nil, err
 	}
 
-	blobs := map[string]struct{}{}
+	ids := slices.Collect(maps.Keys(units))
 	for _, instance := range instances {
-		for _, blob := range instance.Blobs {
-			blobs[blob] = struct{}{}
+		if id, err := daemonIDFromChainID(instance.ChainID); err == nil {
+			ids = append(ids, id)
 		}
 	}
 
-	return blobs, nil
+	// Log dirs that cannot be listed hold up no release.
+	expired, err := f.expiredLogDirs(cfg)
+	if err != nil {
+		log.G(ctx).WithError(err).Warn("list expired daemon log dirs")
+	}
+
+	ids = append(ids, expired...)
+	slices.Sort(ids)
+	return slices.Compact(ids), nil
 }
 
-// Reload applies a reloaded config: cgroup limits now, the dragonfly section
-// to daemons started later.
-func (f *fileSystem) Reload(ctx context.Context, cfg *config.Config) error {
-	f.cfg.Store(cfg)
-	if err := f.startSlices(ctx); err != nil {
-		// Teardown passes retry deferred limits.
-		f.limitsDeferred.Store(true)
-		return err
-	}
-
+// daemonUnits returns the active state of the daemon units of the slice by
+// daemon ID. A unit of the slice that names no daemon is left out.
+func (f *fileSystem) daemonUnits(ctx context.Context, cfg *config.Config) (map[daemonID]systemd.ActiveState, error) {
 	units, err := f.systemd.ListUnits(ctx, cfg.Cgroup.Slice, unitPattern)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	var errs []error
-	for name := range units {
-		errs = append(errs, f.systemd.SetResources(ctx, name, f.daemonResources(cfg)))
+	daemons := make(map[daemonID]systemd.ActiveState, len(units))
+	for name, state := range units {
+		if id, ok := daemonIDFromUnit(name); ok {
+			daemons[id] = state
+		}
 	}
 
-	return errors.Join(errs...)
+	return daemons, nil
+}
+
+// expiredLogDirs returns the IDs of the daemons whose log dir was last
+// touched over failedLogRetention ago. A failed start leaves only its logs
+// behind; no unit or record names them, so Release would otherwise never
+// remove them.
+func (f *fileSystem) expiredLogDirs(cfg *config.Config) ([]daemonID, error) {
+	entries, err := os.ReadDir(cfg.Nydusd.LogDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read log dir %s: %w", cfg.Nydusd.LogDir, err)
+	}
+
+	var ids []daemonID
+	for _, entry := range entries {
+		id, ok := daemonIDFromHex(entry.Name())
+		if !ok {
+			continue
+		}
+
+		// A log dir removed meanwhile needs no release.
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if time.Since(info.ModTime()) > failedLogRetention {
+			ids = append(ids, id)
+		}
+	}
+
+	return ids, nil
+}
+
+// mountBound returns how long a Mount may take.
+func (f *fileSystem) mountBound(cfg *config.Config) time.Duration {
+	return mountTimeoutFactor * time.Duration(cfg.Nydusd.MountTimeout)
 }

@@ -3,8 +3,10 @@ run:
   modules-download-mode: readonly
 linters:
   default: none
-  # Dragonfly's linters, plus the ones containerd enables, refer to
-  # https://github.com/containerd/containerd/blob/main/.golangci.yml.
+  # The linters containerd and dragonfly enable, refer to
+  # https://github.com/containerd/containerd/blob/main/.golangci.yml. revive
+  # and staticcheck hold doc comments and names to Go's standard, refer to
+  # https://go.dev/doc/comment and https://go.dev/wiki/CodeReviewComments.
   enable:
     - bodyclose
     - copyloopvar
@@ -25,21 +27,13 @@ linters:
   settings:
     gocyclo:
       min-complexity: 100
-    revive:
-      rules:
-        - name: package-comments
-          disabled: true
     staticcheck:
       checks:
         - all
         - -QF1008
-        - -ST1000
-        - -ST1020
-        - -ST1021
   exclusions:
     generated: lax
     presets:
-      - comments
       - common-false-positives
       - legacy
       - std-error-handling
@@ -48,6 +42,9 @@ linters:
       - linters:
           - revive
         text: unused-parameter
+    paths:
+      # A verbatim copy of containerd's internal/kmutex.
+      - internal/kmutex
 formatters:
   enable:
     - gci

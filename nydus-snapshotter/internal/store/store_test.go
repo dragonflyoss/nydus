@@ -22,10 +22,10 @@ var (
 		Driver:       "fuse",
 		ImageRef:     "registry.example.com/team/app:v1-nydus-v3",
 		RegistryHost: "registry.example.com",
-		Bootstrap:    "/var/lib/containerd-nydus-v3/nydusd/1/image.boot",
+		Bootstrap:    "/var/lib/nydus-snapshotter/nydusd/1/image.boot",
 		Blobs:        []string{"a", "b"},
-		Mountpoint:   "/var/lib/containerd-nydus-v3/nydusd/1/mnt",
-		APISocket:    "/run/containerd-nydus-v3/nydusd/1.sock",
+		Mountpoint:   "/var/lib/nydus-snapshotter/nydusd/1/mnt",
+		APISocket:    "/run/nydus-snapshotter/nydusd/1.sock",
 		Unit:         "nydusd-1.service",
 		CreatedAt:    time.Unix(1700000000, 0).UTC(),
 	}
@@ -33,7 +33,7 @@ var (
 	mockTime = time.Unix(1800000000, 0).UTC()
 )
 
-func TestStore_Instance(t *testing.T) {
+func TestStore_Instances(t *testing.T) {
 	tests := []struct {
 		name   string
 		expect func(t *testing.T, s Store)
@@ -109,6 +109,27 @@ func TestStore_Blobs(t *testing.T) {
 				assert.Equal(map[string]time.Time{"b": mockTime}, blobs)
 			},
 		},
+		{
+			name: "blob without an ID",
+			expect: func(t *testing.T, s Store) {
+				assert := assert.New(t)
+				assert.ErrorContains(s.TouchBlobs([]string{""}, mockTime), "put blob ")
+				blobs, err := s.ListBlobs()
+				assert.NoError(err)
+				assert.Empty(blobs)
+			},
+		},
+		{
+			name: "blob that is a bucket",
+			expect: func(t *testing.T, s Store) {
+				assert := assert.New(t)
+				assert.NoError(s.(*store).db.Update(func(tx *bolt.Tx) error {
+					_, err := tx.Bucket(bucketKeyV1).Bucket(bucketKeyBlobs).CreateBucket([]byte("a"))
+					return err
+				}))
+				assert.ErrorContains(s.DeleteBlobs([]string{"a"}), "delete blob a")
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -121,15 +142,15 @@ func TestStore_Blobs(t *testing.T) {
 	}
 }
 
-func TestStore_New(t *testing.T) {
+func TestNew(t *testing.T) {
 	tests := []struct {
-		name   string
-		setup  func(t *testing.T, path string)
-		expect func(t *testing.T, s Store, err error)
+		name    string
+		prepare func(t *testing.T, path string)
+		expect  func(t *testing.T, s Store, err error)
 	}{
 		{
-			name:  "reopen store",
-			setup: func(t *testing.T, path string) {},
+			name:    "reopen store",
+			prepare: func(t *testing.T, path string) {},
 			expect: func(t *testing.T, s Store, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -138,18 +159,19 @@ func TestStore_New(t *testing.T) {
 		},
 		{
 			name: "store held by another process",
-			setup: func(t *testing.T, path string) {
+			prepare: func(t *testing.T, path string) {
 				s, err := New(path, DefaultOpenTimeout)
 				assert.NoError(t, err)
 				t.Cleanup(func() { s.Close() })
 			},
 			expect: func(t *testing.T, s Store, err error) {
-				assert.ErrorContains(t, err, "timeout")
+				assert := assert.New(t)
+				assert.ErrorContains(err, "timeout")
 			},
 		},
 		{
 			name: "read a newer compatible schema version",
-			setup: func(t *testing.T, path string) {
+			prepare: func(t *testing.T, path string) {
 				writeVersion(t, path, "2")
 			},
 			expect: func(t *testing.T, s Store, err error) {
@@ -159,12 +181,45 @@ func TestStore_New(t *testing.T) {
 			},
 		},
 		{
+			name: "schema version that is no number",
+			prepare: func(t *testing.T, path string) {
+				writeVersion(t, path, "one")
+			},
+			expect: func(t *testing.T, s Store, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "decode schema version")
+				assert.Nil(s)
+			},
+		},
+		{
 			name: "unsupported schema version",
-			setup: func(t *testing.T, path string) {
+			prepare: func(t *testing.T, path string) {
 				writeVersion(t, path, "0")
 			},
 			expect: func(t *testing.T, s Store, err error) {
-				assert.ErrorContains(t, err, "unsupported store schema version 0")
+				assert := assert.New(t)
+				assert.ErrorContains(err, "unsupported store schema version 0")
+			},
+		},
+		{
+			name: "bucket name held by a value",
+			prepare: func(t *testing.T, path string) {
+				db, err := bolt.Open(path, 0o600, nil)
+				assert.NoError(t, err)
+				assert.NoError(t, db.Update(func(tx *bolt.Tx) error {
+					root, err := tx.CreateBucket(bucketKeyV1)
+					if err != nil {
+						return err
+					}
+
+					return root.Put(bucketKeyInstances, []byte("value"))
+				}))
+				assert.NoError(t, db.Close())
+			},
+			expect: func(t *testing.T, s Store, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "create bucket "+string(bucketKeyInstances))
+				assert.Nil(s)
 			},
 		},
 	}
@@ -172,9 +227,51 @@ func TestStore_New(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "nydusd.db")
-			tc.setup(t, path)
+			tc.prepare(t, path)
 			s, err := New(path, 100*time.Millisecond)
 			tc.expect(t, s, err)
+		})
+	}
+}
+
+func TestStore_decode(t *testing.T) {
+	tests := []struct {
+		name   string
+		bucket []byte
+		expect func(t *testing.T, s Store)
+	}{
+		{
+			name:   "instance that does not decode",
+			bucket: bucketKeyInstances,
+			expect: func(t *testing.T, s Store) {
+				assert := assert.New(t)
+				_, err := s.GetInstance(mockInstance.ChainID)
+				assert.ErrorContains(err, "decode instance "+mockInstance.ChainID)
+				_, err = s.ListInstances()
+				assert.ErrorContains(err, "decode instance "+mockInstance.ChainID)
+			},
+		},
+		{
+			name:   "blob time that does not decode",
+			bucket: bucketKeyBlobs,
+			expect: func(t *testing.T, s Store) {
+				assert := assert.New(t)
+				_, err := s.ListBlobs()
+				assert.ErrorContains(err, "decode blob "+mockInstance.ChainID+" time")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, err := New(filepath.Join(t.TempDir(), "nydusd.db"), DefaultOpenTimeout)
+			assert.NoError(t, err)
+			defer s.Close()
+			assert.NoError(t, s.(*store).db.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket(bucketKeyV1).Bucket(tc.bucket).Put([]byte(mockInstance.ChainID), []byte("{"))
+			}))
+
+			tc.expect(t, s)
 		})
 	}
 }
@@ -189,7 +286,7 @@ func writeVersion(t *testing.T, path, version string) {
 			return err
 		}
 
-		return root.Put(keyVersion, []byte(version))
+		return root.Put(bucketKeyDBVersion, []byte(version))
 	}))
 	assert.NoError(t, db.Close())
 }

@@ -587,11 +587,23 @@ impl Backend for FaultBackend {
         self.serve(blob_id, offset, len, ReadKind::Prefetch)
     }
 
-    /// Replaces the credentials of the wrapped backend; blobs in memory have
-    /// none.
-    fn set_auth(&self, auth: &str) -> io::Result<()> {
+    /// Replaces the basic credentials of the wrapped backend; blobs in memory
+    /// have none.
+    fn set_basic_auth(&self, username: &str, password: &str) -> io::Result<()> {
         match &self.source {
-            Source::Wrapped(inner) => inner.set_auth(auth),
+            Source::Wrapped(inner) => inner.set_basic_auth(username, password),
+            Source::Memory(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "backend has no credentials",
+            )),
+        }
+    }
+
+    /// Replaces the bearer token of the wrapped backend; blobs in memory have
+    /// none.
+    fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+        match &self.source {
+            Source::Wrapped(inner) => inner.set_bearer_auth(token),
             Source::Memory(_) => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "backend has no credentials",
@@ -777,8 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn set_auth_reaches_only_a_wrapped_backend() {
-        struct Credentialed(Mutex<Option<String>>, Arc<Metrics>);
+    fn credentials_reach_only_a_wrapped_backend() {
+        struct Credentialed(Mutex<Vec<String>>, Arc<Metrics>);
 
         impl Backend for Credentialed {
             fn metrics(&self) -> &Arc<Metrics> {
@@ -798,8 +810,16 @@ mod tests {
                 Err(unknown_blob(blob_id))
             }
 
-            fn set_auth(&self, auth: &str) -> io::Result<()> {
-                *self.0.lock().unwrap() = Some(auth.to_string());
+            fn set_basic_auth(&self, username: &str, password: &str) -> io::Result<()> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("basic {username}:{password}"));
+                Ok(())
+            }
+
+            fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+                self.0.lock().unwrap().push(format!("bearer {token}"));
                 Ok(())
             }
         }
@@ -809,21 +829,25 @@ mod tests {
             (
                 FaultBackend::wrap(inner.clone()),
                 None,
-                Some("Ym9iOmh1bnRlcjI="),
+                vec!["basic bob:hunter2", "bearer xyz"],
             ),
-            (backend(), Some(io::ErrorKind::Unsupported), None),
+            (backend(), Some(io::ErrorKind::Unsupported), vec![]),
         ];
 
-        for (backend, err, auth) in test_cases {
-            *inner.0.lock().unwrap() = None;
+        for (backend, err, recorded) in test_cases {
+            inner.0.lock().unwrap().clear();
             assert_eq!(
                 backend
-                    .set_auth("Ym9iOmh1bnRlcjI=")
+                    .set_basic_auth("bob", "hunter2")
                     .err()
                     .map(|err| err.kind()),
                 err
             );
-            assert_eq!(inner.0.lock().unwrap().as_deref(), auth);
+            assert_eq!(
+                backend.set_bearer_auth("xyz").err().map(|err| err.kind()),
+                err
+            );
+            assert_eq!(*inner.0.lock().unwrap(), recorded);
         }
     }
 

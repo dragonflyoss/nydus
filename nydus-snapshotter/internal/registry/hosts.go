@@ -7,7 +7,6 @@
 package registry
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -27,14 +26,17 @@ const (
 	// DockerHubHost is the host image references name Docker Hub by.
 	DockerHubHost = "docker.io"
 
+	// dockerHubRegistryHost is the registry host serving Docker Hub.
+	dockerHubRegistryHost = "registry-1.docker.io"
+
 	// dockerHubAddr is the registry address serving Docker Hub.
-	dockerHubAddr = "https://registry-1.docker.io"
+	dockerHubAddr = "https://" + dockerHubRegistryHost
 
 	// defaultHostDir is the host directory applying to every host.
 	defaultHostDir = "_default"
 
-	// hostsFile is the host config file in a host directory.
-	hostsFile = "hosts.toml"
+	// HostsFile is the name of the host config file in a host directory.
+	HostsFile = "hosts.toml"
 )
 
 // Endpoint is the registry endpoint config a nydus daemon can express.
@@ -50,10 +52,10 @@ type Endpoint struct {
 	CACerts []string
 }
 
-// hostFile is the subset of a hosts.toml a nydus daemon can express, refer to
-// https://github.com/containerd/containerd/blob/main/docs/hosts.md. [host]
-// mirror tables are ignored: a daemon reads from one registry.
-type hostFile struct {
+// hostFileConfig is the subset of a hosts.toml a nydus daemon can express.
+// [host] mirror tables are ignored: a daemon reads from one registry, refer
+// to https://github.com/containerd/containerd/blob/main/docs/hosts.md.
+type hostFileConfig struct {
 	// Server is the upstream registry address.
 	Server string `toml:"server"`
 
@@ -71,17 +73,18 @@ type hostFile struct {
 	OverridePath bool `toml:"override_path"`
 }
 
-// Hosts resolves registry endpoints from a certs.d directory, as containerd's
+// Hosts resolves registry endpoints from certs.d directories, as containerd's
 // ConfigureHosts does, refer to
 // https://github.com/containerd/containerd/blob/main/core/remotes/docker/config/hosts.go.
 type Hosts struct {
-	// configPath is the certs.d directory, empty for the defaults only.
-	configPath string
+	// roots are the certs.d directories, none for the defaults only.
+	roots []string
 }
 
-// NewHosts returns the resolver of the certs.d directory at configPath.
+// NewHosts returns the resolver of the certs.d directories of configPath, a
+// path list as containerd's CRI config_path is.
 func NewHosts(configPath string) *Hosts {
-	return &Hosts{configPath: configPath}
+	return &Hosts{roots: filepath.SplitList(configPath)}
 }
 
 // Resolve returns the registry endpoint of host, applying
@@ -89,11 +92,7 @@ func NewHosts(configPath string) *Hosts {
 // defaults.
 func (h *Hosts) Resolve(host string) (*Endpoint, error) {
 	endpoint := h.defaultEndpoint(host)
-	if h.configPath == "" {
-		return endpoint, nil
-	}
-
-	dir, err := config.HostDirFromRoot(h.configPath)(host)
+	dir, err := h.hostDir(host)
 	if errors.Is(err, errdefs.ErrNotFound) {
 		return endpoint, nil
 	}
@@ -102,9 +101,15 @@ func (h *Hosts) Resolve(host string) (*Endpoint, error) {
 		return nil, fmt.Errorf("find host dir of %s: %w", host, err)
 	}
 
-	hostsPath := filepath.Join(dir, hostsFile)
+	hostsPath := filepath.Join(dir, HostsFile)
 	data, err := os.ReadFile(hostsPath)
-	if errors.Is(err, os.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read %s: %w", hostsPath, err)
+	}
+
+	// An absent or empty hosts.toml falls back to docker-style certificate
+	// files, as containerd's loadHostDir does.
+	if len(data) == 0 {
 		if err := endpoint.loadCertFiles(dir); err != nil {
 			return nil, err
 		}
@@ -112,20 +117,25 @@ func (h *Hosts) Resolve(host string) (*Endpoint, error) {
 		return endpoint, nil
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", hostsPath, err)
-	}
-
-	var file hostFile
-	if err := toml.NewDecoder(bytes.NewReader(data)).Decode(&file); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", hostsPath, err)
-	}
-
-	if err := endpoint.apply(&file, dir); err != nil {
+	if err := endpoint.Apply(data, dir); err != nil {
 		return nil, fmt.Errorf("apply %s: %w", hostsPath, err)
 	}
 
 	return endpoint, nil
+}
+
+// hostDir returns the host directory of host in the first certs.d directory
+// holding one, as containerd's CRI plugin resolves a config_path list, refer to
+// https://github.com/containerd/containerd/blob/main/internal/cri/server/images/image_pull.go.
+func (h *Hosts) hostDir(host string) (string, error) {
+	for _, root := range h.roots {
+		dir, err := config.HostDirFromRoot(root)(host)
+		if !errors.Is(err, errdefs.ErrNotFound) {
+			return dir, err
+		}
+	}
+
+	return "", errdefs.ErrNotFound
 }
 
 // defaultEndpoint returns containerd's default endpoint of host.
@@ -148,15 +158,27 @@ func (h *Hosts) defaultEndpoint(host string) *Endpoint {
 	return &Endpoint{Addr: "http://" + host, SkipVerify: port != "80"}
 }
 
-// apply applies a hosts.toml of the host directory dir.
-func (e *Endpoint) apply(file *hostFile, dir string) error {
+// Apply applies the content of a hosts.toml of the host directory dir, and
+// fails on one a nydus daemon cannot use.
+func (e *Endpoint) Apply(data []byte, dir string) error {
+	var file hostFileConfig
+	if err := toml.Unmarshal(data, &file); err != nil {
+		return fmt.Errorf("decode: %w", err)
+	}
+
+	// A _default server would need containerd's ?ns= query to reach the right
+	// upstream, which nydus cannot send. The TLS settings and the client
+	// certificate beside it describe that server, so the file is skipped as a
+	// whole.
+	if file.Server != "" && filepath.Base(dir) == defaultHostDir {
+		return nil
+	}
+
 	if file.Client != nil {
 		return fmt.Errorf("client certificates are not supported by nydus: %w", errdefs.ErrNotImplemented)
 	}
 
-	// A _default server would need containerd's ?ns= query to reach the
-	// right upstream, which nydus cannot send, so only its TLS settings apply.
-	if file.Server != "" && filepath.Base(dir) != defaultHostDir {
+	if file.Server != "" {
 		addr, err := file.addr()
 		if err != nil {
 			return err
@@ -194,10 +216,14 @@ func (e *Endpoint) loadCertFiles(dir string) error {
 	}
 
 	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
 		switch filepath.Ext(entry.Name()) {
 		case ".crt":
 			e.CACerts = append(e.CACerts, filepath.Join(dir, entry.Name()))
-		case ".cert", ".key":
+		case ".cert":
 			return fmt.Errorf("%s: client certificates are not supported by nydus: %w", filepath.Join(dir, entry.Name()), errdefs.ErrNotImplemented)
 		}
 	}
@@ -205,34 +231,60 @@ func (e *Endpoint) loadCertFiles(dir string) error {
 	return nil
 }
 
-// addr returns the server as the origin and path prefix a daemon takes,
-// parsed as containerd's parseHostConfig does: a server without a scheme is
-// https, and the /v2 API root, which the daemon appends itself, is stripped,
-// refer to https://github.com/containerd/containerd/blob/main/core/remotes/docker/config/hosts.go.
-func (f *hostFile) addr() (string, error) {
-	if f.OverridePath {
-		return "", fmt.Errorf("server %q: override_path is not supported by nydus: %w", f.Server, errdefs.ErrNotImplemented)
-	}
-
+// addr returns the server as the origin and path prefix a daemon takes. It
+// reads the server as containerd's parseHostConfig does, refer to
+// https://github.com/containerd/containerd/blob/main/core/remotes/docker/config/hosts.go:
+//   - a server without a scheme is https;
+//   - only its scheme, host and path count;
+//   - a trailing /v2 is stripped, as the daemon appends the API root itself.
+//
+// One difference: a scheme is recognized by "://". containerd tests for an
+// "http" prefix, which takes the host httpbin.example.com for a URL.
+func (f *hostFileConfig) addr() (string, error) {
 	server := f.Server
-	if !strings.HasPrefix(server, "http") {
+	if !strings.Contains(server, "://") {
 		server = "https://" + server
 	}
 
+	// A server may carry userinfo and these errors reach containerd and pod
+	// events, so they name the redacted URL, and the cause alone when it does
+	// not parse: a url.Error quotes the whole input.
 	u, err := url.Parse(server)
 	if err != nil {
-		return "", fmt.Errorf("parse server %q: %w", f.Server, err)
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+
+		return "", fmt.Errorf("parse server: %w", err)
 	}
 
+	if f.OverridePath {
+		return "", fmt.Errorf("server %q: override_path is not supported by nydus: %w", u.Redacted(), errdefs.ErrNotImplemented)
+	}
+
+	if u.Host == "" {
+		return "", fmt.Errorf("server %q has no host: %w", u.Redacted(), errdefs.ErrInvalidArgument)
+	}
+
+	// containerd reaches Docker Hub through the [host] table its docs put
+	// beside this server; a daemon reads from the server alone, refer to
+	// https://github.com/containerd/containerd/blob/main/docs/hosts.md.
+	host := u.Host
+	if host == DockerHubHost {
+		host = dockerHubRegistryHost
+	}
+
+	prefix := ""
 	if u.Path != "" {
-		u.Path = strings.TrimSuffix(strings.TrimSuffix(path.Clean(u.Path), "/v2"), "/")
+		prefix = strings.TrimSuffix(strings.TrimSuffix(path.Clean(u.Path), "/v2"), "/")
 	}
 
-	return u.String(), nil
+	return u.Scheme + "://" + host + prefix, nil
 }
 
 // caCerts returns the ca key, a string or a string array, as a slice.
-func (f *hostFile) caCerts() ([]string, error) {
+func (f *hostFileConfig) caCerts() ([]string, error) {
 	switch ca := f.CACert.(type) {
 	case nil:
 		return nil, nil

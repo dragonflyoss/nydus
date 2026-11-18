@@ -24,7 +24,8 @@ const (
 	// unitPattern matches every daemon unit.
 	unitPattern = unitPrefix + "*" + unitSuffix
 
-	// shortIDLength is the daemon ID prefix shown in mount sources.
+	// shortIDLength is the length of the daemon ID prefix shown in mount
+	// sources.
 	shortIDLength = 12
 )
 
@@ -32,9 +33,10 @@ const (
 // layer's chain ID, which names its unit and directories.
 type daemonID string
 
-// parseDaemonID returns the daemon ID of a chain ID.
-func parseDaemonID(chainID string) (daemonID, error) {
-	// Units and ChainID assume sha256, as containerd's chain IDs are.
+// daemonIDFromChainID returns the daemon ID of the image of a chain ID.
+func daemonIDFromChainID(chainID string) (daemonID, error) {
+	// Only sha256 is accepted, as containerd's chain IDs are: Unit and
+	// ChainID rebuild their names from the hex alone.
 	d, err := digest.Parse(chainID)
 	if err != nil || d.Algorithm() != digest.SHA256 {
 		return "", fmt.Errorf("invalid chain id %q: %w", chainID, errdefs.ErrInvalidArgument)
@@ -43,15 +45,24 @@ func parseDaemonID(chainID string) (daemonID, error) {
 	return daemonID(d.Encoded()), nil
 }
 
-// daemonIDOfUnit returns the daemon ID of a daemon unit name.
-func daemonIDOfUnit(unit string) (daemonID, bool) {
+// daemonIDFromUnit returns the daemon ID of a daemon unit name.
+func daemonIDFromUnit(unit string) (daemonID, bool) {
 	hex, ok := strings.CutPrefix(unit, unitPrefix)
 	if !ok {
 		return "", false
 	}
 
 	hex, ok = strings.CutSuffix(hex, unitSuffix)
-	if !ok || digest.NewDigestFromEncoded(digest.SHA256, hex).Validate() != nil {
+	if !ok {
+		return "", false
+	}
+
+	return daemonIDFromHex(hex)
+}
+
+// daemonIDFromHex returns the daemon ID a sha256 hex digest is.
+func daemonIDFromHex(hex string) (daemonID, bool) {
+	if digest.NewDigestFromEncoded(digest.SHA256, hex).Validate() != nil {
 		return "", false
 	}
 

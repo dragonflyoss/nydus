@@ -41,13 +41,17 @@ type renderOptions struct {
 	caCert string
 
 	// dragonfly is backend.config.dragonfly, ignored without a scheduler.
-	dragonfly config.DragonflyConfig
+	dragonfly config.NydusdDragonflyConfig
 
 	// prefetchScope is prefetch.scope.
 	prefetchScope string
 }
 
-// renderConfig writes the daemon's config to tmpfs; it holds the credential.
+// document is a decoded YAML mapping.
+type document map[string]any
+
+// renderConfig renders the daemon's config and writes it into the daemon's
+// runtime dir, on tmpfs because the config holds the credential.
 func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, prefetchScope string) error {
 	template, err := os.ReadFile(cfg.Nydusd.Template)
 	if err != nil {
@@ -64,36 +68,20 @@ func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Da
 		return fmt.Errorf("resolve credential of %s: %w", ref.Name, err)
 	}
 
+	caCert, err := f.caBundle(endpoint.CACerts, d.RuntimeDir)
+	if err != nil {
+		return err
+	}
+
 	opts := &renderOptions{
 		cacheDir:      cfg.CacheDir(),
 		addr:          endpoint.Addr,
 		repository:    ref.Repository,
 		auth:          credential,
 		skipVerify:    endpoint.SkipVerify,
+		caCert:        caCert,
 		dragonfly:     cfg.Nydusd.Dragonfly,
 		prefetchScope: cmp.Or(prefetchScope, cfg.Nydusd.PrefetchScope),
-	}
-
-	// nydus trusts one CA file, so several are bundled.
-	switch len(endpoint.CACerts) {
-	case 0:
-	case 1:
-		opts.caCert = endpoint.CACerts[0]
-	default:
-		var bundle []byte
-		for _, ca := range endpoint.CACerts {
-			pem, err := os.ReadFile(ca)
-			if err != nil {
-				return fmt.Errorf("read ca %s: %w", ca, err)
-			}
-
-			bundle = append(append(bundle, pem...), '\n')
-		}
-
-		opts.caCert = filepath.Join(filepath.Dir(d.Config), "ca.pem")
-		if err := continuity.AtomicWriteFile(opts.caCert, bundle, 0o644); err != nil {
-			return err
-		}
 	}
 
 	data, err := opts.render(template)
@@ -101,11 +89,36 @@ func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Da
 		return err
 	}
 
-	return continuity.AtomicWriteFile(d.Config, data, 0o600)
+	return continuity.AtomicWriteFile(d.ConfigPath, data, 0o600)
 }
 
-// document is a decoded YAML mapping.
-type document map[string]any
+// caBundle returns the one CA file nydus trusts: none, the only one, or a
+// bundle of several written into dir.
+func (f *fileSystem) caBundle(cas []string, dir string) (string, error) {
+	switch len(cas) {
+	case 0:
+		return "", nil
+	case 1:
+		return cas[0], nil
+	}
+
+	var bundle []byte
+	for _, ca := range cas {
+		pem, err := os.ReadFile(ca)
+		if err != nil {
+			return "", fmt.Errorf("read ca %s: %w", ca, err)
+		}
+
+		bundle = append(append(bundle, pem...), '\n')
+	}
+
+	path := filepath.Join(dir, "ca.pem")
+	if err := continuity.AtomicWriteFile(path, bundle, 0o644); err != nil {
+		return "", err
+	}
+
+	return path, nil
+}
 
 // render fills the per-daemon values into a nydus-config template. The
 // snapshotter owns these keys; every other key is passed through for nydus to

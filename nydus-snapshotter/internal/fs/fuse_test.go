@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/moby/sys/mountinfo"
@@ -29,22 +30,27 @@ func TestFuseDriver_Args(t *testing.T) {
 			name: "nydus fuse arguments",
 			daemon: &Daemon{
 				Instance: &store.Instance{
-					Bootstrap:  "/var/lib/containerd-nydus-v3/nydusd/ab/image.boot",
-					Mountpoint: "/var/lib/containerd-nydus-v3/nydusd/ab/mnt",
-					APISocket:  "/run/containerd-nydus-v3/nydusd/ab.sock",
+					Bootstrap:  "/var/lib/nydus-snapshotter/nydusd/ab/image.boot",
+					Mountpoint: "/var/lib/nydus-snapshotter/nydusd/ab/mnt",
+					APISocket:  "/run/nydus-snapshotter/nydusd/ab.sock",
 				},
-				Config: "/run/containerd-nydus-v3/nydusd/ab/config.yaml",
-				LogDir: "/var/log/nydus-v3/nydusd/ab",
-				id:     "abcdef0123456789",
+				ConfigPath:  "/run/nydus-snapshotter/nydusd/ab/config.yaml",
+				LogDir:      "/var/log/nydus-snapshotter/nydusd/ab",
+				LogLevel:    "debug",
+				LogMaxFiles: 3,
+				id:          "abcdef0123456789",
 			},
 			expect: func(t *testing.T, args []string) {
-				assert.Equal(t, []string{
+				assert := assert.New(t)
+				assert.Equal([]string{
 					"fuse",
-					"--bootstrap", "/var/lib/containerd-nydus-v3/nydusd/ab/image.boot",
-					"--config", "/run/containerd-nydus-v3/nydusd/ab/config.yaml",
-					"--mountpoint", "/var/lib/containerd-nydus-v3/nydusd/ab/mnt",
-					"--apiserver", "unix:///run/containerd-nydus-v3/nydusd/ab.sock",
-					"--log-dir", "/var/log/nydus-v3/nydusd/ab",
+					"--bootstrap", "/var/lib/nydus-snapshotter/nydusd/ab/image.boot",
+					"--config", "/run/nydus-snapshotter/nydusd/ab/config.yaml",
+					"--mountpoint", "/var/lib/nydus-snapshotter/nydusd/ab/mnt",
+					"--apiserver", "unix:///run/nydus-snapshotter/nydusd/ab.sock",
+					"--log-dir", "/var/log/nydus-snapshotter/nydusd/ab",
+					"--log-level", "debug",
+					"--log-max-files", "3",
 					"--fsname", "nydus-abcdef012345",
 				}, args)
 			},
@@ -64,6 +70,7 @@ func TestFuseDriver_Mounted(t *testing.T) {
 		fstype  string
 		mounts  int
 		symlink bool
+		missing bool
 		expect  func(t *testing.T, mounted bool, err error)
 	}{
 		{
@@ -105,6 +112,16 @@ func TestFuseDriver_Mounted(t *testing.T) {
 				assert.False(mounted)
 			},
 		},
+		{
+			name:    "mountpoint whose dir does not exist",
+			missing: true,
+			expect: func(t *testing.T, mounted bool, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "resolve mountpoint")
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.False(mounted)
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -114,6 +131,10 @@ func TestFuseDriver_Mounted(t *testing.T) {
 				link := filepath.Join(t.TempDir(), "root")
 				assert.NoError(t, os.Symlink(filepath.Dir(d.Instance.Mountpoint), link))
 				d.Instance.Mountpoint = filepath.Join(link, filepath.Base(d.Instance.Mountpoint))
+			}
+
+			if tc.missing {
+				d.Instance.Mountpoint = filepath.Join(d.Instance.Mountpoint, "missing", "mnt")
 			}
 
 			mounted, err := (&fuseDriver{}).Mounted(d)
@@ -128,19 +149,22 @@ func TestFuseDriver_Unmount(t *testing.T) {
 		fstype  string
 		mounts  int
 		missing bool
+		tooLong bool
 		expect  func(t *testing.T, d *Daemon, err error)
 	}{
 		{
 			name: "nothing mounted",
 			expect: func(t *testing.T, d *Daemon, err error) {
-				assert.NoError(t, err)
+				assert := assert.New(t)
+				assert.NoError(err)
 			},
 		},
 		{
 			name:    "missing mountpoint",
 			missing: true,
 			expect: func(t *testing.T, d *Daemon, err error) {
-				assert.NoError(t, err)
+				assert := assert.New(t)
+				assert.NoError(err)
 			},
 		},
 		{
@@ -167,6 +191,15 @@ func TestFuseDriver_Unmount(t *testing.T) {
 				assert.False(mounted)
 			},
 		},
+		{
+			name:    "mountpoint that is no path",
+			tooLong: true,
+			expect: func(t *testing.T, d *Daemon, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "unmount ")
+				assert.ErrorIs(err, unix.ENAMETOOLONG)
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -174,6 +207,10 @@ func TestFuseDriver_Unmount(t *testing.T) {
 			d := newTestDaemon(t, tc.fstype, tc.mounts)
 			if tc.missing {
 				assert.NoError(t, os.Remove(d.Instance.Mountpoint))
+			}
+
+			if tc.tooLong {
+				d.Instance.Mountpoint = filepath.Join(d.Instance.Mountpoint, strings.Repeat("a", unix.PathMax))
 			}
 
 			tc.expect(t, d, (&fuseDriver{}).Unmount(d))

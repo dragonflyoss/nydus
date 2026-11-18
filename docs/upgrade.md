@@ -158,7 +158,7 @@ before adoption.
 ## Optional unified API endpoint
 
 With `--apiserver`, FUSE publishes one `0600` Unix socket for `/metrics`, `/trace`,
-`/api/v1/backend/auth`, and control. No API listener is created without the
+`/api/v1/backend/auth/basic`, `/api/v1/backend/auth/bearer`, and control. No API listener is created without the
 option. Control starts with:
 
 ```http
@@ -209,13 +209,52 @@ handled according to the startup path:
 
 The control plane must observe readiness and health.
 INFO verifies daemon identity and control
-responsiveness, not filesystem I/O health. Without an API there is no explicit
-readiness signal. Process existence alone is insufficient.
+responsiveness, not filesystem I/O health. Readiness is reported through
+[service notification](#service-notification) when the service manager provides
+a notification socket, with or without an API. Without that socket and without
+an API there is no explicit readiness signal. Process existence alone is
+insufficient.
 
 The first termination signal requests cancellation at a safe startup boundary
 or normal teardown while serving. A bounded protocol operation may finish before
 cancellation is observed. A second signal forces immediate exit, including during
 startup. Cancellation never authorizes ownership or worker activation.
+
+### Service notification
+
+When the service manager sets `NOTIFY_SOCKET`, as systemd does for a
+`Type=notify` unit, `nydus fuse` reports its state with the
+[sd_notify(3)](https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html)
+datagram protocol. The socket is an absolute path or an `@`-prefixed abstract
+name. Without `NOTIFY_SOCKET` nothing is sent and no thread is started. A
+notification that cannot be sent is logged at `warn` and never fails the daemon.
+A keep-alive thread that cannot be started fails the start, before the mount
+exists: the service manager enforces the watchdog either way.
+
+| State | Sent |
+| --- | --- |
+| `READY=1` | Once, when this process serves the mount: workers are active and API publication was attempted |
+| `WATCHDOG=1` | Before the mount starts, then at half of `WATCHDOG_USEC` until teardown finishes; only when `WATCHDOG_USEC` is set and `WATCHDOG_PID` is unset or names this process, as in sd_watchdog_enabled(3) |
+| `STOPPING=1` | Once, when teardown begins: after a termination signal, after the session was released in a handoff, or after the FUSE connection ended |
+
+On the fresh path a failed API publication fails startup, so `READY=1` implies
+a published API socket. After a hot upgrade `READY=1` is sent even when
+publication failed, because the successor already serves the mount. A startup
+that fails or is cancelled exits without sending `READY=1` or `STOPPING=1`.
+
+Predecessor and successor are separate processes, each reporting to the socket
+it was started with. The successor sends `READY=1` after it acquired the owner
+lock and resumed the workers. The predecessor keeps sending `WATCHDOG=1` while
+its workers are parked for the handoff, sends `STOPPING=1` after it released
+the session, and exits without unmounting.
+
+The keep-alive comes from a dedicated thread that touches neither FUSE
+requests, the cache, nor the backend. It proves that the process exists and
+that its threads are scheduled; a stopped or frozen process misses it. It does
+not prove that requests make progress: a worker blocked in a read or an
+unreachable registry does not stop it. A missed keep-alive makes the service
+manager kill the daemon, which abandons the mount, so slow I/O is kept out of
+it on purpose. Filesystem I/O health has to be observed separately.
 
 ### Cleanup
 

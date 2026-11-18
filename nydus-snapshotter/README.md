@@ -31,23 +31,27 @@ IMAGE_FLAGS="--platform linux/amd64,linux/arm64 --push"`.
    `nydus-snapshotter install` copies the binaries, units and config to the
    host, enables `nydus-snapshotter.socket` and `nydus-snapshotter.service`,
    restarts the service when its binary, units or `config.yaml` changed, and
-   keeps `/run/containerd-nydus-v3/kubernetes/{token,ca.crt,kubeconfig}` in
-   sync for `auth.kubesecret`. `deploy/nydus-snapshotter/` holds the default
+   keeps `/run/nydus-snapshotter/kubernetes/{token,ca.crt,kubeconfig}` in
+   sync for `auth.kube_secret`. `deploy/nydus-snapshotter/` holds the default
    `config.yaml` and `nydusd.template.yaml`.
-2. Merge `deploy/containerd/config-v1.6.toml` or `config-v2.toml` into
-   `/etc/containerd/config.toml` and restart containerd. The installer never
-   edits containerd's config. Point a node at the snapshotter only once it is
-   installed there: the installer Pod itself needs a working snapshotter to
-   start, so new nodes either join with overlayfs first or carry the units in
-   their image.
+2. Merge `deploy/containerd/config-v1.6.toml` into a
+   `/etc/containerd/config.toml` of `version = 2`, or `config-v2.toml` into one
+   of `version = 3`, and restart containerd. The file's version decides, not
+   containerd's: a containerd 2.x reading a version 2 config takes the first.
+   The installer never edits containerd's config. Point a node at the
+   snapshotter only once it is installed there: the installer Pod itself needs
+   a working snapshotter to start, so new nodes either join with overlayfs
+   first or carry the units in their image.
 
 The installer copies ConfigMap changes to the host every sync interval
 without restarting the snapshotter, which reloads `cgroup` and
 `nydusd.dragonfly` itself; other keys apply when the installer Pods restart.
 An invalid `config.yaml`, nydusd template or `hosts.toml` is never copied to
-the host. Removing the DaemonSet leaves the snapshotter running; uninstalling is a manual
-`systemctl disable --now nydus-snapshotter.socket nydus-snapshotter.service`
-and removing the paths listed in the design doc.
+the host. Removing the DaemonSet leaves the snapshotter running; uninstalling is manual:
+`systemctl disable --now nydus-snapshotter.socket nydus-snapshotter.service`,
+then `systemctl stop system-nydusd.slice` once no container runs on a nydus
+image, which also stops the daemons left, and removing the paths listed in the
+design doc.
 
 Without Kubernetes, copy the binaries, `deploy/systemd/` and
 `deploy/nydus-snapshotter/` to the paths in the design doc and enable both

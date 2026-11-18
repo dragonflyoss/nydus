@@ -14,18 +14,20 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	continuityfs "github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
+
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/cache"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 )
 
 const (
 	// bootstrapFile is the bootstrap in the bootstrap layer's image dir.
 	bootstrapFile = "image.boot"
-
-	// blobMetaSuffix names a blob's chunk table in the image dir and cache.
-	blobMetaSuffix = ".blob.meta"
 
 	// maxBlobs is the most blobs a bootstrap references: EROFS counts extra
 	// devices in a u16, refer to nydus-format/src/erofs/superblock.rs.
@@ -65,7 +67,7 @@ func (b *BootstrapLayer) Blobs() ([]string, error) {
 	// containerd's content store validates a digest before building a path.
 	var blobs []string
 	for _, entry := range entries {
-		blob, ok := strings.CutSuffix(entry.Name(), blobMetaSuffix)
+		blob, ok := strings.CutSuffix(entry.Name(), cache.BlobMetaSuffix)
 		if !ok || !entry.Type().IsRegular() || digest.NewDigestFromEncoded(digest.SHA256, blob).Validate() != nil {
 			continue
 		}
@@ -78,6 +80,22 @@ func (b *BootstrapLayer) Blobs() ([]string, error) {
 	}
 
 	return blobs, nil
+}
+
+// describe fills the image's part of a daemon's record: the reference, its
+// registry host, the blobs the layer names, and now as the creation time.
+func (b *BootstrapLayer) describe(instance *store.Instance, ref *registry.Reference) error {
+	blobs, err := b.Blobs()
+	if err != nil {
+		return err
+	}
+
+	instance.ImageRef = ref.Name
+	instance.RegistryHost = ref.Host
+	instance.Blobs = blobs
+	instance.CreatedAt = time.Now()
+
+	return nil
 }
 
 // linkBootstrap links the bootstrap to dst, replacing an existing one, so a
@@ -94,7 +112,7 @@ func (b *BootstrapLayer) linkBootstrap(dst string) error {
 // daemon need not fetch them. An existing meta is kept.
 func (b *BootstrapLayer) seedCache(cacheDir string, blobs []string) error {
 	for _, blob := range blobs {
-		name := blob + blobMetaSuffix
+		name := blob + cache.BlobMetaSuffix
 		if err := b.link(name, filepath.Join(cacheDir, name)); err != nil {
 			return err
 		}
@@ -153,7 +171,9 @@ func (b *BootstrapLayer) copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".*.tmp")
+	// A temporary file is named as nydus names a blob meta it downloads, so
+	// cache GC sweeps one a crash left in the cache.
+	tmp, err := os.CreateTemp(filepath.Dir(dst), cache.TempMetaPrefix+"*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary file for %s: %w", dst, err)
 	}

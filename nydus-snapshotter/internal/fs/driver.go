@@ -37,7 +37,7 @@ type Driver interface {
 // newDriver returns the driver of a name.
 func newDriver(name string) (Driver, error) {
 	switch name {
-	case config.DriverFuse:
+	case config.DriverFUSE:
 		return &fuseDriver{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported driver %q", name)

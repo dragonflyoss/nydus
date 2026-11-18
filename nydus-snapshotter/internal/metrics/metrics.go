@@ -24,6 +24,28 @@ const (
 
 	// labelReason is the eviction reason label.
 	labelReason = "reason"
+
+	// ResultSuccess is the result of a credential update a daemon accepted.
+	ResultSuccess = "success"
+
+	// ResultFailure is the result of a credential update a daemon rejected
+	// or that failed.
+	ResultFailure = "failure"
+
+	// ResultUnsupported is the result of a credential update for a daemon
+	// that takes none.
+	ResultUnsupported = "unsupported"
+
+	// ReasonOrphan is the reason for evicting a blob no bootstrap references.
+	ReasonOrphan = "orphan"
+
+	// ReasonTTL is the reason for evicting a blob unused for longer than the
+	// TTL.
+	ReasonTTL = "ttl"
+
+	// ReasonWatermark is the reason for evicting a least recently used blob
+	// over the high watermark.
+	ReasonWatermark = "watermark"
 )
 
 var (
@@ -36,46 +58,76 @@ var (
 		Buckets:   prometheus.ExponentialBuckets(0.05, 2, 10),
 	})
 
-	// DaemonStartFailureTotal counts daemons that failed to start.
-	DaemonStartFailureTotal = promauto.NewCounter(prometheus.CounterOpts{
+	// DaemonStartsTotal counts attempted daemon starts, the denominator of
+	// DaemonStartFailuresTotal, refer to
+	// https://prometheus.io/docs/practices/instrumentation/#failures.
+	DaemonStartsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: "daemon",
-		Name:      "start_failure_total",
+		Name:      "starts_total",
+		Help:      "Number of nydus daemon starts attempted.",
+	})
+
+	// DaemonStartFailuresTotal counts daemons that failed to start.
+	DaemonStartFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: "daemon",
+		Name:      "start_failures_total",
 		Help:      "Number of nydus daemons that failed to start.",
 	})
 
-	// DaemonUnexpectedExitTotal counts daemons that exited while snapshots
+	// DaemonUnexpectedExitsTotal counts daemons that exited while snapshots
 	// still used them.
-	DaemonUnexpectedExitTotal = promauto.NewCounter(prometheus.CounterOpts{
+	DaemonUnexpectedExitsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: "daemon",
-		Name:      "unexpected_exit_total",
+		Name:      "unexpected_exits_total",
 		Help:      "Number of nydus daemons found exited while still in use.",
 	})
 
-	// DaemonRunning is the number of running daemons.
-	DaemonRunning = promauto.NewGauge(prometheus.GaugeOpts{
+	// RunningDaemons is the number of running daemons.
+	RunningDaemons = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace,
-		Subsystem: "daemon",
-		Name:      "running",
+		Name:      "running_daemons",
 		Help:      "Number of running nydus daemons.",
 	})
 
-	// AuthUpdateTotal counts credential pushes to daemons by result:
+	// UnresponsiveDaemons is the number of running daemons whose mount is
+	// gone or whose API did not answer the last health check.
+	UnresponsiveDaemons = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "unresponsive_daemons",
+		Help:      "Number of running nydus daemons that failed the last health check.",
+	})
+
+	// AuthUpdatesTotal counts credential pushes to daemons by result:
 	// success, failure or unsupported.
-	AuthUpdateTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	AuthUpdatesTotal = newCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: "auth",
-		Name:      "update_total",
+		Name:      "updates_total",
 		Help:      "Number of credential updates pushed to nydus daemons.",
-	}, []string{labelResult})
+	}, labelResult, ResultSuccess, ResultFailure, ResultUnsupported)
 
 	// CacheEvictedBytesTotal counts bytes evicted from the blob cache by
 	// reason: ttl, watermark or orphan.
-	CacheEvictedBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	CacheEvictedBytesTotal = newCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: "cache",
 		Name:      "evicted_bytes_total",
 		Help:      "Bytes evicted from the blob cache.",
-	}, []string{labelReason})
+	}, labelReason, ReasonTTL, ReasonWatermark, ReasonOrphan)
 )
+
+// newCounterVec returns a registered counter vector of one label whose known
+// values start at 0, so a series that has not counted yet reads 0 and not
+// absent, refer to
+// https://prometheus.io/docs/practices/instrumentation/#avoid-missing-metrics.
+func newCounterVec(opts prometheus.CounterOpts, label string, values ...string) *prometheus.CounterVec {
+	counter := promauto.NewCounterVec(opts, []string{label})
+	for _, value := range values {
+		counter.WithLabelValues(value)
+	}
+
+	return counter
+}

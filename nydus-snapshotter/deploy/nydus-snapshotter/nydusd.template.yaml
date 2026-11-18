@@ -1,5 +1,5 @@
 storage:
-  dir: /var/lib/containerd-nydus-v3/cache
+  dir: /var/lib/nydus-snapshotter/cache
 prefetch:
   concurrent_blob_count: 10
 backend:

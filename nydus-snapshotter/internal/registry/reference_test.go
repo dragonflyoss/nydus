@@ -41,7 +41,8 @@ func TestParseReference(t *testing.T) {
 			name: "invalid reference",
 			ref:  "Invalid:Ref",
 			expect: func(t *testing.T, ref *Reference, err error) {
-				assert.Error(t, err)
+				assert := assert.New(t)
+				assert.Error(err)
 			},
 		},
 	}

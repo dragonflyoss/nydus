@@ -49,6 +49,25 @@ fn emit_git_rerun_triggers() {
     }
 }
 
+/// Returns the commit the build environment names with `GIT_COMMIT_SHORT_HASH`
+/// and `GIT_COMMIT_DATE`.
+///
+/// A build of the source without its `.git` directory, as in an image build
+/// whose context leaves it out, names the commit this way. It wins over git, as
+/// moby's `DOCKER_GITCOMMIT` and Kubernetes's `KUBE_GIT_COMMIT` do.
+fn get_commit_from_env() -> Option<Commit> {
+    let var = |name: &str| {
+        println!("cargo:rerun-if-env-changed={name}");
+        env::var(name).ok().filter(|value| !value.is_empty())
+    };
+
+    let (short_hash, date) = (var("GIT_COMMIT_SHORT_HASH"), var("GIT_COMMIT_DATE"));
+    Some(Commit {
+        short_hash: short_hash?,
+        date: date?,
+    })
+}
+
 /// Returns the git commit information.
 fn get_commit_from_git() -> Option<Commit> {
     // Only trust git when the crate sits inside the nydus source tree; a
@@ -81,8 +100,8 @@ fn get_commit_from_git() -> Option<Commit> {
 }
 
 fn main() {
-    // Get the commit information from git.
-    if let Some(commit) = get_commit_from_git() {
+    // Get the commit information from the environment, then from git.
+    if let Some(commit) = get_commit_from_env().or_else(get_commit_from_git) {
         // Set the environment variables for the git commit short.
         println!(
             "cargo:rustc-env=GIT_COMMIT_SHORT_HASH={}",

@@ -11,13 +11,13 @@ import (
 
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
-	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 
 	nydusfs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
 )
 
-// CommittedBlobs returns the IDs of the blobs committed bootstraps reference.
+// CommittedBlobs returns the IDs of the blobs referenced by committed
+// bootstrap layers.
 func (s *snapshotter) CommittedBlobs(ctx context.Context) (map[string]struct{}, error) {
 	var dirs []string
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
@@ -54,14 +54,4 @@ func (s *snapshotter) CommittedBlobs(ctx context.Context) (map[string]struct{}, 
 	}
 
 	return blobs, nil
-}
-
-// walkInfo walks the snapshots in the transaction of ctx. A fresh metastore
-// has no snapshots bucket yet, which holds no snapshot.
-func (s *snapshotter) walkInfo(ctx context.Context, fn snapshots.WalkFunc) error {
-	if err := storage.WalkInfo(ctx, fn); err != nil && !errdefs.IsNotFound(err) {
-		return err
-	}
-
-	return nil
 }

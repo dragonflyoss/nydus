@@ -23,7 +23,7 @@ func TestKeyring_lookup(t *testing.T) {
 	tests := []struct {
 		name   string
 		auths  map[string]authConfig
-		target string
+		target registryKey
 		expect func(t *testing.T, creds []credential)
 	}{
 		{
@@ -33,7 +33,7 @@ func TestKeyring_lookup(t *testing.T) {
 			expect: func(t *testing.T, creds []credential) {
 				assert := assert.New(t)
 				assert.Len(creds, 1)
-				assert.Equal("registry.example.com", creds[0].key)
+				assert.Equal(registryKey("registry.example.com"), creds[0].key)
 				assert.Equal("test", creds[0].source)
 			},
 		},
@@ -44,7 +44,7 @@ func TestKeyring_lookup(t *testing.T) {
 			expect: func(t *testing.T, creds []credential) {
 				assert := assert.New(t)
 				assert.Len(creds, 1)
-				assert.Equal("registry.example.com", creds[0].key)
+				assert.Equal(registryKey("registry.example.com"), creds[0].key)
 			},
 		},
 		{
@@ -52,7 +52,8 @@ func TestKeyring_lookup(t *testing.T) {
 			auths:  map[string]authConfig{"*.example.com": mockAuthConfig},
 			target: "registry.example.com/app",
 			expect: func(t *testing.T, creds []credential) {
-				assert.Len(t, creds, 1)
+				assert := assert.New(t)
+				assert.Len(creds, 1)
 			},
 		},
 		{
@@ -60,7 +61,8 @@ func TestKeyring_lookup(t *testing.T) {
 			auths:  map[string]authConfig{"*.example.com": mockAuthConfig},
 			target: "example.com/app",
 			expect: func(t *testing.T, creds []credential) {
-				assert.Empty(t, creds)
+				assert := assert.New(t)
+				assert.Empty(creds)
 			},
 		},
 		{
@@ -68,7 +70,8 @@ func TestKeyring_lookup(t *testing.T) {
 			auths:  map[string]authConfig{"registry.example.com:5000": mockAuthConfig},
 			target: "registry.example.com/app",
 			expect: func(t *testing.T, creds []credential) {
-				assert.Empty(t, creds)
+				assert := assert.New(t)
+				assert.Empty(creds)
 			},
 		},
 		{
@@ -76,7 +79,8 @@ func TestKeyring_lookup(t *testing.T) {
 			auths:  map[string]authConfig{"registry.example.com/team": mockAuthConfig},
 			target: "registry.example.com/team/app",
 			expect: func(t *testing.T, creds []credential) {
-				assert.Len(t, creds, 1)
+				assert := assert.New(t)
+				assert.Len(creds, 1)
 			},
 		},
 		{
@@ -84,7 +88,8 @@ func TestKeyring_lookup(t *testing.T) {
 			auths:  map[string]authConfig{"registry.example.com/team": mockAuthConfig},
 			target: "registry.example.com/other/app",
 			expect: func(t *testing.T, creds []credential) {
-				assert.Empty(t, creds)
+				assert := assert.New(t)
+				assert.Empty(creds)
 			},
 		},
 		{
@@ -114,7 +119,7 @@ func TestKeyring_lookup(t *testing.T) {
 			expect: func(t *testing.T, creds []credential) {
 				assert := assert.New(t)
 				assert.Len(creds, 3)
-				assert.Equal("docker.io", creds[0].key)
+				assert.Equal(registryKey("docker.io"), creds[0].key)
 				assert.Equal("docker", creds[0].Username)
 				assert.Equal("index", creds[1].Username)
 				assert.Equal("registry-1", creds[2].Username)
@@ -128,7 +133,8 @@ func TestKeyring_lookup(t *testing.T) {
 			},
 			target: "registry.example.com/app",
 			expect: func(t *testing.T, creds []credential) {
-				assert.Len(t, creds, 1)
+				assert := assert.New(t)
+				assert.Len(creds, 1)
 			},
 		},
 	}
@@ -138,6 +144,63 @@ func TestKeyring_lookup(t *testing.T) {
 			k := &keyring{}
 			k.add("test", tc.auths)
 			tc.expect(t, k.lookup(tc.target))
+		})
+	}
+}
+
+func TestRegistryKey_matches(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    registryKey
+		target registryKey
+		expect func(t *testing.T, matched bool, err error)
+	}{
+		{
+			name:   "host and path prefix",
+			key:    "registry.example.com/team",
+			target: "registry.example.com/team/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(matched)
+			},
+		},
+		{
+			name:   "another port",
+			key:    "registry.example.com:5000",
+			target: "registry.example.com:5001/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(matched)
+			},
+		},
+		{
+			name:   "key that is no url",
+			key:    "%zz",
+			target: "registry.example.com/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+				assert.False(matched)
+			},
+		},
+		{
+			name:   "target that is no url",
+			key:    "registry.example.com",
+			target: "%zz",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.Error(err)
+				assert.False(matched)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			matched, err := tc.key.matches(tc.target)
+			tc.expect(t, matched, err)
 		})
 	}
 }
@@ -152,63 +215,72 @@ func TestCredential_basic(t *testing.T) {
 			name: "username and password",
 			auth: mockAuthConfig,
 			expect: func(t *testing.T, basic string) {
-				assert.Equal(t, mockBasic, basic)
+				assert := assert.New(t)
+				assert.Equal(mockBasic, basic)
 			},
 		},
 		{
 			name: "padded auth",
 			auth: authConfig{Auth: base64.StdEncoding.EncodeToString([]byte("user:pass1"))},
 			expect: func(t *testing.T, basic string) {
-				assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("user:pass1")), basic)
+				assert := assert.New(t)
+				assert.Equal(base64.StdEncoding.EncodeToString([]byte("user:pass1")), basic)
 			},
 		},
 		{
 			name: "unpadded auth",
 			auth: authConfig{Auth: base64.RawStdEncoding.EncodeToString([]byte("user:pass1"))},
 			expect: func(t *testing.T, basic string) {
-				assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("user:pass1")), basic)
+				assert := assert.New(t)
+				assert.Equal(base64.StdEncoding.EncodeToString([]byte("user:pass1")), basic)
 			},
 		},
 		{
 			name: "auth wins over username and password",
 			auth: authConfig{Username: "other", Password: "other", Auth: mockBasic},
 			expect: func(t *testing.T, basic string) {
-				assert.Equal(t, mockBasic, basic)
+				assert := assert.New(t)
+				assert.Equal(mockBasic, basic)
 			},
 		},
 		{
 			name: "skip identity token",
 			auth: authConfig{Auth: mockBasic, IdentityToken: "token"},
 			expect: func(t *testing.T, basic string) {
-				assert.Empty(t, basic)
+				assert := assert.New(t)
+				assert.Empty(basic)
 			},
 		},
 		{
 			name: "skip registry token",
 			auth: authConfig{RegistryToken: "token"},
 			expect: func(t *testing.T, basic string) {
-				assert.Empty(t, basic)
+				assert := assert.New(t)
+				assert.Empty(basic)
 			},
 		},
 		{
 			name: "skip malformed auth",
 			auth: authConfig{Auth: "!!!"},
 			expect: func(t *testing.T, basic string) {
-				assert.Empty(t, basic)
+				assert := assert.New(t)
+				assert.Empty(basic)
 			},
 		},
 		{
 			name: "skip auth without colon",
 			auth: authConfig{Auth: base64.StdEncoding.EncodeToString([]byte("user"))},
 			expect: func(t *testing.T, basic string) {
-				assert.Empty(t, basic)
+				assert := assert.New(t)
+				assert.Empty(basic)
 			},
 		},
 		{
 			name: "skip missing username",
 			auth: authConfig{Password: "pass"},
 			expect: func(t *testing.T, basic string) {
-				assert.Empty(t, basic)
+				assert := assert.New(t)
+				assert.Empty(basic)
 			},
 		},
 	}

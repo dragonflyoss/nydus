@@ -39,9 +39,9 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 		return s.overlayMounts(snap, nil), nil
 	}
 
-	// Parents never change while a child exists, so a read transaction of
-	// their own sees what the caller's did, and a create's write transaction
-	// stays short.
+	// Read the parents in a separate read transaction: parents cannot change
+	// while a child exists, and createSnapshot's write transaction stays
+	// short.
 	var layers []layer
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) (err error) {
 		layers, err = s.parents(ctx, snap, info)
@@ -50,11 +50,11 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 		return nil, err
 	}
 
-	bootstrap := slices.IndexFunc(layers, func(l layer) bool {
+	i := slices.IndexFunc(layers, func(l layer) bool {
 		return labels(l.info.Labels).isNydusBootstrap()
 	})
 
-	if bootstrap < 0 {
+	if i < 0 {
 		if err := s.checkUnlabelledNydus(layers); err != nil {
 			return nil, err
 		}
@@ -62,21 +62,19 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 		return s.overlayMounts(snap, s.upperPaths(layers)), nil
 	}
 
-	mountpoint, err := s.mountImage(ctx, layers[bootstrap])
+	mountpoint, err := s.mountImage(ctx, layers[i])
 	if err != nil {
 		return nil, err
 	}
 
-	return s.overlayMounts(snap, append(s.upperPaths(layers[:bootstrap]), mountpoint)), nil
+	return s.overlayMounts(snap, append(s.upperPaths(layers[:i]), mountpoint)), nil
 }
 
 // mountImage ensures the daemon serving the image of a bootstrap layer and
 // returns its mountpoint.
 func (s *snapshotter) mountImage(ctx context.Context, bootstrap layer) (string, error) {
 	bootstrapLabels := labels(bootstrap.info.Labels)
-	version := bootstrapLabels[labelNydusFSVersion]
-	fileSystem, ok := s.fileSystems[version]
-	if !ok {
+	if version := bootstrapLabels[labelNydusFSVersion]; version != nydusfs.Version {
 		return "", fmt.Errorf("nydus image format %s=%q is not supported, convert the image with nydusify v3: %w", labelNydusFSVersion, version, errdefs.ErrNotImplemented)
 	}
 
@@ -95,7 +93,7 @@ func (s *snapshotter) mountImage(ctx context.Context, bootstrap layer) (string, 
 		return "", err
 	}
 
-	return fileSystem.Mount(ctx, &nydusfs.Image{
+	return s.fileSystem.Mount(ctx, &nydusfs.Image{
 		ChainID:       chainID,
 		Ref:           ref,
 		BootstrapDir:  s.upperPath(bootstrap.id),
@@ -103,10 +101,10 @@ func (s *snapshotter) mountImage(ctx context.Context, bootstrap layer) (string, 
 	})
 }
 
-// checkUnlabelledNydus fails a chain whose nydus data layers lost their
-// bootstrap's labels, a bootstrap unpacked without them (Image.Unpack, CRI's
-// fallback unpack, image volumes), which would otherwise run with a rootfs
-// holding only image/image.boot.
+// checkUnlabelledNydus returns an error for a chain with nydus data layers
+// but no labelled bootstrap. The bootstrap was then unpacked without its
+// labels (Image.Unpack, CRI's fallback unpack, image volumes), and the
+// container would start on a rootfs holding only image/image.boot.
 func (s *snapshotter) checkUnlabelledNydus(layers []layer) error {
 	for _, l := range layers {
 		if labels(l.info.Labels).isNydusBlob() {

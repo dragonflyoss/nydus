@@ -55,45 +55,36 @@ func (s *Size) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// MarshalText encodes the size as a byte count.
-func (s Size) MarshalText() ([]byte, error) {
-	return []byte(strconv.FormatUint(uint64(s), 10)), nil
-}
-
 // usecPerPercent is the CPU time per second of 1%: 10ms.
 const usecPerPercent = 10_000
 
-// Percent is a CPU quota decoded from a percentage such as "150%", where
-// 100% is one CPU, as systemd's CPUQuota.
-type Percent uint64
+// CPUQuota is a CPU quota decoded from a percentage such as "150%", where
+// 100% is one CPU, as systemd's CPUQuota, refer to
+// https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html#CPUQuota=.
+type CPUQuota uint64
 
 // UnmarshalText decodes a percentage string.
-func (p *Percent) UnmarshalText(text []byte) error {
+func (q *CPUQuota) UnmarshalText(text []byte) error {
 	value, ok := strings.CutSuffix(string(text), "%")
 	if !ok {
-		return fmt.Errorf("parse percent %q: missing %%", text)
+		return fmt.Errorf("parse cpu quota %q: missing %%", text)
 	}
 
 	v, err := strconv.ParseUint(value, 10, 64)
 	if err != nil {
-		return fmt.Errorf("parse percent %q: %w", text, err)
+		return fmt.Errorf("parse cpu quota %q: %w", text, err)
 	}
 
 	if v > math.MaxUint64/usecPerPercent {
-		return fmt.Errorf("percent %q is out of range", text)
+		return fmt.Errorf("cpu quota %q is out of range", text)
 	}
 
-	*p = Percent(v)
+	*q = CPUQuota(v)
 	return nil
 }
 
-// MarshalText encodes the percentage.
-func (p Percent) MarshalText() ([]byte, error) {
-	return []byte(strconv.FormatUint(uint64(p), 10) + "%"), nil
-}
-
-// CPUQuotaPerSecUSec returns the systemd CPUQuotaPerSecUSec value: 1% is
-// 10ms of CPU time per second, already on systemd's 10ms granularity.
-func (p Percent) CPUQuotaPerSecUSec() uint64 {
-	return uint64(p) * usecPerPercent
+// PerSecUSec returns the quota as systemd's CPUQuotaPerSecUSec: 1% is 10ms of
+// CPU time per second, already on systemd's 10ms granularity.
+func (q CPUQuota) PerSecUSec() uint64 {
+	return uint64(q) * usecPerPercent
 }

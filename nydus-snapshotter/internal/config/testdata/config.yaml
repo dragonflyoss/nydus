@@ -1,25 +1,28 @@
 version: 1
-root: /var/lib/containerd-nydus-v3
-address: /run/containerd-nydus-v3/containerd-nydus-grpc.sock
+root: /var/lib/nydus-snapshotter
+address: /run/nydus-snapshotter/nydus-snapshotter.sock
 log:
   level: debug
 metrics:
   address: 127.0.0.1:4010
 registry:
-  config_path: /etc/nydus-v3/certs.d
+  config_path: /etc/nydus-snapshotter/certs.d
 auth:
   docker_config:
     path: ''
-  kubesecret:
+  kube_secret:
     enable: true
-    kubeconfig: /run/containerd-nydus-v3/kubernetes/kubeconfig
+    kubeconfig: /run/nydus-snapshotter/kubernetes/kubeconfig
     label_selector: app=cr-credential
 nydusd:
   driver: fuse
-  binary: /opt/nydus-v3/bin/current/nydus
-  template: /etc/nydus-v3/nydusd.template.yaml
-  log_dir: /var/log/nydus-v3/nydusd
+  binary: /opt/nydus-snapshotter/bin/current/nydus
+  template: /etc/nydus-snapshotter/nydusd.template.yaml
+  log_dir: /var/log/nydus-snapshotter/nydusd
+  log_level: debug
+  log_max_files: 3
   mount_timeout: 20s
+  watchdog_timeout: 1m
   prefetch_scope: ondemand
   dragonfly:
     scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
@@ -27,7 +30,7 @@ nydusd:
     max_retries: 1
     fallback_rate_limit: 1
 cgroup:
-  slice: system-nydus-v3.slice
+  slice: system-nydusd.slice
   memory_max: 8GiB
   memory_high: 6GiB
   cpu_quota: 400%

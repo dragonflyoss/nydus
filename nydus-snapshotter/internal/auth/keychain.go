@@ -7,8 +7,7 @@
 //go:generate mockgen -destination mocks/keychain_mock.go -source keychain.go -package mocks
 
 // Package auth resolves registry credentials from Kubernetes secrets and the
-// docker config with kubelet's keyring semantics, and pushes changed ones to
-// running daemons.
+// docker config with kubelet's keyring semantics.
 package auth
 
 import (
@@ -21,11 +20,11 @@ import (
 	"github.com/containerd/log"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 )
 
 // kubeconfigPollInterval is how often Run retries loading the kubeconfig.
@@ -33,64 +32,64 @@ const kubeconfigPollInterval = 5 * time.Second
 
 // Keychain resolves registry credentials for image references.
 type Keychain interface {
-	// Run watches the kubesecret source and pushes changed credentials to
-	// running daemons until ctx is done. It returns at once when kubesecret
-	// is disabled.
-	Run(ctx context.Context)
+	// Run watches the kube_secret provider until ctx is done and calls
+	// onChange when a credential may have changed: once the secrets are
+	// synced, then on every secret change. It returns at once when
+	// kube_secret is disabled. A changed docker config is read by the next
+	// Resolve and reported by no call.
+	Run(ctx context.Context, onChange func())
 
 	// Resolve returns the base64 username:password credential for ref, "" for
 	// anonymous access.
 	Resolve(ctx context.Context, ref *registry.Reference) (string, error)
 
-	// Synced reports whether every source finished its initial sync.
+	// Synced reports whether every provider finished its initial sync.
 	Synced() bool
 }
 
-// keychain looks up the kubesecret source, then the docker config.
+// keychain looks up the kube_secret provider, then the docker config
+// provider.
 type keychain struct {
-	// cfg is the kubesecret config.
-	cfg config.KubeSecretAuthConfig
-
-	// store lists the running daemons to push credentials to.
-	store store.Store
+	// cfg is the kube_secret config.
+	cfg config.AuthKubeSecretConfig
 
 	// kubeClient returns the API client of the kubeconfig.
 	kubeClient func() (kubernetes.Interface, error)
 
-	// secrets is the kubesecret source, nil until Run connects.
-	secrets atomic.Pointer[kubeSecret]
+	// secrets is the kube_secret provider, nil until Run connects.
+	secrets atomic.Pointer[kubeSecretProvider]
 
-	// docker is the docker config source.
-	docker *dockerConfig
+	// docker is the docker config provider.
+	docker *dockerConfigProvider
 }
 
-// New keychain interface. Nothing is watched until Run.
-func New(cfg *config.Config, s store.Store) Keychain {
+// New returns a keychain. Nothing is watched until Run.
+func New(cfg *config.Config) Keychain {
 	k := &keychain{
 		cfg:    cfg.Auth.KubeSecret,
-		store:  s,
-		docker: newDockerConfig(cfg.Auth.DockerConfig.Path),
+		docker: newDockerConfigProvider(cfg.Auth.DockerConfig.Path),
 	}
 	k.kubeClient = k.newKubeClient
 
 	return k
 }
 
-// Run watches the kubesecret source and pushes changed credentials to
-// running daemons until ctx is done. It returns at once when kubesecret is
-// disabled.
-func (k *keychain) Run(ctx context.Context) {
+// Run watches the kube_secret provider until ctx is done and calls onChange
+// when a credential may have changed: once the secrets are synced, then on
+// every secret change. It returns at once when kube_secret is disabled. A
+// changed docker config is read by the next Resolve and reported by no call.
+func (k *keychain) Run(ctx context.Context, onChange func()) {
 	if !k.cfg.Enable {
 		return
 	}
 
+	// connect fails only once ctx is done.
 	client, err := k.connect(ctx)
 	if err != nil {
 		return
 	}
 
-	p := newPusher(k, k.store)
-	secrets, err := newKubeSecret(client, k.cfg.LabelSelector, p.enqueue)
+	secrets, err := newKubeSecretProvider(client, k.cfg.LabelSelector, onChange)
 	if err != nil {
 		log.G(ctx).WithError(err).Error("watch registry secrets")
 		return
@@ -100,7 +99,12 @@ func (k *keychain) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	wg.Go(func() { secrets.informer.RunWithContext(ctx) })
-	p.run(ctx, secrets.synced)
+
+	// The secrets listed first are reported in one call, as they may have
+	// changed while nothing watched them.
+	if cache.WaitForCacheSync(ctx.Done(), secrets.synced) {
+		onChange()
+	}
 }
 
 // connect returns the API client once the kubeconfig loads. The installer
@@ -145,7 +149,7 @@ func (k *keychain) newKubeClient() (kubernetes.Interface, error) {
 // Resolve returns the base64 username:password credential for ref, "" for
 // anonymous access.
 func (k *keychain) Resolve(ctx context.Context, ref *registry.Reference) (string, error) {
-	target := canonicalHost(ref.Host) + "/" + ref.Repository
+	target := newRegistryKey(ref.Host, "/"+ref.Repository)
 	var creds []credential
 	if secrets := k.secrets.Load(); secrets != nil {
 		creds = secrets.lookup(target)
@@ -153,19 +157,10 @@ func (k *keychain) Resolve(ctx context.Context, ref *registry.Reference) (string
 
 	creds = append(creds, k.docker.lookup(ctx, target)...)
 	for i, cred := range creds {
-		auth := cred.basic()
-		if auth == "" {
-			continue
+		if auth := cred.basic(); auth != "" {
+			k.logShadowed(ctx, cred, creds[i+1:])
+			return auth, nil
 		}
-
-		// Warn about other credentials of the same key this one shadows.
-		for _, other := range creds[i+1:] {
-			if other.key == cred.key && other.source != cred.source && other.basic() != "" && other.basic() != auth {
-				log.G(ctx).WithFields(log.Fields{"registry": cred.key, "source": cred.source, "shadowed": other.source}).Warn("credential shadows another")
-			}
-		}
-
-		return auth, nil
 	}
 
 	if len(creds) > 0 {
@@ -175,7 +170,23 @@ func (k *keychain) Resolve(ctx context.Context, ref *registry.Reference) (string
 	return "", nil
 }
 
-// Synced reports whether every source finished its initial sync.
+// logShadowed tells, at debug level, which credentials of the same key the
+// one in use shadows: namespaces each holding their own secret of a registry
+// shadow one another on every lookup.
+func (k *keychain) logShadowed(ctx context.Context, used credential, rest []credential) {
+	auth := used.basic()
+	for _, other := range rest {
+		if other.key != used.key || other.source == used.source {
+			continue
+		}
+
+		if shadowed := other.basic(); shadowed != "" && shadowed != auth {
+			log.G(ctx).WithFields(log.Fields{"registry": used.key, "source": used.source, "shadowed": other.source}).Debug("credential shadows another")
+		}
+	}
+}
+
+// Synced reports whether every provider finished its initial sync.
 func (k *keychain) Synced() bool {
 	if !k.cfg.Enable {
 		return true

@@ -1,6 +1,6 @@
 //! The HTTP server behind `--apiserver`: an image's metrics and ondemand record
-//! over a Unix socket, the registry backend's credentials, plus optional Unix
-//! control-protocol upgrades.
+//! over a Unix socket, the daemon's description, the registry backend's
+//! credentials, plus optional Unix control-protocol upgrades.
 
 use std::io;
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
@@ -19,9 +19,11 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use nydus_backend::Backend;
+use nydus_config::GIT_COMMIT_SHORT_HASH;
 use nydus_core::{Metrics, OndemandRecorder};
 use prometheus::{Encoder, TextEncoder};
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
 use tokio::sync::{watch, Semaphore};
@@ -40,18 +42,111 @@ pub struct ControlProtocol {
 /// The bound for reading request headers and completing an upgrade.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The route that replaces the registry backend's basic credentials.
-const BACKEND_AUTH_PATH: &str = "/api/v1/backend/auth";
+/// The route that describes the daemon: its build, its process and the
+/// optional calls it serves.
+const DAEMON_PATH: &str = "/api/v1/daemon";
 
-/// The largest body [`BACKEND_AUTH_PATH`] reads.
-const BACKEND_AUTH_BODY_LIMIT: usize = 64 * 1024;
+/// The route that replaces the basic credentials of the registry backend.
+const BACKEND_AUTH_BASIC_PATH: &str = "/api/v1/backend/auth/basic";
 
-/// The body of `PUT` [`BACKEND_AUTH_PATH`].
+/// The route that replaces the bearer token of the registry backend.
+const BACKEND_AUTH_BEARER_PATH: &str = "/api/v1/backend/auth/bearer";
+
+/// The largest body a route replacing a credential reads.
+const CREDENTIAL_BODY_LIMIT: usize = 64 * 1024;
+
+/// A credential of the registry backend that the `PUT` of its route replaces.
+///
+/// ```text
+/// PUT /api/v1/backend/auth/basic   {"username", "password"} ─▶ Backend::set_basic_auth
+/// PUT /api/v1/backend/auth/bearer  {"token"}                ─▶ Backend::set_bearer_auth
+/// ```
+trait Credential: DeserializeOwned {
+    /// The message telling the body the route takes.
+    const BODY: &'static str;
+
+    /// The message of a credential that is rejected.
+    const INVALID: &'static str;
+
+    /// Replaces the credential of `backend`.
+    fn set(&self, backend: &dyn Backend) -> io::Result<()>;
+}
+
+/// The body of `PUT` [`BACKEND_AUTH_BASIC_PATH`].
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BackendAuthRequest {
-    /// The registry credentials, `base64(user:pass)`.
-    auth: String,
+struct BackendAuthBasicRequest {
+    /// The user name.
+    username: String,
+
+    /// The password.
+    password: String,
+}
+
+/// Implements the credential [`BACKEND_AUTH_BASIC_PATH`] replaces.
+impl Credential for BackendAuthBasicRequest {
+    const BODY: &'static str =
+        r#"body must be {"username": "<username>", "password": "<password>"}"#;
+
+    const INVALID: &'static str = "username holds a colon";
+
+    fn set(&self, backend: &dyn Backend) -> io::Result<()> {
+        backend.set_basic_auth(&self.username, &self.password)
+    }
+}
+
+/// The body of `PUT` [`BACKEND_AUTH_BEARER_PATH`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackendAuthBearerRequest {
+    /// The bearer token.
+    token: String,
+}
+
+/// Implements the credential [`BACKEND_AUTH_BEARER_PATH`] replaces.
+impl Credential for BackendAuthBearerRequest {
+    const BODY: &'static str = r#"body must be {"token": "<bearer token>"}"#;
+
+    const INVALID: &'static str = "token is not a bearer token";
+
+    fn set(&self, backend: &dyn Backend) -> io::Result<()> {
+        backend.set_bearer_auth(&self.token)
+    }
+}
+
+/// An optional call of the API, listed by [`DAEMON_PATH`] when this daemon
+/// serves it.
+///
+/// A client gates the call on its capability, not on the daemon's version,
+/// and ignores the capabilities it does not know, the way a CSI driver's
+/// capabilities and a containerd plugin's are read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Capability {
+    /// [`BACKEND_AUTH_BASIC_PATH`] replaces the registry backend's basic
+    /// credentials.
+    BackendAuthBasic,
+
+    /// [`BACKEND_AUTH_BEARER_PATH`] replaces the registry backend's bearer
+    /// token.
+    BackendAuthBearer,
+}
+
+/// The body `GET` [`DAEMON_PATH`] answers with. Fields are only ever added,
+/// so a client ignores the ones it does not know.
+#[derive(Debug, Serialize)]
+struct DaemonInfo {
+    /// The version of the build.
+    version: &'static str,
+
+    /// The git commit of the build.
+    git_commit: &'static str,
+
+    /// The process ID of the daemon.
+    pid: u32,
+
+    /// The optional calls this daemon serves.
+    capabilities: Vec<Capability>,
 }
 
 /// Serves one upgraded control connection with its read-ahead bytes and
@@ -77,7 +172,8 @@ struct ApiState {
     /// The ondemand record `GET /trace` encodes.
     ondemand: Arc<OndemandRecorder>,
 
-    /// The backend [`BACKEND_AUTH_PATH`] replaces the credentials of.
+    /// The backend [`BACKEND_AUTH_BASIC_PATH`] and
+    /// [`BACKEND_AUTH_BEARER_PATH`] replace the credentials of.
     backend: Option<Arc<dyn Backend>>,
 
     /// The permit one control connection holds at a time.
@@ -96,7 +192,8 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Starts an endpoint without control upgrades, `backend` answering
-    /// [`BACKEND_AUTH_PATH`] when given. FUSE uses its ownership-aware
+    /// [`BACKEND_AUTH_BASIC_PATH`] and [`BACKEND_AUTH_BEARER_PATH`] when given.
+    /// FUSE uses its ownership-aware
     /// listener instead of this pathname takeover policy.
     pub fn start(
         address: &str,
@@ -368,7 +465,18 @@ async fn handle_request(
             .insert(UPGRADE, HeaderValue::from_static(protocol.token));
         return Ok(reply);
     }
-    if req.uri().path() == BACKEND_AUTH_PATH {
+    if req.uri().path() == DAEMON_PATH {
+        if req.method() != Method::GET {
+            let mut reply = json_error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
+            reply
+                .headers_mut()
+                .insert(ALLOW, HeaderValue::from_static("GET"));
+            return Ok(reply);
+        }
+        return Ok(get_daemon(backend.as_deref()));
+    }
+    let basic = req.uri().path() == BACKEND_AUTH_BASIC_PATH;
+    if basic || req.uri().path() == BACKEND_AUTH_BEARER_PATH {
         if req.method() != Method::PUT {
             let mut reply = json_error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
             reply
@@ -376,7 +484,12 @@ async fn handle_request(
                 .insert(ALLOW, HeaderValue::from_static("PUT"));
             return Ok(reply);
         }
-        return Ok(put_backend_auth(req.into_body(), backend, authorized).await);
+        let body = req.into_body();
+        return Ok(if basic {
+            put_backend_credential::<BackendAuthBasicRequest, _>(body, backend, authorized).await
+        } else {
+            put_backend_credential::<BackendAuthBearerRequest, _>(body, backend, authorized).await
+        });
     }
     let (body, content_type) = match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") => {
@@ -396,18 +509,56 @@ async fn handle_request(
     Ok(reply)
 }
 
-/// Answers `PUT` [`BACKEND_AUTH_PATH`]: replaces the basic credentials of the
-/// registry `backend` with the `auth` of a JSON `body` of at most
-/// [`BACKEND_AUTH_BODY_LIMIT`] bytes, read within [`HTTP_TIMEOUT`].
+/// Answers `GET` [`DAEMON_PATH`]: the build and the process of this daemon and
+/// its capabilities, the calls that replace a credential when it has a
+/// backend.
+fn get_daemon(backend: Option<&dyn Backend>) -> Response<Full<Bytes>> {
+    let info = DaemonInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        git_commit: GIT_COMMIT_SHORT_HASH,
+        pid: std::process::id(),
+        capabilities: backend
+            .map(|_| vec![Capability::BackendAuthBasic, Capability::BackendAuthBearer])
+            .unwrap_or_default(),
+    };
+    match serde_json::to_vec(&info) {
+        Ok(body) => {
+            let mut reply = response(StatusCode::OK, body);
+            reply
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            reply
+        }
+        Err(err) => {
+            error!("failed to encode the daemon info: {err}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to encode the daemon info",
+            )
+        }
+    }
+}
+
+/// Answers the `PUT` that replaces the credential `C` of `backend` with the
+/// one a JSON `body` carries. Error messages are fixed, so none echoes the
+/// credential.
 ///
-/// Only a peer with the daemon's UID is `authorized`. Error messages are
-/// fixed, so they never echo the credentials whatever the backend reports.
-async fn put_backend_auth<B>(
+/// ```text
+/// peer of another UID ───────────────────▶ 403
+/// body over CREDENTIAL_BODY_LIMIT ───────▶ 413
+/// body later than HTTP_TIMEOUT ──────────▶ 408
+/// body that is not `C` ──────────────────▶ 400
+/// no backend, or one without credentials ▶ 404
+/// credential the backend rejects ────────▶ 400
+/// credential replaced ───────────────────▶ 204
+/// ```
+async fn put_backend_credential<C, B>(
     body: B,
     backend: Option<Arc<dyn Backend>>,
     authorized: bool,
 ) -> Response<Full<Bytes>>
 where
+    C: Credential,
     B: Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
@@ -415,7 +566,7 @@ where
         return json_error(StatusCode::FORBIDDEN, "peer uid mismatch");
     }
 
-    let body = Limited::new(body, BACKEND_AUTH_BODY_LIMIT).collect();
+    let body = Limited::new(body, CREDENTIAL_BODY_LIMIT).collect();
     let body = match tokio::time::timeout(HTTP_TIMEOUT, body).await {
         Ok(Ok(body)) => body.to_bytes(),
         Ok(Err(err)) if err.is::<LengthLimitError>() => {
@@ -429,26 +580,21 @@ where
         }
         Err(_) => return json_error(StatusCode::REQUEST_TIMEOUT, "body read timed out"),
     };
-    let Ok(request) = serde_json::from_slice::<BackendAuthRequest>(&body) else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            r#"body must be {"auth": "<base64 user:pass>"}"#,
-        );
+    let Ok(credential) = serde_json::from_slice::<C>(&body) else {
+        return json_error(StatusCode::BAD_REQUEST, C::BODY);
     };
 
     let Some(backend) = backend else {
         return json_error(StatusCode::NOT_FOUND, "no registry backend");
     };
-    match backend.set_auth(&request.auth) {
+    match credential.set(backend.as_ref()) {
         Ok(()) => {
             info!("replaced the registry backend credentials");
             response(StatusCode::NO_CONTENT, Bytes::new())
         }
         Err(err) => match err.kind() {
             io::ErrorKind::Unsupported => json_error(StatusCode::NOT_FOUND, "no registry backend"),
-            io::ErrorKind::InvalidInput => {
-                json_error(StatusCode::BAD_REQUEST, "auth is not base64 of user:pass")
-            }
+            io::ErrorKind::InvalidInput => json_error(StatusCode::BAD_REQUEST, C::INVALID),
             kind => {
                 error!("failed to replace the registry backend credentials: {kind}");
                 json_error(
@@ -565,11 +711,11 @@ mod tests {
     }
 
     fn registry() -> Arc<dyn Backend> {
-        let config = serde_json::from_str(
-            r#"{"type":"registry","config":{"addr":"http://127.0.0.1:5000","repository":"a/b"}}"#,
+        let config: nydus_config::Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: a/b\n",
         )
         .unwrap();
-        <dyn Backend>::new(&config, &Default::default(), None, Arc::new(Metrics::new())).unwrap()
+        <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap()
     }
 
     struct Refusing(io::ErrorKind, Arc<Metrics>);
@@ -579,62 +725,117 @@ mod tests {
             &self.1
         }
 
-        fn read_blob_metadata(
+        fn get_blob_metadata(
             &self,
             _blob_id: &[u8; 32],
         ) -> io::Result<nydus_format::blob::BlobMetadata> {
             Err(io::ErrorKind::Unsupported.into())
         }
 
-        fn read_range_into(
+        fn get(
             &self,
             _blob_id: &[u8; 32],
             _offset: u64,
-            _buf: &mut [u8],
-        ) -> io::Result<()> {
+            _len: usize,
+        ) -> io::Result<Box<dyn io::BufRead + Send>> {
             Err(io::ErrorKind::Unsupported.into())
         }
 
-        fn set_auth(&self, auth: &str) -> io::Result<()> {
-            Err(io::Error::new(self.0, auth.to_string()))
+        fn set_basic_auth(&self, _username: &str, password: &str) -> io::Result<()> {
+            Err(io::Error::new(self.0, password.to_string()))
+        }
+
+        fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+            Err(io::Error::new(self.0, token.to_string()))
         }
     }
 
-    #[test]
-    fn put_backend_auth_answers_by_peer_body_and_backend() {
+    type PutCase = (bool, Option<Arc<dyn Backend>>, String, StatusCode);
+
+    fn assert_put<C: Credential>(test_cases: Vec<PutCase>) {
         let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        for (authorized, backend, body, status) in test_cases {
+            let reply = runtime.block_on(put_backend_credential::<C, _>(
+                Full::new(Bytes::from(body.clone())),
+                backend,
+                authorized,
+            ));
+            assert_eq!(reply.status(), status, "{body:.64}");
+            let reply = runtime
+                .block_on(reply.into_body().collect())
+                .unwrap()
+                .to_bytes();
+            let reply = String::from_utf8_lossy(&reply);
+            assert!(
+                ["Ym9i", "hunter2", "s3cr3t"]
+                    .iter()
+                    .all(|secret| !reply.contains(secret)),
+                "{body:.64}"
+            );
+            if status != StatusCode::NO_CONTENT {
+                let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+                assert!(reply["message"].is_string(), "{body:.64}");
+            }
+        }
+    }
+
+    fn refusing(kind: io::ErrorKind) -> Arc<dyn Backend> {
+        Arc::new(Refusing(kind, Arc::new(Metrics::new())))
+    }
+
+    fn local(dir: &Path) -> Arc<dyn Backend> {
+        Arc::new(nydus_backend::Local::new(
+            dir.to_path_buf(),
+            Arc::new(Metrics::new()),
+        ))
+    }
+
+    #[test]
+    fn put_backend_auth_basic_answers_by_peer_body_and_backend() {
         let dir = tempfile::tempdir().unwrap();
         let registry = registry();
-        let local: Arc<dyn Backend> = Arc::new(nydus_backend::Local::new(
-            dir.path().to_path_buf(),
-            Arc::new(Metrics::new()),
-        ));
-        let refusing =
-            |kind| -> Arc<dyn Backend> { Arc::new(Refusing(kind, Arc::new(Metrics::new()))) };
-        let auth = r#"{"auth":"Ym9iOmh1bnRlcjI="}"#.to_string();
-        let test_cases = vec![
+        let basic = r#"{"username":"bob","password":"hunter2"}"#.to_string();
+        assert_put::<BackendAuthBasicRequest>(vec![
             (
                 true,
                 Some(registry.clone()),
-                auth.clone(),
+                basic.clone(),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                r#"{"username":"bob","password":""}"#.to_string(),
                 StatusCode::NO_CONTENT,
             ),
             (
                 false,
                 Some(registry.clone()),
-                auth.clone(),
+                basic.clone(),
                 StatusCode::FORBIDDEN,
             ),
             (
                 true,
                 Some(registry.clone()),
-                r#"{"auth":"Ym9i"}"#.to_string(),
+                r#"{"username":"bo:b","password":"hunter2"}"#.to_string(),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 true,
                 Some(registry.clone()),
-                r#"{"auth":"Ym9iOmh1bnRlcjI=","user":"bob"}"#.to_string(),
+                r#"{"username":"bob"}"#.to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                r#"{"username":"bob","password":"hunter2","token":"s3cr3t"}"#.to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                r#"{"auth":"Ym9iOmh1bnRlcjI="}"#.to_string(),
                 StatusCode::BAD_REQUEST,
             ),
             (
@@ -646,49 +847,181 @@ mod tests {
             (
                 true,
                 Some(registry.clone()),
-                format!(r#"{{"auth":"{}"}}"#, "A".repeat(BACKEND_AUTH_BODY_LIMIT)),
+                format!(
+                    r#"{{"username":"bob","password":"{}"}}"#,
+                    "A".repeat(CREDENTIAL_BODY_LIMIT)
+                ),
                 StatusCode::PAYLOAD_TOO_LARGE,
             ),
             (
                 true,
                 Some(refusing(io::ErrorKind::InvalidInput)),
-                auth.clone(),
+                basic.clone(),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 true,
                 Some(refusing(io::ErrorKind::Other)),
-                auth.clone(),
+                basic.clone(),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
-            (true, Some(local), auth.clone(), StatusCode::NOT_FOUND),
-            (true, None, auth, StatusCode::NOT_FOUND),
+            (
+                true,
+                Some(local(dir.path())),
+                basic.clone(),
+                StatusCode::NOT_FOUND,
+            ),
+            (true, None, basic, StatusCode::NOT_FOUND),
+        ]);
+    }
+
+    #[test]
+    fn put_backend_auth_bearer_answers_by_peer_body_and_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry();
+        let bearer = r#"{"token":"s3cr3t"}"#.to_string();
+        assert_put::<BackendAuthBearerRequest>(vec![
+            (
+                true,
+                Some(registry.clone()),
+                bearer.clone(),
+                StatusCode::NO_CONTENT,
+            ),
+            (
+                false,
+                Some(registry.clone()),
+                bearer.clone(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                r#"{"token":""}"#.to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                r#"{"token":"s3cr3t","username":"bob"}"#.to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                r#"{"registry_token":"s3cr3t"}"#.to_string(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some(registry.clone()),
+                format!(r#"{{"token":"{}"}}"#, "A".repeat(CREDENTIAL_BODY_LIMIT)),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                true,
+                Some(refusing(io::ErrorKind::InvalidInput)),
+                bearer.clone(),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                true,
+                Some(refusing(io::ErrorKind::Other)),
+                bearer.clone(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                true,
+                Some(local(dir.path())),
+                bearer.clone(),
+                StatusCode::NOT_FOUND,
+            ),
+            (true, None, bearer, StatusCode::NOT_FOUND),
+        ]);
+    }
+
+    #[test]
+    fn serves_the_daemon_info_with_the_capabilities_of_its_backend() {
+        let test_cases: Vec<(Option<Arc<dyn Backend>>, &str)> = vec![
+            (None, r#""capabilities":[]"#),
+            (
+                Some(registry()),
+                r#""capabilities":["backend_auth_basic","backend_auth_bearer"]"#,
+            ),
         ];
 
-        for (authorized, backend, body, status) in test_cases {
-            let reply = runtime.block_on(put_backend_auth(
-                Full::new(Bytes::from(body.clone())),
+        for (backend, capabilities) in test_cases {
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("api.sock");
+            let server = ApiServer::start(
+                &format!("unix://{}", socket_path.display()),
+                Arc::new(Metrics::new()),
+                Arc::new(OndemandRecorder::default()),
                 backend,
-                authorized,
-            ));
-            assert_eq!(reply.status(), status, "{body:.64}");
-            let reply = runtime
-                .block_on(reply.into_body().collect())
-                .unwrap()
-                .to_bytes();
+            )
+            .unwrap();
+            let response = get(&socket_path, DAEMON_PATH);
+            assert!(response.contains(" 200 "), "{response}");
             assert!(
-                !String::from_utf8_lossy(&reply).contains("Ym9i"),
-                "{body:.64}"
+                response
+                    .to_ascii_lowercase()
+                    .contains("\r\ncontent-type: application/json\r\n"),
+                "{response}"
             );
-            if status != StatusCode::NO_CONTENT {
-                let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
-                assert!(reply["message"].is_string(), "{body:.64}");
-            }
+            assert!(
+                response.contains(&format!(
+                    r#"{{"version":"{}","git_commit":"{}","pid":{},"#,
+                    env!("CARGO_PKG_VERSION"),
+                    GIT_COMMIT_SHORT_HASH,
+                    std::process::id()
+                )),
+                "{response}"
+            );
+            assert!(response.contains(capabilities), "{response}");
+            server.stop();
         }
     }
 
     #[test]
-    fn serves_backend_auth_on_put_only() {
+    fn serves_the_daemon_info_on_get_only() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("api.sock");
+        let server = ApiServer::start(
+            &format!("unix://{}", socket_path.display()),
+            Arc::new(Metrics::new()),
+            Arc::new(OndemandRecorder::default()),
+            None,
+        )
+        .unwrap();
+        let test_cases = vec![
+            ("GET", " 200 "),
+            ("PUT", " 405 "),
+            ("POST", " 405 "),
+            ("DELETE", " 405 "),
+        ];
+
+        for (method, status) in test_cases {
+            let mut stream = StdUnixStream::connect(&socket_path).unwrap();
+            write!(
+                stream,
+                "{method} {DAEMON_PATH} HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            assert!(response.contains(status), "{method}: {response}");
+            assert_eq!(
+                response.to_ascii_lowercase().contains("\r\nallow: get\r\n"),
+                status == " 405 ",
+                "{method}: {response}"
+            );
+        }
+
+        server.stop();
+    }
+
+    #[test]
+    fn serves_the_backend_credentials_on_put_only() {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("api.sock");
@@ -699,35 +1032,43 @@ mod tests {
             Some(registry()),
         )
         .unwrap();
+        let basic = (
+            BACKEND_AUTH_BASIC_PATH,
+            r#"{"username":"bob","password":"hunter2"}"#,
+        );
+        let bearer = (BACKEND_AUTH_BEARER_PATH, r#"{"token":"xyz"}"#);
         let test_cases = vec![
-            ("PUT", " 204 "),
-            ("GET", " 405 "),
-            ("POST", " 405 "),
-            ("DELETE", " 405 "),
+            (basic, "PUT", " 204 "),
+            (basic, "GET", " 405 "),
+            (basic, "POST", " 405 "),
+            (basic, "DELETE", " 405 "),
+            (bearer, "PUT", " 204 "),
+            (bearer, "GET", " 405 "),
+            (bearer, "POST", " 405 "),
+            (bearer, "DELETE", " 405 "),
         ];
 
-        for (method, status) in test_cases {
-            let body = r#"{"auth":"Ym9iOmh1bnRlcjI="}"#;
+        for ((path, body), method, status) in test_cases {
             let mut stream = StdUnixStream::connect(&socket_path).unwrap();
             write!(
                 stream,
-                "{method} {BACKEND_AUTH_PATH} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "{method} {path} HTTP/1.0\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )
             .unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).unwrap();
-            assert!(response.contains(status), "{method}: {response}");
+            assert!(response.contains(status), "{method} {path}: {response}");
             let allowed = status == " 405 ";
             assert_eq!(
                 response.to_ascii_lowercase().contains("\r\nallow: put\r\n"),
                 allowed,
-                "{method}: {response}"
+                "{method} {path}: {response}"
             );
             assert_eq!(
                 response.contains(r#"{"message":"method not allowed"}"#),
                 allowed,
-                "{method}: {response}"
+                "{method} {path}: {response}"
             );
         }
 

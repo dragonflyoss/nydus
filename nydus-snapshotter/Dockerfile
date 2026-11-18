@@ -6,6 +6,9 @@
 #   docker buildx build -f nydus-snapshotter/Dockerfile \
 #     --platform linux/amd64,linux/arm64 -t <image> .
 #
+# `make -C nydus-snapshotter image` adds the build args naming the version and
+# the commit, which the binaries report as unknown without them.
+#
 # The release workflow (.github/workflows/release.yml) builds both binaries
 # once for its tarball and replaces the binaries stage with them, so the image
 # holds exactly the released binaries:
@@ -48,6 +51,10 @@ ENV RUSTFLAGS="-C target-feature=+crt-static" \
 # to https://docs.docker.com/build/cache/optimize/#use-cache-mounts. The target
 # dir also holds the host's build scripts, so each platform gets its own.
 ARG TARGETARCH
+# The build context leaves .git out, so the commit nydus reports comes from
+# these, which nydus-config/build.rs reads from the environment.
+ARG GIT_COMMIT_SHORT_HASH
+ARG GIT_COMMIT_DATE
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/src/target,id=nydus-target-${TARGETARCH} \

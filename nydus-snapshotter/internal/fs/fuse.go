@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/moby/sys/mountinfo"
@@ -24,7 +25,7 @@ type fuseDriver struct{}
 
 // Name returns the driver name recorded in instances.
 func (*fuseDriver) Name() string {
-	return config.DriverFuse
+	return config.DriverFUSE
 }
 
 // Args returns the daemon's arguments after the nydus binary.
@@ -33,10 +34,12 @@ func (*fuseDriver) Args(d *Daemon) []string {
 	return []string{
 		"fuse",
 		"--bootstrap", instance.Bootstrap,
-		"--config", d.Config,
+		"--config", d.ConfigPath,
 		"--mountpoint", instance.Mountpoint,
 		"--apiserver", "unix://" + instance.APISocket,
 		"--log-dir", d.LogDir,
+		"--log-level", d.LogLevel,
+		"--log-max-files", strconv.Itoa(d.LogMaxFiles),
 		"--fsname", "nydus-" + d.id.Short(),
 	}
 }

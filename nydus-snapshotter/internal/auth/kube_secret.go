@@ -7,7 +7,6 @@
 package auth
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -25,18 +24,23 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// kubeSecret is the credential source of kubernetes.io/dockerconfigjson
-// secrets in every namespace.
-type kubeSecret struct {
+// dataOwnerFields replaces the field set of a cached managedFields entry that
+// owns the secret's data: small, shared by every cached secret, and still a
+// data owner when transform sees the secret again.
+var dataOwnerFields = &metav1.FieldsV1{Raw: []byte(`{"f:data":{}}`)}
+
+// kubeSecretProvider provides the credentials of the
+// kubernetes.io/dockerconfigjson secrets of every namespace.
+type kubeSecretProvider struct {
 	// informer watches the secrets.
 	informer cache.SharedIndexInformer
 
 	// synced reports whether the handler received the initial list.
 	synced cache.InformerSynced
 
-	// onChange receives the registry keys of a changed secret, once lookups
-	// see the change.
-	onChange func(keys []string)
+	// onChange is called for a secret that changed after the initial list,
+	// once lookups see the change.
+	onChange func()
 
 	// mu guards secrets and keyring.
 	mu sync.Mutex
@@ -60,11 +64,11 @@ type secret struct {
 	auths map[string]authConfig
 }
 
-// New secret source, whose informer starts with informer.RunWithContext. The
-// label selector is validated by config. onChange is called from the
-// informer's handler goroutine.
-func newKubeSecret(client kubernetes.Interface, labelSelector string, onChange func(keys []string)) (*kubeSecret, error) {
-	k := &kubeSecret{
+// newKubeSecretProvider returns a provider whose informer starts with
+// informer.RunWithContext. The label selector is validated by config.
+// onChange is called from the informer's handler goroutine.
+func newKubeSecretProvider(client kubernetes.Interface, labelSelector string, onChange func()) (*kubeSecretProvider, error) {
+	k := &kubeSecretProvider{
 		onChange: onChange,
 		secrets:  make(map[string]*secret),
 	}
@@ -79,7 +83,7 @@ func newKubeSecret(client kubernetes.Interface, labelSelector string, onChange f
 	k.informer = factory.Core().V1().Secrets().Informer()
 
 	registration, err := k.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    k.store,
+		AddFunc:    k.add,
 		UpdateFunc: k.update,
 		DeleteFunc: k.delete,
 	})
@@ -91,35 +95,61 @@ func newKubeSecret(client kubernetes.Interface, labelSelector string, onChange f
 	return k, nil
 }
 
-// transform drops what a lookup never reads from a cached secret: data keys
-// other than .dockerconfigjson, managedFields entries that own no data, so a
-// label edit never makes a secret newest, the field sets of the rest, whose
-// times tell when the data changed, and annotations, which may hold a
-// last-applied copy of the data.
-func (k *kubeSecret) transform(obj any) (any, error) {
-	if s, ok := obj.(*corev1.Secret); ok {
-		if data, ok := s.Data[corev1.DockerConfigJsonKey]; ok {
-			s.Data = map[string][]byte{corev1.DockerConfigJsonKey: data}
-		} else {
-			s.Data = nil
-		}
-
-		s.ManagedFields = slices.DeleteFunc(s.ManagedFields, func(f metav1.ManagedFieldsEntry) bool {
-			return f.FieldsV1 == nil || (!bytes.Contains(f.FieldsV1.Raw, []byte(`"f:data"`)) && !bytes.Contains(f.FieldsV1.Raw, []byte(`"f:stringData"`)))
-		})
-
-		for i := range s.ManagedFields {
-			s.ManagedFields[i].FieldsV1 = nil
-		}
-
-		s.Annotations = nil
+// ownsData reports whether a managedFields entry owns the secret's data: its
+// field set has data or stringData at the top level, not a label or an
+// annotation of that name.
+func (k *kubeSecretProvider) ownsData(entry metav1.ManagedFieldsEntry) bool {
+	if entry.FieldsV1 == nil {
+		return false
 	}
 
-	return obj, nil
+	var owned map[string]json.RawMessage
+	if err := json.Unmarshal(entry.FieldsV1.Raw, &owned); err != nil {
+		return false
+	}
+
+	_, data := owned["f:data"]
+	_, stringData := owned["f:stringData"]
+	return data || stringData
 }
 
-// update stores an updated secret, skipping relists of an unchanged one.
-func (k *kubeSecret) update(oldObj, newObj any) {
+// transform drops what a lookup never reads from a secret before it is
+// cached:
+//   - data keys other than .dockerconfigjson;
+//   - managedFields entries that own no data, so a label edit never makes a
+//     secret the newest;
+//   - the field sets of the remaining entries, whose times alone tell when the
+//     data changed;
+//   - annotations, which may hold a last-applied copy of the data.
+//
+// It is idempotent, as client-go asks of a transform, refer to
+// https://github.com/kubernetes/client-go/blob/master/tools/cache/delta_fifo.go.
+func (k *kubeSecretProvider) transform(obj any) (any, error) {
+	s, ok := obj.(*corev1.Secret)
+	if !ok {
+		return obj, nil
+	}
+
+	if data, ok := s.Data[corev1.DockerConfigJsonKey]; ok {
+		s.Data = map[string][]byte{corev1.DockerConfigJsonKey: data}
+	} else {
+		s.Data = nil
+	}
+
+	s.ManagedFields = slices.DeleteFunc(s.ManagedFields, func(f metav1.ManagedFieldsEntry) bool {
+		return !k.ownsData(f)
+	})
+
+	for i := range s.ManagedFields {
+		s.ManagedFields[i].FieldsV1 = dataOwnerFields
+	}
+
+	s.Annotations = nil
+	return s, nil
+}
+
+// update adds an updated secret, skipping relists of an unchanged one.
+func (k *kubeSecretProvider) update(oldObj, newObj any) {
 	oldSecret, ok := oldObj.(*corev1.Secret)
 	if !ok {
 		return
@@ -130,11 +160,11 @@ func (k *kubeSecret) update(oldObj, newObj any) {
 		return
 	}
 
-	k.store(newObj)
+	k.add(newObj)
 }
 
 // delete forgets a deleted secret.
-func (k *kubeSecret) delete(obj any) {
+func (k *kubeSecretProvider) delete(obj any) {
 	name, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
 		log.L.WithError(err).Warn("skip deleted secret without a name")
@@ -144,8 +174,8 @@ func (k *kubeSecret) delete(obj any) {
 	k.set(name, nil)
 }
 
-// store parses a secret and stores it, or forgets it when malformed.
-func (k *kubeSecret) store(obj any) {
+// add parses a secret and keeps it, or forgets it when malformed.
+func (k *kubeSecretProvider) add(obj any) {
 	s, ok := obj.(*corev1.Secret)
 	if !ok {
 		return
@@ -175,7 +205,7 @@ func (k *kubeSecret) store(obj any) {
 // updatedAt returns when a secret last changed: the newest time of its
 // managedFields, which unlike event order survives a restart, or its creation
 // when no manager tracks it.
-func (k *kubeSecret) updatedAt(s *corev1.Secret) time.Time {
+func (k *kubeSecretProvider) updatedAt(s *corev1.Secret) time.Time {
 	updatedAt := s.CreationTimestamp.Time
 	for _, f := range s.ManagedFields {
 		if f.Time != nil && f.Time.After(updatedAt) {
@@ -186,11 +216,11 @@ func (k *kubeSecret) updatedAt(s *corev1.Secret) time.Time {
 	return updatedAt
 }
 
-// set replaces the secret of a namespace/name, nil to forget it, and passes
-// the registry keys it had and has to onChange.
-func (k *kubeSecret) set(name string, s *secret) {
+// set replaces the secret of a namespace/name, nil to forget it, and calls
+// onChange. The secrets of the initial list are reported together once it is
+// complete, by whoever waits for synced.
+func (k *kubeSecretProvider) set(name string, s *secret) {
 	k.mu.Lock()
-	old := k.secrets[name]
 	if s == nil {
 		delete(k.secrets, name)
 	} else {
@@ -200,27 +230,14 @@ func (k *kubeSecret) set(name string, s *secret) {
 	k.keyring = nil
 	k.mu.Unlock()
 
-	var keys []string
-	for _, changed := range []*secret{old, s} {
-		if changed == nil {
-			continue
-		}
-
-		for addr := range changed.auths {
-			if key, err := registryKey(addr); err == nil {
-				keys = append(keys, key)
-			}
-		}
-	}
-
-	if len(keys) > 0 {
-		k.onChange(keys)
+	if k.synced() {
+		k.onChange()
 	}
 }
 
 // lookup returns the credentials matching target. Among equal keys, the
 // secret updated last comes first, ties in namespace/name order.
-func (k *kubeSecret) lookup(target string) []credential {
+func (k *kubeSecretProvider) lookup(target registryKey) []credential {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 

@@ -1,0 +1,195 @@
+/*
+ * Copyright (c) 2026. Nydus Developers. All rights reserved.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"io/fs"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/version"
+)
+
+func TestNewRootCmd(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		expect func(t *testing.T, out string, err error)
+	}{
+		{
+			name: "print the version",
+			args: []string{"--version"},
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Contains(out, version.String())
+			},
+		},
+		{
+			name: "describe the install command",
+			args: []string{"install", "--help"},
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Contains(out, "--payload-dir")
+			},
+		},
+		{
+			name: "refuse an argument",
+			args: []string{"serve"},
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "unknown command")
+			},
+		},
+		{
+			name: "refuse an unknown flag",
+			args: []string{"--root", "/var/lib/other"},
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "unknown flag")
+			},
+		},
+		{
+			name: "config that was asked for and is missing",
+			args: []string{"--config", "testdata/missing.yaml"},
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, fs.ErrNotExist)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &bytes.Buffer{}
+			cmd := newRootCmd()
+			cmd.SetOut(out)
+			cmd.SetErr(out)
+			cmd.SetArgs(tc.args)
+			err := cmd.ExecuteContext(t.Context())
+			tc.expect(t, out.String(), err)
+		})
+	}
+}
+
+func TestRootOptions_run(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, cfg *config.Config)
+		expect  func(t *testing.T, cfg *config.Config, cancel context.CancelFunc, done <-chan error)
+	}{
+		{
+			name:    "serve until the context is done",
+			prepare: func(t *testing.T, cfg *config.Config) {},
+			expect: func(t *testing.T, cfg *config.Config, cancel context.CancelFunc, done <-chan error) {
+				assert := assert.New(t)
+				assert.Eventually(func() bool {
+					conn, err := net.Dial("unix", cfg.Address)
+					if err == nil {
+						conn.Close()
+					}
+
+					return err == nil
+				}, 10*time.Second, 10*time.Millisecond)
+				cancel()
+				assert.NoError(<-done)
+			},
+		},
+		{
+			name: "server that cannot be built",
+			prepare: func(t *testing.T, cfg *config.Config) {
+				assert.NoError(t, os.WriteFile(cfg.Root, nil, 0o644))
+			},
+			expect: func(t *testing.T, cfg *config.Config, cancel context.CancelFunc, done <-chan error) {
+				assert := assert.New(t)
+				assert.ErrorContains(<-done, "create "+cfg.Root)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testutil.NewConfig(t)
+			tc.prepare(t, cfg)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			o := &rootOptions{configPath: filepath.Join(t.TempDir(), "config.yaml")}
+			go func() { done <- o.run(ctx, cfg) }()
+			tc.expect(t, cfg, cancel, done)
+		})
+	}
+}
+
+func TestRootOptions_loadConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     string
+		explicit bool
+		expect   func(t *testing.T, cfg *config.Config, err error)
+	}{
+		{
+			name:     "load the config",
+			data:     "log:\n  level: debug\n",
+			explicit: true,
+			expect: func(t *testing.T, cfg *config.Config, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal("debug", cfg.Log.Level)
+			},
+		},
+		{
+			name: "default path that is missing yields the defaults",
+			expect: func(t *testing.T, cfg *config.Config, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(config.New(), cfg)
+			},
+		},
+		{
+			name:     "path that was asked for and is missing",
+			explicit: true,
+			expect: func(t *testing.T, cfg *config.Config, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, fs.ErrNotExist)
+				assert.Nil(cfg)
+			},
+		},
+		{
+			name: "invalid config at the default path",
+			data: "version: 2\n",
+			expect: func(t *testing.T, cfg *config.Config, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "unsupported config version 2")
+				assert.Nil(cfg)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if tc.data != "" {
+				assert.NoError(t, os.WriteFile(path, []byte(tc.data), 0o644))
+			}
+
+			cfg, err := (&rootOptions{configPath: path}).loadConfig(t.Context(), tc.explicit)
+			tc.expect(t, cfg, err)
+		})
+	}
+}

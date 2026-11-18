@@ -274,8 +274,10 @@ thread waits for the controller result.
 
 Optional facilities add their own independent threads: enabled prefetch uses
 the model above, the metrics API server runs a current-thread Tokio runtime on
-one dedicated OS thread, and non-blocking tracing writers have their own drain
-workers. None of these increases FUSE callback concurrency. On non-Linux
+one dedicated OS thread, the service watchdog keep-alive runs on one
+`nydus_watchdog` thread when a service manager enables it, and non-blocking
+tracing writers have their own drain workers. None of these increases FUSE
+callback concurrency. On non-Linux
 platforms, `fuser` supports only one request thread and rejects a larger
 `n_threads` value.
 
@@ -830,6 +832,14 @@ Current implementation notes:
 	upgrade when an API address is configured, then validates lifetime ownership
 	before considering a fresh mount. An existing mount requires handoff from
 	its serving daemon.
+- When the service manager sets `NOTIFY_SOCKET` (a systemd `Type=notify` unit),
+	the daemon reports `READY=1` once it serves the mount and API publication was
+	attempted, and `STOPPING=1` when teardown begins. With `WatchdogSec=` it also
+	sends `WATCHDOG=1` at half that interval from a dedicated thread. The
+	keep-alive proves that the process exists and is scheduled, not that reads
+	make progress: a blocked worker or an unreachable backend does not stop it.
+	Without `NOTIFY_SOCKET` nothing is sent. See
+	[service notification](upgrade.md#service-notification).
 
 Current CLI help:
 
@@ -1250,11 +1260,17 @@ Fields under `backend.config`:
 	distribution API path, for a registry behind a reverse proxy.
 - `repository` (required): image repository without tag/digest, e.g.
 	`library/ubuntu`.
-- `auth` (optional): base64-encoded `username:password` string for basic auth.
-	Omit for anonymous / token-only registries.
-- `registry_token` (optional): bearer token sent before any challenge, until
-	the registry answers `401`; the auth handshake then fetches a replacement,
-	with `auth` when set.
+- `auth` (optional): base64-encoded `username:password` string, as the `auth`
+	of a docker config.json. It answers a registry challenge: sent as `Basic`
+	to the registry, or to its token service to fetch a bearer token, which
+	the daemon renews on its own. Omit for anonymous / token-only registries.
+	A value that is not base64 of `username:password` is refused at start, as
+	the `PUT` that replaces it refuses one.
+- `registry_token` (optional): bearer token issued for the registry, as the
+	`registrytoken` of a docker config.json, sent as `Bearer` before any
+	challenge. The daemon cannot renew it: once the registry answers `401` it
+	is dropped, and the auth handshake fetches a replacement, with `auth` when
+	set.
 - `http` (optional, defaults apply): the HTTP client settings of the
 	requests to the origin registry — timeouts, retries, and TLS trust. The
 	on-demand reads that fall back to the origin use the timeouts and retries
@@ -1402,6 +1418,7 @@ unlinked when the service exits. Scrape it with, e.g.:
 ```bash
 curl --unix-socket /run/nydus/api.sock http://localhost/metrics
 curl --unix-socket /run/nydus/api.sock http://localhost/trace
+curl --unix-socket /run/nydus/api.sock http://localhost/api/v1/daemon
 ```
 
 `GET /trace` returns JSON like
@@ -1412,11 +1429,44 @@ recorded, hit or miss, so the record names what was read rather than what a
 fetch pulled. The blob index is the device id from the bootstrap device
 table. The record feeds `nydus optimize` / `nydusify optimize`.
 
-`PUT /api/v1/backend/auth` with the JSON body `{"auth": "<base64 user:pass>"}`
-replaces the registry backend's basic credentials, the value the config's
-`auth` carries, and drops cached bearer tokens, so expiring credentials rotate
-without a restart. It answers `204`, or a `{"message": "..."}` body with `400`
-for a malformed body or credential, `403` when the peer's UID differs from the
+`GET /api/v1/daemon` describes the daemon, so a control plane learns what it
+started without parsing `--version` output:
+
+```json
+{"version": "3.0.0", "git_commit": "1a2b3c4d5", "pid": 4242, "capabilities": ["backend_auth_basic", "backend_auth_bearer"]}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `version` | string | Version of the build, as `nydus --version` prints it |
+| `git_commit` | string | Git commit of the build, `unknown` when built outside a checkout |
+| `pid` | integer | Process ID of the daemon |
+| `capabilities` | array of strings | Optional calls this daemon serves |
+
+| Capability | Call it gates |
+| --- | --- |
+| `backend_auth_basic` | `PUT /api/v1/backend/auth/basic`; listed when the daemon has a blob backend, and one without credentials answers `404` |
+| `backend_auth_bearer` | `PUT /api/v1/backend/auth/bearer`; listed and answered as `backend_auth_basic` |
+
+A client gates an optional call on its capability, never on `version`, the way
+a CSI driver's capabilities and a containerd plugin's are read, and ignores the
+fields and capabilities it does not know: within `/api/v1` both are only ever
+added. The path carries the API version, so a daemon that does not serve
+`/api/v1` answers `404`. The route answers `200`, or a `{"message": "..."}`
+body with `405` and `Allow: GET` for any other method.
+
+Each credential of the registry backend has a route of its own under
+`/api/v1/backend/auth`, named after the HTTP authentication scheme the
+credential is sent with, so one rotates without the other and without a
+restart:
+
+| Route | Body | Replaces |
+| --- | --- | --- |
+| `PUT /api/v1/backend/auth/basic` | `{"username": "<username>", "password": "<password>"}` | The basic credentials, which the config's `auth` carries as base64. Bearer tokens fetched with the old ones are dropped; a `registry_token` is kept |
+| `PUT /api/v1/backend/auth/bearer` | `{"token": "<bearer token>"}` | The bearer token, the config's `registry_token`: the requests that follow are sent with it. The basic credentials are kept |
+
+Either answers `204`, or a `{"message": "..."}` body with `400` for a
+malformed body, a `username` holding a colon or an empty `token`, `403` when the peer's UID differs from the
 daemon's, `404` without a registry backend, `405` with `Allow: PUT` for any
 other method, `408` when the body takes over 5 seconds, `413` for a body over
 64 KiB, and `500` when the backend fails otherwise. The credential is never

@@ -21,12 +21,11 @@ import (
 )
 
 const (
-	// schemaVersion is the compatible layout version within the v1 bucket. A
-	// change older binaries cannot read moves to a v2 bucket instead, as
-	// containerd's metadata store does, so a newer version is read as is
-	// after a rollback, refer to
+	// dbVersion counts the compatible additions to the v1 layout. An
+	// incompatible change moves to a v2 bucket, so a rolled-back binary reads
+	// a newer dbVersion as is, as containerd's metadata store does, refer to
 	// https://github.com/containerd/containerd/blob/main/core/metadata/db.go.
-	schemaVersion = 1
+	dbVersion = 1
 
 	// DefaultOpenTimeout bounds waiting for another process's file lock.
 	DefaultOpenTimeout = 10 * time.Second
@@ -42,8 +41,8 @@ var (
 	// bucketKeyBlobs holds blob access times keyed by blob ID.
 	bucketKeyBlobs = []byte("blobs")
 
-	// keyVersion holds the schema version in the root bucket.
-	keyVersion = []byte("version")
+	// bucketKeyDBVersion holds dbVersion in the root bucket.
+	bucketKeyDBVersion = []byte("version")
 )
 
 // Instance is a daemon serving one image, keyed by its bootstrap chain ID.
@@ -74,6 +73,13 @@ type Instance struct {
 
 	// Unit is the daemon's systemd unit.
 	Unit string `json:"unit"`
+
+	// Version is the nydus version of the daemon, empty until the daemon
+	// told it.
+	Version string `json:"version"`
+
+	// Capabilities are the optional API calls the daemon serves.
+	Capabilities []string `json:"capabilities"`
 
 	// CreatedAt is when the instance was created.
 	CreatedAt time.Time `json:"created_at"`
@@ -114,7 +120,7 @@ type store struct {
 	db *bolt.DB
 }
 
-// New store interface. It opens or creates the bbolt file at path, waiting at
+// New returns a store. It opens or creates the bbolt file at path, waiting at
 // most timeout for the file lock another process may hold.
 func New(path string, timeout time.Duration) (Store, error) {
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: timeout})
@@ -129,40 +135,6 @@ func New(path string, timeout time.Duration) (Store, error) {
 	}
 
 	return s, nil
-}
-
-// init creates the buckets and checks the schema version.
-func (s *store) init(tx *bolt.Tx) error {
-	root, err := tx.CreateBucketIfNotExists(bucketKeyV1)
-	if err != nil {
-		return fmt.Errorf("create bucket %s: %w", bucketKeyV1, err)
-	}
-
-	if v := root.Get(keyVersion); v != nil {
-		version, err := strconv.Atoi(string(v))
-		if err != nil {
-			return fmt.Errorf("decode schema version: %w", err)
-		}
-
-		if version < schemaVersion {
-			return fmt.Errorf("unsupported store schema version %d, want at least %d", version, schemaVersion)
-		}
-	} else if err := root.Put(keyVersion, strconv.AppendInt(nil, schemaVersion, 10)); err != nil {
-		return fmt.Errorf("put schema version: %w", err)
-	}
-
-	for _, key := range [][]byte{bucketKeyInstances, bucketKeyBlobs} {
-		if _, err := root.CreateBucketIfNotExists(key); err != nil {
-			return fmt.Errorf("create bucket %s: %w", key, err)
-		}
-	}
-
-	return nil
-}
-
-// bucket returns a bucket under the root bucket.
-func (s *store) bucket(tx *bolt.Tx, key []byte) *bolt.Bucket {
-	return tx.Bucket(bucketKeyV1).Bucket(key)
 }
 
 // PutInstance creates or replaces an instance.
@@ -283,4 +255,38 @@ func (s *store) DeleteBlobs(blobs []string) error {
 // Close closes the store.
 func (s *store) Close() error {
 	return s.db.Close()
+}
+
+// init creates the buckets and checks the version of the database.
+func (s *store) init(tx *bolt.Tx) error {
+	root, err := tx.CreateBucketIfNotExists(bucketKeyV1)
+	if err != nil {
+		return fmt.Errorf("create bucket %s: %w", bucketKeyV1, err)
+	}
+
+	if v := root.Get(bucketKeyDBVersion); v != nil {
+		version, err := strconv.Atoi(string(v))
+		if err != nil {
+			return fmt.Errorf("decode schema version: %w", err)
+		}
+
+		if version < dbVersion {
+			return fmt.Errorf("unsupported store schema version %d, want at least %d", version, dbVersion)
+		}
+	} else if err := root.Put(bucketKeyDBVersion, strconv.AppendInt(nil, dbVersion, 10)); err != nil {
+		return fmt.Errorf("put schema version: %w", err)
+	}
+
+	for _, key := range [][]byte{bucketKeyInstances, bucketKeyBlobs} {
+		if _, err := root.CreateBucketIfNotExists(key); err != nil {
+			return fmt.Errorf("create bucket %s: %w", key, err)
+		}
+	}
+
+	return nil
+}
+
+// bucket returns a bucket under the root bucket.
+func (s *store) bucket(tx *bolt.Tx, key []byte) *bolt.Bucket {
+	return tx.Bucket(bucketKeyV1).Bucket(key)
 }

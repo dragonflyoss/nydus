@@ -8,12 +8,9 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +22,6 @@ import (
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 )
 
 var (
@@ -57,16 +53,16 @@ current-context: test
 
 func TestKeychain_Resolve(t *testing.T) {
 	tests := []struct {
-		name         string
-		secrets      []*corev1.Secret
-		dockerConfig string
-		ref          *registry.Reference
-		expect       func(t *testing.T, auth string, err error)
+		name                 string
+		secrets              []*corev1.Secret
+		dockerConfigProvider string
+		ref                  *registry.Reference
+		expect               func(t *testing.T, auth string, err error)
 	}{
 		{
-			name:         "anonymous without a match",
-			dockerConfig: mockDockerConfig,
-			ref:          mockRegistryReference,
+			name:                 "anonymous without a match",
+			dockerConfigProvider: mockDockerConfig,
+			ref:                  mockRegistryReference,
 			expect: func(t *testing.T, auth string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -74,9 +70,9 @@ func TestKeychain_Resolve(t *testing.T) {
 			},
 		},
 		{
-			name:         "docker config",
-			dockerConfig: mockDockerConfig,
-			ref:          mockDockerHubReference,
+			name:                 "docker config",
+			dockerConfigProvider: mockDockerConfig,
+			ref:                  mockDockerHubReference,
 			expect: func(t *testing.T, auth string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -84,10 +80,10 @@ func TestKeychain_Resolve(t *testing.T) {
 			},
 		},
 		{
-			name:         "kubesecret before docker config",
-			secrets:      []*corev1.Secret{newMockSecret("a", "y", "1", "docker.io", "secret")},
-			dockerConfig: `{"auths":{"docker.io/library":{"username":"file","password":"pass"}}}`,
-			ref:          mockDockerHubReference,
+			name:                 "kube secret before docker config",
+			secrets:              []*corev1.Secret{newMockSecret("a", "y", "1", "docker.io", "secret")},
+			dockerConfigProvider: `{"auths":{"docker.io/library":{"username":"file","password":"pass"}}}`,
+			ref:                  mockDockerHubReference,
 			expect: func(t *testing.T, auth string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -102,8 +98,8 @@ func TestKeychain_Resolve(t *testing.T) {
 					Data: map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"docker.io":{"identitytoken":"token"}}}`)},
 				},
 			},
-			dockerConfig: mockDockerConfig,
-			ref:          mockDockerHubReference,
+			dockerConfigProvider: mockDockerConfig,
+			ref:                  mockDockerHubReference,
 			expect: func(t *testing.T, auth string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -111,9 +107,9 @@ func TestKeychain_Resolve(t *testing.T) {
 			},
 		},
 		{
-			name:         "anonymous for an empty entry of a credential store",
-			dockerConfig: `{"auths":{"https://index.docker.io/v1/":{}},"credsStore":"desktop"}`,
-			ref:          mockDockerHubReference,
+			name:                 "anonymous for an empty entry of a credential store",
+			dockerConfigProvider: `{"auths":{"https://index.docker.io/v1/":{}},"credsStore":"desktop"}`,
+			ref:                  mockDockerHubReference,
 			expect: func(t *testing.T, auth string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -121,9 +117,9 @@ func TestKeychain_Resolve(t *testing.T) {
 			},
 		},
 		{
-			name:         "fail when only tokens match",
-			dockerConfig: `{"auths":{"registry.example.com":{"registrytoken":"token"}}}`,
-			ref:          mockRegistryReference,
+			name:                 "fail when only tokens match",
+			dockerConfigProvider: `{"auths":{"registry.example.com":{"registrytoken":"token"}}}`,
+			ref:                  mockRegistryReference,
 			expect: func(t *testing.T, auth string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "no usable credential for registry.example.com/team/app")
@@ -148,16 +144,16 @@ func TestKeychain_Resolve(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.json")
-			if tc.dockerConfig != "" {
-				assert.NoError(t, os.WriteFile(path, []byte(tc.dockerConfig), 0o600))
+			if tc.dockerConfigProvider != "" {
+				assert.NoError(t, os.WriteFile(path, []byte(tc.dockerConfigProvider), 0o600))
 			}
 
-			k := &keychain{docker: newDockerConfig(path)}
+			k := &keychain{docker: newDockerConfigProvider(path)}
 			if len(tc.secrets) > 0 {
-				var changed [][]string
-				secrets := newMockKubeSecret(&changed)
+				var changed int
+				secrets := newTestKubeSecretProvider(true, &changed)
 				for _, s := range tc.secrets {
-					secrets.store(s)
+					secrets.add(s)
 				}
 				k.secrets.Store(secrets)
 			}
@@ -172,43 +168,47 @@ func TestKeychain_Synced(t *testing.T) {
 	tests := []struct {
 		name    string
 		enable  bool
-		secrets *kubeSecret
+		secrets *kubeSecretProvider
 		expect  func(t *testing.T, synced bool)
 	}{
 		{
-			name: "kubesecret disabled",
+			name: "kube secret disabled",
 			expect: func(t *testing.T, synced bool) {
-				assert.True(t, synced)
+				assert := assert.New(t)
+				assert.True(synced)
 			},
 		},
 		{
-			name:   "kubesecret connecting",
+			name:   "kube secret connecting",
 			enable: true,
 			expect: func(t *testing.T, synced bool) {
-				assert.False(t, synced)
+				assert := assert.New(t)
+				assert.False(synced)
 			},
 		},
 		{
-			name:    "kubesecret syncing",
+			name:    "kube secret syncing",
 			enable:  true,
-			secrets: &kubeSecret{synced: func() bool { return false }},
+			secrets: &kubeSecretProvider{synced: func() bool { return false }},
 			expect: func(t *testing.T, synced bool) {
-				assert.False(t, synced)
+				assert := assert.New(t)
+				assert.False(synced)
 			},
 		},
 		{
-			name:    "kubesecret synced",
+			name:    "kube secret synced",
 			enable:  true,
-			secrets: &kubeSecret{synced: func() bool { return true }},
+			secrets: &kubeSecretProvider{synced: func() bool { return true }},
 			expect: func(t *testing.T, synced bool) {
-				assert.True(t, synced)
+				assert := assert.New(t)
+				assert.True(synced)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			k := &keychain{cfg: config.KubeSecretAuthConfig{Enable: tc.enable}, docker: newDockerConfig("")}
+			k := &keychain{cfg: config.AuthKubeSecretConfig{Enable: tc.enable}, docker: newDockerConfigProvider("")}
 			if tc.secrets != nil {
 				k.secrets.Store(tc.secrets)
 			}
@@ -253,7 +253,7 @@ func TestKeychain_connect(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			k := New(cfg, nil).(*keychain)
+			k := New(cfg).(*keychain)
 			client, err := k.connect(ctx)
 			tc.expect(t, k, client, err)
 		})
@@ -263,87 +263,69 @@ func TestKeychain_connect(t *testing.T) {
 func TestKeychain_Run(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, client *fake.Clientset, received func() []string)
+		enable bool
+		expect func(t *testing.T, k *keychain, client *fake.Clientset, changes *atomic.Int32, done <-chan struct{})
 	}{
 		{
-			name: "push secret changes to the daemon",
-			expect: func(t *testing.T, client *fake.Clientset, received func() []string) {
+			name:   "report the synced secrets once, then every change",
+			enable: true,
+			expect: func(t *testing.T, k *keychain, client *fake.Clientset, changes *atomic.Int32, done <-chan struct{}) {
 				assert := assert.New(t)
-				assert.Eventually(func() bool { return len(received()) == 1 }, 5*time.Second, 10*time.Millisecond)
-				assert.Equal([]string{"YTpwYXNz"}, received())
+				assert.Eventually(func() bool { return changes.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+				assert.True(k.Synced())
+				auth, err := k.Resolve(t.Context(), mockRegistryReference)
+				assert.NoError(err)
+				assert.Equal("YTpwYXNz", auth)
 
 				rotated := newMockSecret("a", "y", "2", "registry.example.com", "b")
-				_, err := client.CoreV1().Secrets("a").Update(t.Context(), rotated, metav1.UpdateOptions{})
+				_, err = client.CoreV1().Secrets("a").Update(t.Context(), rotated, metav1.UpdateOptions{})
 				assert.NoError(err)
-				assert.Eventually(func() bool { return len(received()) == 2 }, 5*time.Second, 10*time.Millisecond)
-				assert.Equal([]string{"YTpwYXNz", "YjpwYXNz"}, received())
+				assert.Eventually(func() bool { return changes.Load() == 2 }, 5*time.Second, 10*time.Millisecond)
+				auth, err = k.Resolve(t.Context(), mockRegistryReference)
+				assert.NoError(err)
+				assert.Equal("YjpwYXNz", auth)
 
-				unrelated := newMockSecret("a", "z", "1", "registry.example.com/other", "c")
-				_, err = client.CoreV1().Secrets("a").Create(t.Context(), unrelated, metav1.CreateOptions{})
-				assert.NoError(err)
 				assert.NoError(client.CoreV1().Secrets("a").Delete(t.Context(), "y", metav1.DeleteOptions{}))
-				assert.Never(func() bool { return len(received()) > 2 }, 200*time.Millisecond, 10*time.Millisecond)
+				assert.Eventually(func() bool { return changes.Load() == 3 }, 5*time.Second, 10*time.Millisecond)
+				auth, err = k.Resolve(t.Context(), mockRegistryReference)
+				assert.NoError(err)
+				assert.Empty(auth)
+			},
+		},
+		{
+			name:   "return at once without kube secret",
+			enable: false,
+			expect: func(t *testing.T, k *keychain, client *fake.Clientset, changes *atomic.Int32, done <-chan struct{}) {
+				assert := assert.New(t)
+				<-done
+				assert.Zero(changes.Load())
+				assert.True(k.Synced())
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			var (
-				mu    sync.Mutex
-				auths []string
-			)
-			socket := filepath.Join(dir, "api.sock")
-			listener, err := net.Listen("unix", socket)
-			assert.NoError(t, err)
-			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					Auth string `json:"auth"`
-				}
-				if json.NewDecoder(r.Body).Decode(&body) != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					return
-				}
-				mu.Lock()
-				auths = append(auths, body.Auth)
-				mu.Unlock()
-				w.WriteHeader(http.StatusNoContent)
-			})}
-			go func() { _ = server.Serve(listener) }()
-			t.Cleanup(func() { _ = server.Close() })
-
-			instances, err := store.New(filepath.Join(dir, "nydusd.db"), time.Second)
-			assert.NoError(t, err)
-			t.Cleanup(func() { assert.NoError(t, instances.Close()) })
-			instance := *mockInstance
-			instance.APISocket = socket
-			assert.NoError(t, instances.PutInstance(&instance))
-
 			client := fake.NewClientset(newMockSecret("a", "y", "1", "registry.example.com", "a"))
 			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
 			k := &keychain{
-				cfg:        config.KubeSecretAuthConfig{Enable: true},
-				store:      instances,
+				cfg:        config.AuthKubeSecretConfig{Enable: tc.enable},
 				kubeClient: func() (kubernetes.Interface, error) { return client, nil },
-				docker:     newDockerConfig(filepath.Join(dir, "config.json")),
+				docker:     newDockerConfigProvider(filepath.Join(t.TempDir(), "config.json")),
 			}
+
+			changes := &atomic.Int32{}
 			done := make(chan struct{})
 			go func() {
-				k.Run(ctx)
-				close(done)
+				defer close(done)
+				k.Run(ctx, func() { changes.Add(1) })
 			}()
 			t.Cleanup(func() {
 				cancel()
 				<-done
 			})
 
-			tc.expect(t, client, func() []string {
-				mu.Lock()
-				defer mu.Unlock()
-				return append([]string(nil), auths...)
-			})
+			tc.expect(t, k, client, changes, done)
 		})
 	}
 }

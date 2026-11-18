@@ -13,6 +13,8 @@ import (
 	context "context"
 	reflect "reflect"
 
+	nydusd "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd"
+	io_prometheus_client "github.com/prometheus/client_model/go"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -38,6 +40,36 @@ func NewMockClient(ctrl *gomock.Controller) *MockClient {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockClient) EXPECT() *MockClientMockRecorder {
 	return m.recorder
+}
+
+// Info mocks base method.
+func (m *MockClient) Info(ctx context.Context) (*nydusd.Info, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Info", ctx)
+	ret0, _ := ret[0].(*nydusd.Info)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Info indicates an expected call of Info.
+func (mr *MockClientMockRecorder) Info(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Info", reflect.TypeOf((*MockClient)(nil).Info), ctx)
+}
+
+// Metrics mocks base method.
+func (m *MockClient) Metrics(ctx context.Context) (map[string]*io_prometheus_client.MetricFamily, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Metrics", ctx)
+	ret0, _ := ret[0].(map[string]*io_prometheus_client.MetricFamily)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Metrics indicates an expected call of Metrics.
+func (mr *MockClientMockRecorder) Metrics(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Metrics", reflect.TypeOf((*MockClient)(nil).Metrics), ctx)
 }
 
 // Ready mocks base method.

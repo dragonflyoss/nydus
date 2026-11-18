@@ -201,10 +201,16 @@ impl Backend for Registry {
         &self.metrics
     }
 
-    /// Replaces the registry credentials, the next challenge answered with
-    /// them.
-    fn set_auth(&self, auth: &str) -> io::Result<()> {
-        self.client.authorizer.set_basic(auth)
+    /// Replaces the config's `auth`: the next challenge is answered with
+    /// `username` and `password`.
+    fn set_basic_auth(&self, username: &str, password: &str) -> io::Result<()> {
+        self.client.authorizer.set_basic(username, password)
+    }
+
+    /// Replaces the config's `registry_token`: the next request is sent with
+    /// `token`.
+    fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+        self.client.authorizer.set_bearer(token)
     }
 
     /// Reads the blob's metadata for an on-demand read.
@@ -2178,6 +2184,51 @@ backend:
                 assert_eq!(headers[0][AUTHORIZATION], "Bearer xyz");
                 assert_eq!(headers[1].get(AUTHORIZATION), None);
                 assert_eq!(headers[2][AUTHORIZATION], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn replaced_credentials_are_sent_with_the_next_read() {
+        let test_cases: Vec<(Option<&str>, fn(&Registry) -> io::Result<()>, &str)> = vec![
+            (
+                None,
+                |registry| registry.set_bearer_auth("abc"),
+                "Bearer abc",
+            ),
+            (
+                Some("xyz"),
+                |registry| registry.set_bearer_auth("abc"),
+                "Bearer abc",
+            ),
+            (
+                Some("xyz"),
+                |registry| registry.set_basic_auth("bob", "hunter2"),
+                "Bearer xyz",
+            ),
+        ];
+
+        for (registry_token, replace, expected) in test_cases {
+            for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+                let body = b"authorized".to_vec();
+                let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
+                let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
+                let registry = scripted_registry(
+                    origin.addr,
+                    Some("YWxpY2U6c2VjcmV0"),
+                    registry_token,
+                    transport.clone(),
+                );
+
+                replace(&registry).unwrap();
+                let mut buf = vec![0u8; body.len()];
+                read(&registry, kind, &mut buf).unwrap();
+
+                assert_eq!(buf, body);
+                assert_eq!(origin.hits(), 0);
+                let headers = transport.headers();
+                assert_eq!(headers.len(), 1);
+                assert_eq!(headers[0][AUTHORIZATION], expected);
             }
         }
     }

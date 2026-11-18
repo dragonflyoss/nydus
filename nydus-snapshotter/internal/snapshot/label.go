@@ -40,14 +40,19 @@ const (
 	labelTrue = "true"
 )
 
+// remoteLabels are the labels that make a snapshot a nydus layer. They are
+// honoured on unpack keys only and dropped from every other key, so neither
+// container labels nor the commit of a container snapshot can forge a nydus
+// layer.
+var remoteLabels = []string{labelNydusBlob, labelNydusBootstrap, labelNydusFSVersion, labelNydusPrefetch}
+
 // snapshotKey is a backend snapshot key. containerd's metadata store
 // prefixes keys with <namespace>/<id>/, refer to
 // https://github.com/containerd/containerd/blob/v2.2.10/core/metadata/snapshot.go.
 type snapshotKey string
 
-// isUnpack reports whether the key is one containerd's unpacker prepares a
-// layer with, the only keys whose remote labels are honoured, so container
-// annotations cannot forge a committed snapshot.
+// isUnpack reports whether containerd's unpacker created the key, see
+// remoteLabels.
 func (k snapshotKey) isUnpack() bool {
 	key := string(k)
 	if parts := strings.SplitN(key, "/", 3); len(parts) == 3 {
@@ -132,4 +137,22 @@ func (m idMapping) rootID() (int, error) {
 	}
 
 	return 0, fmt.Errorf("id mapping %q does not map container root: %w", m, errdefs.ErrInvalidArgument)
+}
+
+// dropIDMapLabels removes the uid/gid mapping labels from a snapshot of an
+// unpack key, which image annotations could otherwise set on containerd 1.6.
+func (s *snapshotter) dropIDMapLabels(info *snapshots.Info) error {
+	delete(info.Labels, snapshots.LabelSnapshotUIDMapping)
+	delete(info.Labels, snapshots.LabelSnapshotGIDMapping)
+	return nil
+}
+
+// dropRemoteLabels removes remoteLabels from a snapshot whose key is not an
+// unpack key.
+func (s *snapshotter) dropRemoteLabels(info *snapshots.Info) error {
+	for _, label := range remoteLabels {
+		delete(info.Labels, label)
+	}
+
+	return nil
 }

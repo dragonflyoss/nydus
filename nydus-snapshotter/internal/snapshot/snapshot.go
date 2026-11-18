@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//go:generate mockgen -destination mocks/snapshotter_mock.go -source snapshotter.go -package mocks
-
 // Package snapshot is the containerd snapshotter: containerd's overlay
 // snapshotter for OCI layers, plus remote nydus layers served by a daemon per
 // image, refer to
@@ -44,18 +42,22 @@ const (
 	metadataOpenTimeout = 10 * time.Second
 )
 
-// Snapshotter is containerd's Snapshotter and Cleaner, plus the teardown of
+// Snapshotter is containerd's Snapshotter and Cleaner, plus the release of
 // daemons whose images no snapshot uses.
 type Snapshotter interface {
+	// Snapshotter is the snapshot API containerd calls.
 	snapshots.Snapshotter
+
+	// Cleaner removes the directories of removed snapshots, on containerd's
+	// garbage collection.
 	snapshots.Cleaner
 
-	// Run tears down unused daemons on every removal and tick until ctx is
+	// Run releases unused daemons on every removal and tick until ctx is
 	// done.
 	Run(ctx context.Context)
 
-	// CommittedBlobs returns the IDs of the blobs committed bootstraps
-	// reference.
+	// CommittedBlobs returns the IDs of the blobs referenced by committed
+	// bootstrap layers.
 	CommittedBlobs(ctx context.Context) (map[string]struct{}, error)
 }
 
@@ -70,16 +72,16 @@ type snapshotter struct {
 	// options are the overlay mount options detected at start.
 	options []string
 
-	// fileSystems are the remote file systems keyed by nydus-fs-version.
-	fileSystems map[string]nydusfs.FileSystem
+	// fileSystem serves the nydus images.
+	fileSystem nydusfs.FileSystem
 
-	// release wakes the teardown worker, buffered by one.
+	// release wakes the release worker, buffered by one.
 	release chan struct{}
 }
 
-// New snapshotter interface. Snapshots and metadata live under root, as with
+// New returns a snapshotter. Snapshots and metadata live under root, as with
 // containerd's overlay snapshotter.
-func New(root string, fileSystems map[string]nydusfs.FileSystem) (Snapshotter, error) {
+func New(root string, fileSystem nydusfs.FileSystem) (Snapshotter, error) {
 	if err := os.MkdirAll(filepath.Join(root, snapshotsDirName), 0o700); err != nil {
 		return nil, err
 	}
@@ -116,11 +118,11 @@ func New(root string, fileSystems map[string]nydusfs.FileSystem) (Snapshotter, e
 	}
 
 	return &snapshotter{
-		root:        root,
-		ms:          ms,
-		options:     options,
-		fileSystems: fileSystems,
-		release:     make(chan struct{}, 1),
+		root:       root,
+		ms:         ms,
+		options:    options,
+		fileSystem: fileSystem,
+		release:    make(chan struct{}, 1),
 	}, nil
 }
 
@@ -186,12 +188,12 @@ func (s *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 		return nil, s.prepareRemoteLayer(ctx, key, parent, target, opts)
 	}
 
-	return s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts)
+	return s.createMounts(ctx, snapshots.KindActive, key, parent, opts)
 }
 
 // View creates a read-only snapshot.
 func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
-	return s.createSnapshot(ctx, snapshots.KindView, key, parent, opts)
+	return s.createMounts(ctx, snapshots.KindView, key, parent, opts)
 }
 
 // Mounts returns the mounts of an active or view snapshot, starting the
@@ -246,9 +248,9 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 }
 
 // Remove abandons a snapshot. Its directories are removed by Cleanup and the
-// daemon of its image, once unused, by the teardown worker: containerd calls
+// daemon of its image, once unused, by the release worker: containerd calls
 // Remove from its garbage collector under its metadata lock, so Remove does
-// no slow work and never fails on teardown.
+// no slow work and never fails on a daemon.
 func (s *snapshotter) Remove(ctx context.Context, key string) error {
 	if err := s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
 		if _, _, err := storage.Remove(ctx, key); err != nil {
@@ -301,15 +303,16 @@ func (s *snapshotter) Close() error {
 // reports it as existing, so containerd adopts it and skips the download,
 // refer to https://github.com/containerd/stargz-snapshotter/blob/main/snapshot/snapshot.go.
 func (s *snapshotter) prepareRemoteLayer(ctx context.Context, key, parent, target string, opts []snapshots.Opt) error {
-	if _, err := s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts); err != nil {
+	if _, _, err := s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts); err != nil {
 		return err
 	}
 
 	err := s.Commit(ctx, target, key, opts...)
 	if err != nil {
-		// Another namespace committed the same layer first; drop ours.
+		// Drop the active snapshot of a failed commit, as when another
+		// namespace committed the same layer first.
 		if removeErr := s.Remove(ctx, key); removeErr != nil {
-			log.G(ctx).WithError(removeErr).WithField("key", key).Warn("remove snapshot of a committed layer")
+			log.G(ctx).WithError(removeErr).WithField("key", key).Warn("remove snapshot whose commit failed")
 		}
 
 		if !errdefs.IsAlreadyExists(err) {
@@ -320,31 +323,52 @@ func (s *snapshotter) prepareRemoteLayer(ctx context.Context, key, parent, targe
 	return fmt.Errorf("target snapshot %q: %w", target, errdefs.ErrAlreadyExists)
 }
 
-// createSnapshot creates a snapshot directory and record, then returns its
-// mounts. A snapshot whose mounts fail is removed, so a retry with the same
-// key does not find it.
-func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (_ []mount.Mount, err error) {
-	// Remote labels count only on unpack keys, and uid/gid mappings only on
-	// other keys: containerd 1.6 copies image annotations into unpack labels.
+// createMounts creates a snapshot and returns its mounts. A snapshot whose
+// mounts fail is removed, so a retry with the same key does not find it; its
+// directory is left to Cleanup.
+func (s *snapshotter) createMounts(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) ([]mount.Mount, error) {
+	snap, info, err := s.createSnapshot(ctx, kind, key, parent, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	mounts, err := s.mounts(ctx, snap, info)
+	if err != nil {
+		if removeErr := s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
+			_, _, err := storage.Remove(ctx, key)
+			return err
+		}); removeErr != nil {
+			log.G(ctx).WithError(removeErr).WithField("key", key).Warn("remove snapshot whose mounts failed")
+		}
+
+		return nil, err
+	}
+
+	return mounts, nil
+}
+
+// createSnapshot creates the directory and the record of a snapshot, as
+// containerd's overlay snapshotter does, refer to
+// https://github.com/containerd/containerd/blob/v2.2.10/plugins/snapshots/overlay/overlay.go.
+func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (snap storage.Snapshot, info snapshots.Info, err error) {
+	// Uid/gid mappings are honoured on every key but an unpack key, whose
+	// labels containerd 1.6 copies from image annotations; remoteLabels on
+	// unpack keys only.
 	if snapshotKey(key).isUnpack() {
 		opts = append(opts, s.dropIDMapLabels)
 	} else {
 		opts = append(opts, s.dropRemoteLabels)
 	}
 
-	var (
-		snap     storage.Snapshot
-		info     snapshots.Info
-		td, path string
-	)
+	var td, path string
 	defer func() {
 		if err == nil {
 			return
 		}
 
 		if td != "" {
-			if err := os.RemoveAll(td); err != nil {
-				log.G(ctx).WithError(err).Warn("remove temporary snapshot directory")
+			if removeErr := os.RemoveAll(td); removeErr != nil {
+				log.G(ctx).WithError(removeErr).Warn("remove temporary snapshot directory")
 			}
 		}
 
@@ -352,12 +376,12 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 			if removeErr := os.RemoveAll(path); removeErr != nil {
 				log.G(ctx).WithError(removeErr).WithField("path", path).Error("remove snapshot directory, it may need manual removal")
 				// Only err's class reaches containerd, as overlay does.
-				err = fmt.Errorf("remove path: %v: %w", removeErr, err) //nolint:errorlint
+				err = fmt.Errorf("remove path: %v: %w", removeErr, err) //nolint:errorlint // the cause is named, only the class is wrapped
 			}
 		}
 	}()
 
-	if err := s.ms.WithTransaction(ctx, true, func(ctx context.Context) (err error) {
+	err = s.ms.WithTransaction(ctx, true, func(ctx context.Context) (err error) {
 		td, err = s.prepareDirectory(kind)
 		if err != nil {
 			return fmt.Errorf("create snapshot directory: %w", err)
@@ -384,27 +408,34 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 		td = ""
 
 		return nil
-	}); err != nil {
-		return nil, err
-	}
+	})
 
-	mounts, err := s.mounts(ctx, snap, info)
-	if err != nil {
-		path = ""
-		if removeErr := s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
-			_, _, err := storage.Remove(ctx, key)
-			return err
-		}); removeErr != nil {
-			log.G(ctx).WithError(removeErr).WithField("key", key).Warn("remove snapshot whose mounts failed")
-		}
-
-		return nil, err
-	}
-
-	return mounts, nil
+	return snap, info, err
 }
 
-// cleanupDirectories returns the snapshot directories no snapshot owns.
+// prepareDirectory creates a temporary snapshot directory with fs and, for an
+// active snapshot, work.
+func (s *snapshotter) prepareDirectory(kind snapshots.Kind) (string, error) {
+	td, err := os.MkdirTemp(s.snapshotsDir(), "new-")
+	if err != nil {
+		return "", fmt.Errorf("create temporary directory: %w", err)
+	}
+
+	if err := os.Mkdir(filepath.Join(td, "fs"), 0o755); err != nil {
+		return td, err
+	}
+
+	if kind == snapshots.KindActive {
+		if err := os.Mkdir(filepath.Join(td, "work"), 0o711); err != nil {
+			return td, err
+		}
+	}
+
+	return td, nil
+}
+
+// cleanupDirectories returns the snapshot directories no snapshot owns. It
+// runs in a metadata transaction.
 func (s *snapshotter) cleanupDirectories(ctx context.Context) ([]string, error) {
 	ids, err := storage.IDMap(ctx)
 	if err != nil {
@@ -427,12 +458,14 @@ func (s *snapshotter) cleanupDirectories(ctx context.Context) ([]string, error) 
 	return cleanup, nil
 }
 
-// wakeRelease wakes the teardown worker without blocking.
-func (s *snapshotter) wakeRelease() {
-	select {
-	case s.release <- struct{}{}:
-	default:
+// walkInfo walks the snapshots. A fresh metastore has no snapshots bucket
+// yet, which holds no snapshot. It runs in a metadata transaction.
+func (s *snapshotter) walkInfo(ctx context.Context, fn snapshots.WalkFunc) error {
+	if err := storage.WalkInfo(ctx, fn); err != nil && !errdefs.IsNotFound(err) {
+		return err
 	}
+
+	return nil
 }
 
 // chownUpper gives a new snapshot's fs directory the owner its mount needs,
@@ -484,44 +517,4 @@ func (s *snapshotter) upperPath(id string) string {
 // workPath returns the overlay work directory of a snapshot.
 func (s *snapshotter) workPath(id string) string {
 	return filepath.Join(s.snapshotsDir(), id, "work")
-}
-
-// prepareDirectory creates a temporary snapshot directory with fs and, for an
-// active snapshot, work.
-func (s *snapshotter) prepareDirectory(kind snapshots.Kind) (string, error) {
-	td, err := os.MkdirTemp(s.snapshotsDir(), "new-")
-	if err != nil {
-		return "", fmt.Errorf("create temporary directory: %w", err)
-	}
-
-	if err := os.Mkdir(filepath.Join(td, "fs"), 0o755); err != nil {
-		return td, err
-	}
-
-	if kind == snapshots.KindActive {
-		if err := os.Mkdir(filepath.Join(td, "work"), 0o711); err != nil {
-			return td, err
-		}
-	}
-
-	return td, nil
-}
-
-// dropIDMapLabels removes the uid/gid mapping labels from a snapshot of an
-// unpack key, which image annotations could otherwise set on containerd 1.6.
-func (s *snapshotter) dropIDMapLabels(info *snapshots.Info) error {
-	delete(info.Labels, snapshots.LabelSnapshotUIDMapping)
-	delete(info.Labels, snapshots.LabelSnapshotGIDMapping)
-	return nil
-}
-
-// dropRemoteLabels removes the nydus layer labels from a snapshot of a key
-// that is no unpack key: they count only on unpack keys, so neither container
-// labels nor the commit of a container snapshot can forge a nydus layer.
-func (s *snapshotter) dropRemoteLabels(info *snapshots.Info) error {
-	for _, label := range []string{labelNydusBlob, labelNydusBootstrap, labelNydusFSVersion, labelNydusPrefetch} {
-		delete(info.Labels, label)
-	}
-
-	return nil
 }

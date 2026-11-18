@@ -2,6 +2,9 @@ PKG := github.com/dragonflyoss/nydus/nydus-snapshotter
 VERSION ?= $(shell git describe --match 'v[0-9]*' --dirty='.m' --always --tags)
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD)
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+# The commit nydus reports, in the form nydus-config/build.rs takes from git.
+GIT_COMMIT_SHORT_HASH ?= $(shell git log -1 --format=%h --abbrev=9)
+GIT_COMMIT_DATE ?= $(shell git log -1 --date=short --format=%cd)
 LDFLAGS := -s -w -X $(PKG)/internal/version.GitVersion=$(VERSION) -X $(PKG)/internal/version.GitCommit=$(GIT_COMMIT) -X $(PKG)/internal/version.BuildTime=$(BUILD_TIME)
 IMAGE ?= ghcr.io/dragonflyoss/nydus-snapshotter
 # Extra docker buildx flags, e.g. --platform linux/amd64,linux/arm64 --push.
@@ -43,5 +46,6 @@ generate:
 image:
 	docker buildx build -f Dockerfile $(IMAGE_FLAGS) \
 		--build-arg VERSION=$(VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg GIT_COMMIT_SHORT_HASH=$(GIT_COMMIT_SHORT_HASH) --build-arg GIT_COMMIT_DATE=$(GIT_COMMIT_DATE) \
 		-t $(IMAGE):$(VERSION) ..
 .PHONY: image

@@ -121,16 +121,34 @@ enum Authorization {
 /// Implements the authorization header value.
 impl Authorization {
     /// Creates the basic authorization for `encoded`, the config's
-    /// `base64(user:pass)`.
+    /// `base64(user:pass)`, or `InvalidInput` when it is not one.
     fn basic(encoded: &str) -> io::Result<Self> {
+        if !STANDARD
+            .decode(encoded)
+            .is_ok_and(|decoded| decoded.contains(&b':'))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "auth is not base64 of user:pass",
+            ));
+        }
+
         Ok(Self::Basic(Self::header_value(&format!(
             "Basic {encoded}"
         ))?))
     }
 
     /// Creates a bearer authorization for `token` that expires `expires_in`
-    /// from now, `None` keeping it until a `401` invalidates it.
+    /// from now, `None` keeping it until a `401` invalidates it, or
+    /// `InvalidInput` when `token` is empty.
     fn bearer(token: &str, expires_in: Option<Duration>) -> io::Result<Self> {
+        if token.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "registry bearer token is empty",
+            ));
+        }
+
         Ok(Self::Bearer {
             value: Self::header_value(&format!("Bearer {token}"))?,
             created_at: Instant::now(),
@@ -138,11 +156,13 @@ impl Authorization {
         })
     }
 
-    /// Parses `value` into a sensitive header value.
+    /// Parses `value` into a sensitive header value, or `InvalidInput` when a
+    /// header cannot carry it.
     fn header_value(value: &str) -> io::Result<HeaderValue> {
         let mut value: HeaderValue = value.parse().map_err(|_| {
-            io::Error::other(
-                "credentials contain bytes that are invalid in an HTTP header".to_string(),
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "credentials contain bytes that are invalid in an HTTP header",
             )
         })?;
 
@@ -155,6 +175,18 @@ impl Authorization {
         match self {
             Self::Basic(value) | Self::Bearer { value, .. } => value,
         }
+    }
+
+    /// Returns whether the authorization answers a challenge. A bearer token
+    /// given to the daemon does not, and is the only one that never expires.
+    fn is_answer(&self) -> bool {
+        !matches!(
+            self,
+            Self::Bearer {
+                expires_in: None,
+                ..
+            }
+        )
     }
 
     /// Returns whether the authorization is still valid, a bearer token until
@@ -214,20 +246,35 @@ impl FetchTokenResponse {
     }
 }
 
-/// The authentication state of one registry: the configured basic
-/// credentials and the authorization requests are sent with.
+/// The authentication state of one registry: the basic credentials and the
+/// authorization requests are sent with. No error echoes a credential.
+///
+/// ```text
+/// basic          ◀─ new, set_basic
+/// authorization  ◀─ new, set_bearer, the answer to a challenge
+///
+/// request ─▶ authorize: send `authorization` ───────────────────▶ 2xx
+///             └─ 401 ─▶ invalidate: forget it
+///                     ─▶ authenticate: answer the challenge and keep the answer
+///                          Basic  ─▶ `basic`
+///                          Bearer ─▶ a token fetched with `basic`, until it expires
+///                     ─▶ authorize: send the answer
+///
+/// set_basic   forgets a kept answer, keeps a bearer token given to the daemon
+/// set_bearer  replaces `authorization`, keeps `basic`
+/// ```
 pub(crate) struct Authorizer {
     /// The configured basic credentials, `None` when the config has no `auth`,
     /// replaced by [`Authorizer::set_basic`].
     basic: RwLock<Option<Authorization>>,
 
     /// The authorization requests are sent with: the configured bearer token
-    /// at first, then the answer to the last challenge, kept until it expires
-    /// or a `401` invalidates it.
+    /// at first, then the answer to the last challenge, kept until it expires,
+    /// a `401` invalidates it or [`Authorizer::set_bearer`] replaces it.
     authorization: RwLock<Option<Authorization>>,
 
-    /// The number of times [`Authorizer::set_basic`] replaced `basic`, so a
-    /// handshake that read the credentials it replaced keeps nothing.
+    /// The number of times a credential was replaced, so a handshake that
+    /// began before keeps nothing.
     generation: AtomicU64,
 
     /// The lock one handshake holds while it answers a challenge, so a burst
@@ -242,10 +289,6 @@ impl Authorizer {
     /// before any challenge, `basic` answers the challenge once a `401`
     /// invalidates it.
     pub(crate) fn new(basic: Option<&str>, bearer: Option<&str>) -> io::Result<Self> {
-        if bearer.is_some_and(|token| token.trim().is_empty()) {
-            return Err(io::Error::other("registry bearer token is empty"));
-        }
-
         Ok(Self {
             basic: RwLock::new(basic.map(Authorization::basic).transpose()?),
             authorization: RwLock::new(
@@ -258,30 +301,45 @@ impl Authorizer {
         })
     }
 
-    /// Replaces the basic credentials with `encoded`, a `base64(user:pass)`,
-    /// and forgets the kept authorization, the configured bearer token
-    /// included, so the next challenge is answered with them.
+    /// Replaces the basic credentials with `username` and `password` and
+    /// forgets a kept answer, so the next challenge is answered with them.
     ///
-    /// Rejects with `InvalidInput`, never echoing `encoded`, a value that is
-    /// not standard base64 or does not decode to `user:pass`. A handshake
-    /// already in flight keeps nothing it answered with the old credentials.
-    pub(crate) fn set_basic(&self, encoded: &str) -> io::Result<()> {
-        if !STANDARD
-            .decode(encoded)
-            .is_ok_and(|decoded| decoded.contains(&b':'))
-        {
+    /// A `username` holding a colon is `InvalidInput`: the colon ends the
+    /// user name of basic credentials, refer to
+    /// <https://www.rfc-editor.org/rfc/rfc7617#section-2>.
+    pub(crate) fn set_basic(&self, username: &str, password: &str) -> io::Result<()> {
+        if username.contains(':') {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "auth is not base64 of user:pass",
+                "username holds a colon",
             ));
         }
 
-        // Bump the generation after the credentials are replaced and before
-        // the kept answer is forgotten, so a handshake either sees the bump
-        // under the answer's lock or has its answer forgotten here.
-        *self.basic.write().unwrap() = Some(Authorization::basic(encoded)?);
+        let basic = Authorization::basic(&STANDARD.encode(format!("{username}:{password}")))?;
+
+        // Bump the generation between the two writes, so a handshake in
+        // flight either sees the bump or has its answer forgotten here.
+        *self.basic.write().unwrap() = Some(basic);
         self.generation.fetch_add(1, Ordering::SeqCst);
-        *self.authorization.write().unwrap() = None;
+        let mut kept = self.authorization.write().unwrap();
+        if kept.as_ref().is_some_and(Authorization::is_answer) {
+            *kept = None;
+        }
+
+        Ok(())
+    }
+
+    /// Replaces the kept authorization with the bearer token `token`, sent
+    /// with the requests that follow until a `401` invalidates it.
+    ///
+    /// An empty `token`, or one a header cannot carry, is `InvalidInput`.
+    pub(crate) fn set_bearer(&self, token: &str) -> io::Result<()> {
+        let bearer = Authorization::bearer(token, None)?;
+
+        // Bump the generation first, so a handshake in flight never
+        // replaces the token with its answer.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        *self.authorization.write().unwrap() = Some(bearer);
         Ok(())
     }
 
@@ -315,8 +373,8 @@ impl Authorizer {
     /// Answers `challenge` with the basic credentials or a bearer token fetched
     /// through `fetcher`, one handshake at a time.
     ///
-    /// An answer to credentials [`Authorizer::set_basic`] replaced meanwhile is
-    /// dropped, so the next challenge is answered with the new ones.
+    /// An answer to credentials [`Authorizer::set_basic`] or
+    /// [`Authorizer::set_bearer`] replaced meanwhile is dropped.
     pub(crate) async fn authenticate(
         &self,
         fetcher: &impl Fetcher,
@@ -487,6 +545,27 @@ mod tests {
     }
 
     #[test]
+    fn new_rejects_malformed_credentials() {
+        let test_cases = vec![
+            (Some("Ym9i"), None),
+            (Some("Ym9iOmh1bnRlcjI"), None),
+            (Some("bob:hunter2"), None),
+            (Some(""), None),
+            (None, Some("")),
+            (None, Some(" ")),
+            (None, Some("a\nb")),
+        ];
+
+        for (basic, bearer) in test_cases {
+            assert_eq!(
+                Authorizer::new(basic, bearer).err().map(|err| err.kind()),
+                Some(io::ErrorKind::InvalidInput),
+                "{basic:?} {bearer:?}"
+            );
+        }
+    }
+
+    #[test]
     fn new_keeps_rejected_credentials_out_of_the_error() {
         let test_cases = vec![(Some("secret\nvalue"), None), (None, Some("secret\nvalue"))];
 
@@ -653,57 +732,89 @@ mod tests {
     }
 
     #[test]
-    fn set_basic_replaces_base64_user_pass_and_drops_the_kept_token() {
+    fn set_basic_replaces_the_credentials_and_drops_the_kept_answer() {
+        let fetched = Some(Duration::from_secs(3600));
         let test_cases = vec![
-            ("Ym9iOmh1bnRlcjI=", None, None, "Basic Ym9iOmh1bnRlcjI="),
-            ("Ym9iOg==", None, None, "Basic Ym9iOg=="),
             (
-                "Ym9i",
-                Some(io::ErrorKind::InvalidInput),
+                ("bob", "hunter2"),
+                fetched,
+                None,
+                None,
+                "Basic Ym9iOmh1bnRlcjI=",
+            ),
+            (("bob", ""), fetched, None, None, "Basic Ym9iOg=="),
+            (("bob", "pa:ss"), fetched, None, None, "Basic Ym9iOnBhOnNz"),
+            (
+                ("bob", "hunter2"),
+                None,
+                None,
                 Some("Bearer xyz"),
-                "Basic YWxpY2U6c2VjcmV0",
+                "Basic Ym9iOmh1bnRlcjI=",
             ),
             (
-                "Ym9iOmh1bnRlcjI",
-                Some(io::ErrorKind::InvalidInput),
-                Some("Bearer xyz"),
-                "Basic YWxpY2U6c2VjcmV0",
-            ),
-            (
-                "bob:hunter2",
-                Some(io::ErrorKind::InvalidInput),
-                Some("Bearer xyz"),
-                "Basic YWxpY2U6c2VjcmV0",
-            ),
-            (
-                "",
+                ("bo:b", "hunter2"),
+                fetched,
                 Some(io::ErrorKind::InvalidInput),
                 Some("Bearer xyz"),
                 "Basic YWxpY2U6c2VjcmV0",
             ),
         ];
 
-        for (encoded, err, header, basic) in test_cases {
+        for ((username, password), expires_in, err, header, basic) in test_cases {
             let authorizer = Authorizer::new(Some("YWxpY2U6c2VjcmV0"), None).unwrap();
             *authorizer.authorization.write().unwrap() =
-                Some(Authorization::bearer("xyz", Some(Duration::from_secs(3600))).unwrap());
+                Some(Authorization::bearer("xyz", expires_in).unwrap());
 
             assert_eq!(
-                authorizer.set_basic(encoded).err().map(|err| err.kind()),
+                authorizer
+                    .set_basic(username, password)
+                    .err()
+                    .map(|err| err.kind()),
                 err,
-                "{encoded}"
+                "{username}"
             );
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
             assert_eq!(
                 headers.get(AUTHORIZATION),
                 header.map(HeaderValue::from_static).as_ref(),
-                "{encoded}"
+                "{username}"
             );
             assert_eq!(
                 authorizer.basic.read().unwrap().as_ref().unwrap().value(),
                 basic,
-                "{encoded}"
+                "{username}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_bearer_replaces_the_kept_authorization_and_keeps_the_basic_credentials() {
+        let invalid = Some(io::ErrorKind::InvalidInput);
+        let test_cases = vec![
+            ("abc", None, "Bearer abc"),
+            ("", invalid, "Bearer xyz"),
+            (" ", invalid, "Bearer xyz"),
+            ("a\nb", invalid, "Bearer xyz"),
+        ];
+
+        for (token, err, header) in test_cases {
+            let authorizer = Authorizer::new(Some("YWxpY2U6c2VjcmV0"), None).unwrap();
+            *authorizer.authorization.write().unwrap() =
+                Some(Authorization::bearer("xyz", Some(Duration::from_secs(3600))).unwrap());
+
+            assert_eq!(
+                authorizer.set_bearer(token).err().map(|err| err.kind()),
+                err,
+                "{token:?}"
+            );
+            let mut headers = HeaderMap::new();
+            authorizer.authorize(&mut headers);
+            assert_eq!(headers[AUTHORIZATION], header, "{token:?}");
+            assert_eq!(
+                authorizer.basic.read().unwrap().as_ref().unwrap().value(),
+                "Basic YWxpY2U6c2VjcmV0",
+                "{token:?}"
             );
         }
     }
@@ -727,7 +838,7 @@ mod tests {
 
         for (basic, expected) in test_cases {
             let authorizer = Authorizer::new(basic, None).unwrap();
-            authorizer.set_basic("Ym9iOmh1bnRlcjI=").unwrap();
+            authorizer.set_basic("bob", "hunter2").unwrap();
             authorizer
                 .authenticate(&http_client, Challenge::Basic)
                 .await
@@ -739,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_keeps_no_token_fetched_before_set_basic() {
+    async fn authenticate_keeps_no_token_fetched_before_a_credential_is_replaced() {
         let http_client = Http::new(
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -750,9 +861,16 @@ mod tests {
             None,
         )
         .unwrap();
-        let test_cases = vec![(None, Some("Bearer abc")), (Some("Ym9iOmh1bnRlcjI="), None)];
+        let test_cases: Vec<(fn(&Authorizer) -> io::Result<()>, Option<&str>)> = vec![
+            (|_| Ok(()), Some("Bearer abc")),
+            (|authorizer| authorizer.set_basic("bob", "hunter2"), None),
+            (
+                |authorizer| authorizer.set_bearer("given"),
+                Some("Bearer given"),
+            ),
+        ];
 
-        for (basic, expected) in test_cases {
+        for (replace, expected) in test_cases {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let realm = format!("http://{}/token", listener.local_addr().unwrap());
             let fetched = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -787,9 +905,7 @@ mod tests {
             let (result, ()) =
                 tokio::join!(authorizer.authenticate(&http_client, challenge), async {
                     fetched.notified().await;
-                    if let Some(basic) = basic {
-                        authorizer.set_basic(basic).unwrap();
-                    }
+                    replace(&authorizer).unwrap();
                     release.send(()).unwrap();
                 });
 
@@ -799,7 +915,7 @@ mod tests {
             assert_eq!(
                 headers.get(AUTHORIZATION),
                 expected.map(HeaderValue::from_static).as_ref(),
-                "{basic:?}"
+                "{expected:?}"
             );
         }
     }

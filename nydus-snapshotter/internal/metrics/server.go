@@ -10,11 +10,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/containerd/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -35,19 +37,27 @@ type Server struct {
 	listener net.Listener
 }
 
-// NewServer binds addr. ready answers /readyz; /livez only proves the
-// process serves HTTP, so it never depends on the API server.
-func NewServer(addr string, ready func() error) (*Server, error) {
+// NewServer returns a server listening on addr. /metrics serves the
+// snapshotter's own metrics and those the daemons gatherer returns, /readyz
+// answers with ready, and /livez only proves the process serves HTTP, so it
+// never depends on the API server.
+func NewServer(addr string, ready func() error, daemons prometheus.Gatherer) (*Server, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen metrics %s: %w", addr, err)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.Handler())
+	// Serve what gathers and log the rest, so one daemon whose metrics
+	// clash never costs the scrape of every other metric.
+	mux.Handle("GET /metrics", promhttp.HandlerFor(prometheus.Gatherers{prometheus.DefaultGatherer, daemons}, promhttp.HandlerOpts{
+		ErrorLog:      log.L,
+		ErrorHandling: promhttp.ContinueOnError,
+	}))
+	// A failed write means the client went away; nothing is left to do.
+	ok := func(w http.ResponseWriter) { _, _ = io.WriteString(w, "ok\n") }
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
-		// A failed write means the client went away; nothing is left to do.
-		_, _ = w.Write([]byte("ok\n"))
+		ok(w)
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if err := ready(); err != nil {
@@ -55,8 +65,7 @@ func NewServer(addr string, ready func() error) (*Server, error) {
 			return
 		}
 
-		// A failed write means the client went away; nothing is left to do.
-		_, _ = w.Write([]byte("ok\n"))
+		ok(w)
 	})
 
 	return &Server{

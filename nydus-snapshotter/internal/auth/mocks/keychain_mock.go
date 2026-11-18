@@ -13,8 +13,9 @@ import (
 	context "context"
 	reflect "reflect"
 
-	registry "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
 	gomock "go.uber.org/mock/gomock"
+
+	registry "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
 )
 
 // MockKeychain is a mock of Keychain interface.
@@ -57,15 +58,15 @@ func (mr *MockKeychainMockRecorder) Resolve(ctx, ref any) *gomock.Call {
 }
 
 // Run mocks base method.
-func (m *MockKeychain) Run(ctx context.Context) {
+func (m *MockKeychain) Run(ctx context.Context, onChange func()) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Run", ctx)
+	m.ctrl.Call(m, "Run", ctx, onChange)
 }
 
 // Run indicates an expected call of Run.
-func (mr *MockKeychainMockRecorder) Run(ctx any) *gomock.Call {
+func (mr *MockKeychainMockRecorder) Run(ctx, onChange any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Run", reflect.TypeOf((*MockKeychain)(nil).Run), ctx)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Run", reflect.TypeOf((*MockKeychain)(nil).Run), ctx, onChange)
 }
 
 // Synced mocks base method.

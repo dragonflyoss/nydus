@@ -40,10 +40,9 @@ import (
 )
 
 const (
-	// fsVersionV3 is the nydus-fs-version of Nydus v3 images.
-	fsVersionV3 = "7"
-
-	// gracefulStopTimeout bounds draining in-flight gRPC calls on stop.
+	// gracefulStopTimeout is how long in-flight gRPC calls may finish on
+	// stop before they are cancelled. Stop still waits for their handlers to
+	// return, so no handler runs once the stores close.
 	gracefulStopTimeout = 10 * time.Second
 
 	// dialTimeout bounds probing an existing socket for a live server.
@@ -59,7 +58,8 @@ const (
 
 // Server is the snapshotter process.
 type Server struct {
-	// cfg is the running config.
+	// cfg is the config the server started with. A reloaded config reaches
+	// the file system only.
 	cfg *config.Config
 
 	// store persists daemon instances.
@@ -99,8 +99,8 @@ type Server struct {
 	wg sync.WaitGroup
 }
 
-// New server. The background workers start once every component is built
-// and stop on Stop.
+// New returns a server. Its background workers start once every component
+// is built and stop on Stop.
 func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, error) {
 	for _, dir := range []string{cfg.Root, cfg.RunDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -117,9 +117,10 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 
 	// A stop job takes up to twice TimeoutStopSec, SIGTERM then SIGKILL,
 	// refer to https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html.
+	jobTimeout := 2*time.Duration(cfg.Nydusd.MountTimeout) + jobTimeoutMargin
 	s := &Server{
 		cfg:     cfg,
-		systemd: systemd.New(2*time.Duration(cfg.Nydusd.MountTimeout) + jobTimeoutMargin),
+		systemd: systemd.New(jobTimeout),
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -130,8 +131,9 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 
 	s.wg.Go(func() { s.snapshotter.Run(ctx) })
 	s.wg.Go(func() { s.gc.Run(ctx) })
-	s.wg.Go(func() { s.keychain.Run(ctx) })
-	s.wg.Go(func() { config.NewWatcher(configPath, config.DefaultWatchInterval, cfg).Run(ctx, s.reload) })
+	s.wg.Go(func() { s.fileSystem.Run(ctx) })
+	watcher := config.NewWatcher(configPath, cfg)
+	s.wg.Go(func() { watcher.Run(ctx, s.reload) })
 	if s.metrics != nil {
 		s.wg.Go(func() {
 			if err := s.metrics.Serve(); err != nil {
@@ -151,7 +153,7 @@ func (s *Server) setup(ctx context.Context) error {
 		return err
 	}
 
-	s.keychain = auth.New(s.cfg, s.store)
+	s.keychain = auth.New(s.cfg)
 
 	// The GC and the file system need each other: the GC asks for the blobs
 	// of running daemons, a starting daemon holds the GC's start lock.
@@ -165,13 +167,13 @@ func (s *Server) setup(ctx context.Context) error {
 		return fmt.Errorf("init nydus file system: %w", err)
 	}
 
-	s.snapshotter, err = snapshot.New(s.cfg.Root, map[string]fs.FileSystem{fsVersionV3: s.fileSystem})
+	s.snapshotter, err = snapshot.New(s.cfg.Root, s.fileSystem)
 	if err != nil {
 		return fmt.Errorf("init snapshotter: %w", err)
 	}
 
 	if s.cfg.Metrics.Address != "" {
-		s.metrics, err = metrics.NewServer(s.cfg.Metrics.Address, s.ready)
+		s.metrics, err = metrics.NewServer(s.cfg.Metrics.Address, s.ready, s.fileSystem)
 		if err != nil {
 			return err
 		}
@@ -197,17 +199,17 @@ func (s *Server) setup(ctx context.Context) error {
 }
 
 // Serve serves gRPC until Stop, and tells systemd the snapshotter is ready.
-func (s *Server) Serve(ctx context.Context) error {
+func (s *Server) Serve() error {
 	s.serving.Store(true)
 	defer s.serving.Store(false)
 
 	// The listener is bound, so containerd's calls queue until Serve accepts
-	// them, refer to https://github.com/containerd/containerd/blob/main/cmd/containerd/command/notify_linux.go.
+	// them, refer to https://github.com/containerd/containerd/blob/main/cmd/containerd/command/notify_systemd.go.
 	if _, err := sddaemon.SdNotify(false, sddaemon.SdNotifyReady); err != nil {
-		log.G(ctx).WithError(err).Warn("notify systemd ready")
+		log.L.WithError(err).Warn("notify systemd ready")
 	}
 
-	log.G(ctx).WithField("address", s.cfg.Address).Info("serving snapshotter")
+	log.L.WithField("address", s.cfg.Address).Info("serving snapshotter")
 	if err := s.grpc.Serve(s.listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}
@@ -215,8 +217,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	return nil
 }
 
-// Stop drains gRPC calls, stops the workers and closes the stores. Daemons
-// and their mounts keep running.
+// Stop drains gRPC calls, stops the metrics server and the workers, then
+// closes the stores. Daemons and their mounts keep running.
 func (s *Server) Stop() {
 	if _, err := sddaemon.SdNotify(false, sddaemon.SdNotifyStopping); err != nil {
 		log.L.WithError(err).Warn("notify systemd stopping")
@@ -237,8 +239,6 @@ func (s *Server) Stop() {
 			<-stopped
 		}
 		timer.Stop()
-	} else if s.listener != nil {
-		s.listener.Close()
 	}
 
 	if s.metrics != nil {
@@ -294,7 +294,6 @@ func (s *Server) reload(ctx context.Context, next *config.Config) {
 // listen returns the gRPC listener: the socket systemd passes when socket
 // activated, as soci-snapshotter does, or a socket bound at address.
 func (s *Server) listen(ctx context.Context) (net.Listener, error) {
-	address := s.cfg.Address
 	listeners, err := activation.Listeners()
 	if err != nil {
 		return nil, fmt.Errorf("get activated sockets: %w", err)
@@ -309,6 +308,7 @@ func (s *Server) listen(ctx context.Context) (net.Listener, error) {
 		return listeners[0], nil
 	}
 
+	address := s.cfg.Address
 	if err := os.MkdirAll(filepath.Dir(address), 0o700); err != nil {
 		return nil, fmt.Errorf("create socket dir: %w", err)
 	}

@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-//go:generate mockgen -destination mocks/gc_mock.go -source gc.go -package mocks
-
 // Package cache garbage collects the blob cache shared by nydus daemons, by
 // TTL and disk watermarks like Dragonfly's dfdaemon, refer to
 // https://github.com/dragonflyoss/client/blob/main/dragonfly-client/src/gc/mod.rs.
@@ -39,17 +37,14 @@ const (
 	// busyRetryInterval is when a round skipped by a starting daemon retries.
 	busyRetryInterval = 5 * time.Second
 
-	// reasonOrphan evicts blobs no bootstrap references.
-	reasonOrphan = "orphan"
+	// evictBatchSize is how many blobs a round unlinks under the lock at
+	// once, so a starting daemon waits for one batch at most, never for a
+	// whole round.
+	evictBatchSize = 16
 
-	// reasonTTL evicts blobs unused for longer than the TTL.
-	reasonTTL = "ttl"
-
-	// reasonWatermark evicts least recently used blobs over the high watermark.
-	reasonWatermark = "watermark"
-
-	// tmpMetaPrefix prefixes the temporary blob metas nydus writes.
-	tmpMetaPrefix = ".blob-meta-"
+	// recheckTimeout bounds asking for the running blobs under the lock, so a
+	// starting daemon never waits for a hung answer either.
+	recheckTimeout = 5 * time.Second
 )
 
 // errBusy means a daemon is starting and the round must retry.
@@ -106,15 +101,16 @@ type gc struct {
 	// now returns the current time.
 	now func() time.Time
 
-	// statfs returns the usage of the cache's filesystem.
-	statfs func(dir string) (diskUsage, error)
+	// statfs is statfs(2).
+	statfs func(path string, stat *unix.Statfs_t) error
 
 	// mu is held for reading by starting daemons; a round takes it for
-	// writing only to recheck and unlink, or is skipped.
+	// writing only to recheck and unlink a batch, or is skipped.
 	mu sync.RWMutex
 }
 
-// New cache GC interface.
+// New returns the GC of the blob cache of cfg. running and committed tell
+// the blobs that daemons and committed bootstraps reference.
 func New(cfg *config.Config, s store.Store, running, committed BlobsFunc) GC {
 	return &gc{
 		cfg:       cfg.GC,
@@ -123,7 +119,7 @@ func New(cfg *config.Config, s store.Store, running, committed BlobsFunc) GC {
 		running:   running,
 		committed: committed,
 		now:       time.Now,
-		statfs:    statfs,
+		statfs:    unix.Statfs,
 	}
 }
 
@@ -147,9 +143,9 @@ func (g *gc) Run(ctx context.Context) {
 		// Bound a round by the interval, as dragonfly's GC bounds a task.
 		next := time.Duration(g.cfg.Interval)
 		roundCtx, cancel := context.WithTimeout(ctx, next)
-		if err := g.RunGC(roundCtx); errors.Is(err, errBusy) {
+		if err := g.collect(roundCtx); errors.Is(err, errBusy) {
 			next = busyRetryInterval
-		} else if err != nil {
+		} else if err != nil && ctx.Err() == nil {
 			log.G(ctx).WithError(err).Error("cache gc")
 		}
 		cancel()
@@ -158,47 +154,66 @@ func (g *gc) Run(ctx context.Context) {
 	}
 }
 
-// RunGC runs one round: pick candidates without the lock, then recheck them
-// against the running daemons and unlink them under it.
-func (g *gc) RunGC(ctx context.Context) error {
+// collect runs one round: pick candidates without the lock, then recheck them
+// against the running daemons and unlink them under it, a batch at a time.
+func (g *gc) collect(ctx context.Context) error {
 	evictions, err := g.candidates(ctx)
 	if err != nil {
 		return err
 	}
 
-	if len(evictions) == 0 {
-		return nil
+	var evictErr error
+	evicted := make([]string, 0, len(evictions))
+	for batch := range slices.Chunk(evictions, evictBatchSize) {
+		ids, err := g.evictBatch(ctx, batch)
+		if err != nil {
+			evictErr = err
+			break
+		}
+
+		evicted = append(evicted, ids...)
+	}
+
+	// Forget the evicted blobs in one transaction, as containerd's metadata
+	// GC removes what it collects in one update.
+	if len(evicted) > 0 {
+		if err := g.store.DeleteBlobs(evicted); err != nil {
+			log.G(ctx).WithError(err).Warn("forget evicted blobs")
+		}
+	}
+
+	return evictErr
+}
+
+// evictBatch rechecks a batch of candidates against the running daemons and
+// unlinks them under the lock, and returns the blobs it evicted. It fails
+// with errBusy while a daemon starts and once ctx is done.
+func (g *gc) evictBatch(ctx context.Context, batch []eviction) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	if !g.mu.TryLock() {
-		return errBusy
+		return nil, errBusy
 	}
 	defer g.mu.Unlock()
 
 	// A daemon may have started since the candidates were picked.
-	running, err := g.running(ctx)
+	recheckCtx, cancel := context.WithTimeout(ctx, recheckTimeout)
+	running, err := g.running(recheckCtx)
+	cancel()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	var evicted []string
-	for _, e := range evictions {
+	evicted := make([]string, 0, len(batch))
+	for _, e := range batch {
 		if _, ok := running[e.blob.id]; !ok && g.evict(ctx, e.blob, e.reason) {
 			evicted = append(evicted, e.blob.id)
 		}
 	}
 
-	if len(evicted) == 0 {
-		return nil
-	}
-
-	// Forget the evicted blobs in one transaction, as containerd's metadata
-	// GC removes what it collects in one update.
-	if err := g.store.DeleteBlobs(evicted); err != nil {
-		log.G(ctx).WithError(err).Warn("forget evicted blobs")
-	}
-
-	return nil
+	return evicted, nil
 }
 
 // candidates returns the blobs to evict: orphans, blobs past their TTL, and
@@ -232,17 +247,18 @@ func (g *gc) candidates(ctx context.Context) ([]eviction, error) {
 			continue
 		}
 
-		switch _, ok := committed[b.id]; {
-		case !ok:
-			evictions = append(evictions, eviction{blob: b, reason: reasonOrphan})
+		_, referenced := committed[b.id]
+		switch {
+		case !referenced:
+			evictions = append(evictions, eviction{blob: b, reason: metrics.ReasonOrphan})
 		case now.Sub(b.accessTime) > time.Duration(g.cfg.Policy.BlobTTL):
-			evictions = append(evictions, eviction{blob: b, reason: reasonTTL})
+			evictions = append(evictions, eviction{blob: b, reason: metrics.ReasonTTL})
 		default:
 			lru = append(lru, b)
 		}
 	}
 
-	watermark, err := g.overWatermark(ctx, cached, evictions, lru)
+	watermark, err := g.watermarkCandidates(ctx, cached, evictions, lru)
 	if err != nil {
 		return nil, err
 	}
@@ -250,13 +266,13 @@ func (g *gc) candidates(ctx context.Context) ([]eviction, error) {
 	return append(evictions, watermark...), nil
 }
 
-// overWatermark returns the least recently used blobs to evict once usage
-// reaches the high watermark, down to the low watermark. The blobs already
-// picked count as freed. Without disk_threshold, a disk others fill can
-// evict every unused blob each round; disk_threshold bounds the cache by its
-// own bytes instead.
-func (g *gc) overWatermark(ctx context.Context, cached uint64, picked []eviction, lru []*blob) ([]eviction, error) {
-	usage, err := g.diskUsage(cached)
+// watermarkCandidates returns the least recently used blobs to evict once
+// usage reaches the high watermark, down to the low watermark. The blobs
+// already picked count as freed. Without disk_threshold, a disk others fill
+// can evict every unused blob each round; disk_threshold bounds the cache by
+// its own bytes instead.
+func (g *gc) watermarkCandidates(ctx context.Context, cached uint64, picked []eviction, lru []*blob) ([]eviction, error) {
+	usage, err := g.usage(cached)
 	if err != nil {
 		return nil, err
 	}
@@ -281,7 +297,12 @@ func (g *gc) overWatermark(ctx context.Context, cached uint64, picked []eviction
 			break
 		}
 
-		evictions = append(evictions, eviction{blob: b, reason: reasonWatermark})
+		// A blob whose files are all linked elsewhere frees nothing.
+		if b.size == 0 {
+			continue
+		}
+
+		evictions = append(evictions, eviction{blob: b, reason: metrics.ReasonWatermark})
 		need -= min(need, b.size)
 	}
 
@@ -316,15 +337,22 @@ func (g *gc) evict(ctx context.Context, b *blob, reason string) bool {
 	return true
 }
 
-// diskUsage returns the usage the watermarks apply to: with disk_threshold,
-// the cache's own bytes against it, a logical quota as dragonfly-client's
-// content_linux.rs computes; without, the cache filesystem's.
-func (g *gc) diskUsage(cached uint64) (diskUsage, error) {
+// usage returns the usage the watermarks apply to. With disk_threshold, it
+// is the cache's own bytes against the threshold, a logical quota as
+// dragonfly-client's content_linux.rs computes. Without, it is the usage of
+// the cache's filesystem.
+func (g *gc) usage(cached uint64) (diskUsage, error) {
 	if g.cfg.Policy.DiskThreshold > 0 {
 		return diskUsage{total: uint64(g.cfg.Policy.DiskThreshold), used: cached}, nil
 	}
 
-	return g.statfs(g.dir)
+	var stat unix.Statfs_t
+	if err := g.statfs(g.dir, &stat); err != nil {
+		return diskUsage{}, fmt.Errorf("statfs %s: %w", g.dir, err)
+	}
+
+	total := stat.Blocks * uint64(stat.Bsize)
+	return diskUsage{total: total, used: total - stat.Bavail*uint64(stat.Bsize)}, nil
 }
 
 // scan groups the cache files by blob and removes stale temporary files.
@@ -348,17 +376,12 @@ func (g *gc) scan(ctx context.Context) ([]*blob, error) {
 			continue
 		}
 
-		if strings.HasPrefix(entry.Name(), tmpMetaPrefix) {
-			if now.Sub(info.ModTime()) > recentWindow {
-				if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					log.G(ctx).WithError(err).WithField("path", path).Warn("remove stale temporary file")
-				}
-			}
-
+		if strings.HasPrefix(entry.Name(), TempMetaPrefix) {
+			g.removeStale(ctx, path, now.Sub(info.ModTime()))
 			continue
 		}
 
-		id, ok := blobID(entry.Name())
+		id, ok := cacheFile(entry.Name()).blobID()
 		if !ok {
 			continue
 		}
@@ -379,11 +402,6 @@ func (g *gc) scan(ctx context.Context) ([]*blob, error) {
 			b.accessTime = t
 		}
 
-		// A clock stepped backwards must not make a blob look unused for years.
-		if b.accessTime.After(now) {
-			b.accessTime = now
-		}
-
 		result = append(result, b)
 	}
 
@@ -394,13 +412,14 @@ func (g *gc) scan(ctx context.Context) ([]*blob, error) {
 	return result, nil
 }
 
-// statfs returns the size and usage of the filesystem holding dir.
-func statfs(dir string) (diskUsage, error) {
-	var stat unix.Statfs_t
-	if err := unix.Statfs(dir, &stat); err != nil {
-		return diskUsage{}, fmt.Errorf("statfs %s: %w", dir, err)
+// removeStale removes a temporary file of the given age once no write can
+// still be using it.
+func (g *gc) removeStale(ctx context.Context, path string, age time.Duration) {
+	if age <= recentWindow {
+		return
 	}
 
-	total := stat.Blocks * uint64(stat.Bsize)
-	return diskUsage{total: total, used: total - stat.Bavail*uint64(stat.Bsize)}, nil
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.G(ctx).WithError(err).WithField("path", path).Warn("remove stale temporary file")
+	}
 }

@@ -12,10 +12,13 @@ import (
 
 	"github.com/containerd/containerd/api/types/runc/options"
 	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/containerd/containerd/v2/plugins"
 	"github.com/containerd/errdefs"
+	"github.com/dragonflyoss/nydus/tests/e2e/util/registry"
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -37,16 +40,33 @@ func (n *node) start(t *testing.T, img containerd.Image) *container {
 	return c
 }
 
-func (n *node) tryStart(img containerd.Image) (*container, error) {
+func (n *node) startInUserNamespace(t *testing.T, img containerd.Image, root specs.LinuxIDMapping) *container {
+	t.Helper()
+	c, err := n.tryStart(img, root)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	return c
+}
+
+func (n *node) tryStart(img containerd.Image, userNamespace ...specs.LinuxIDMapping) (*container, error) {
 	ctx, cancel := context.WithTimeout(n.ctx, startTimeout)
 	defer cancel()
+	var snapshotOpts []snapshots.Opt
+	specOpts := []oci.SpecOpts{oci.WithImageConfig(img), oci.WithProcessArgs(busybox, "sleep", "3600")}
+	for _, root := range userNamespace {
+		snapshotOpts = append(snapshotOpts, containerd.WithRemapperLabels(root.ContainerID, root.HostID, root.ContainerID, root.HostID, root.Size))
+		specOpts = append(specOpts, oci.WithUserNamespace(userNamespace, userNamespace))
+	}
+
 	id := fmt.Sprintf("c%08x", rand.Uint32())
 	ctr, err := n.client.NewContainer(ctx, id,
 		containerd.WithImage(img),
 		containerd.WithSnapshotter(plugin),
-		containerd.WithNewSnapshot(id, img),
-		containerd.WithRuntime(plugins.RuntimeRuncV2, &options.Options{BinaryName: n.runc}),
-		containerd.WithNewSpec(oci.WithImageConfig(img), oci.WithProcessArgs(busybox, "sleep", "3600")),
+		containerd.WithNewSnapshot(id, img, snapshotOpts...),
+		containerd.WithRuntime(plugins.RuntimeRuncV2, &options.Options{BinaryName: n.runcBin}),
+		containerd.WithNewSpec(specOpts...),
 	)
 	if err != nil {
 		return nil, err
@@ -58,6 +78,25 @@ func (n *node) tryStart(img containerd.Image) (*container, error) {
 	}
 
 	return c, c.task.Start(ctx)
+}
+
+func TestUserNamespace(t *testing.T) {
+	t.Parallel()
+	n := newNode(t)
+	img := newImage(t, registry.Start(t), "snapshotter/user-namespace")
+	pulled := n.pull(t, img.nydus)
+	c := n.startInUserNamespace(t, pulled, specs.LinuxIDMapping{ContainerID: 0, HostID: 100000, Size: 100000})
+
+	assertFiles(t, c, img)
+	n.assertRunning(t, n.unit(t, pulled))
+	mapping, err := c.exec(busybox, "cat", "/proc/self/uid_map")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"0", "100000", "100000"}, strings.Fields(mapping))
+	owners, err := c.exec(busybox, "stat", "-c", "%u:%g", "/", busybox, "/id")
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"0:0", "0:0", "0:0"}, strings.Fields(owners))
+	_, err = c.exec(busybox, "touch", "/written")
+	assert.NoError(t, err)
 }
 
 func (n *node) removeContainers(t *testing.T) {
@@ -101,7 +140,12 @@ func (c *container) sha256sum(t *testing.T, paths ...string) map[string]string {
 		t.FailNow()
 	}
 
-	sums := make(map[string]string, len(paths))
+	return sha256sums(t, out)
+}
+
+func sha256sums(t *testing.T, out string) map[string]string {
+	t.Helper()
+	sums := map[string]string{}
 	for line := range strings.Lines(strings.TrimSpace(out)) {
 		sum, path, ok := strings.Cut(strings.TrimSpace(line), "  ")
 		if !assert.True(t, ok) {

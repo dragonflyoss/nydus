@@ -4,6 +4,7 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::upgrade::Startup;
 use nydus::fuse::ErofsFs;
 use nydus::signal;
+use nydus::systemd::Notifier;
 use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, default_runtime_dir,
@@ -307,7 +308,18 @@ impl FuseCommand {
             ondemand_recorder,
             backend,
         )?;
+
+        // Start the watchdog keep-alive before a session exists: a daemon
+        // that cannot keep it up fails here, with no mount for the service
+        // manager's kill to take down.
+        let notifier = Notifier::from_env();
+        let _watchdog = notifier.spawn_watchdog()?;
         let session = startup.start(fs, &config, shutdown)?;
+
+        // The mount is served and a configured API endpoint is published, or
+        // its publication failed after a hot upgrade: report readiness to the
+        // service manager.
+        notifier.ready();
 
         let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
@@ -335,7 +347,7 @@ impl FuseCommand {
             }
         }
 
-        let result = session.serve();
+        let result = session.serve(&notifier);
 
         // The filesystem is unmounted: wind down the detached prefetch thread.
         if let Some(stop) = prefetch_stop {

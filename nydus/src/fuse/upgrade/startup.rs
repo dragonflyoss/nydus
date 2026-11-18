@@ -17,6 +17,7 @@ use super::transfer::SessionTransfer;
 use crate::continuity::startup::{self, Frontend, Open};
 use crate::fuse::mount::{is_fuse_fstype, mount_entry_of};
 use crate::fuse::{ErofsFs, FuseService};
+use crate::systemd::Notifier;
 
 /// The maximum number of final-component symlinks explicitly expanded during resolution.
 const MAX_SYMLINK_HOPS: usize = 40;
@@ -205,10 +206,11 @@ pub struct RunningSession {
 }
 
 impl RunningSession {
-    pub fn serve(self) -> Result<()> {
+    /// Serves until teardown finishes, reporting its start through `notifier`.
+    pub fn serve(self, notifier: &Notifier) -> Result<()> {
         self.session.serve(|session| {
             session
-                .serve(&self.shutdown)
+                .serve(&self.shutdown, notifier)
                 .context("failed to finish FUSE session")
         })
     }

@@ -17,47 +17,49 @@ import (
 var (
 	mockDockerConfig = `{"auths":{"https://index.docker.io/v1/":{"auth":"dXNlcjpwYXNz"}}}`
 
-	mockDockerHubTarget = "docker.io/library/ubuntu"
+	mockDockerHubTarget registryKey = "docker.io/library/ubuntu"
 )
 
-func TestDockerConfig_newDockerConfig(t *testing.T) {
+func TestNewDockerConfigProvider(t *testing.T) {
 	tests := []struct {
 		name   string
 		path   string
-		expect func(t *testing.T, d *dockerConfig)
+		expect func(t *testing.T, d *dockerConfigProvider)
 	}{
 		{
 			name: "kubelet search paths",
-			expect: func(t *testing.T, d *dockerConfig) {
-				assert.Equal(t, []string{"/var/lib/kubelet/config.json", "/root/.docker/config.json", "/.docker/config.json"}, d.paths)
+			expect: func(t *testing.T, d *dockerConfigProvider) {
+				assert := assert.New(t)
+				assert.Equal([]string{"/var/lib/kubelet/config.json", "/root/.docker/config.json", "/.docker/config.json"}, d.paths)
 			},
 		},
 		{
 			name: "configured path",
-			path: "/etc/nydus-v3/config.json",
-			expect: func(t *testing.T, d *dockerConfig) {
-				assert.Equal(t, []string{"/etc/nydus-v3/config.json"}, d.paths)
+			path: "/etc/nydus-snapshotter/config.json",
+			expect: func(t *testing.T, d *dockerConfigProvider) {
+				assert := assert.New(t)
+				assert.Equal([]string{"/etc/nydus-snapshotter/config.json"}, d.paths)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newDockerConfig(tc.path))
+			tc.expect(t, newDockerConfigProvider(tc.path))
 		})
 	}
 }
 
-func TestDockerConfig_lookup(t *testing.T) {
+func TestDockerConfigProvider_lookup(t *testing.T) {
 	tests := []struct {
 		name   string
 		files  map[string]string
-		expect func(t *testing.T, d *dockerConfig, dir string)
+		expect func(t *testing.T, d *dockerConfigProvider, dir string)
 	}{
 		{
 			name:  "read auths",
 			files: map[string]string{"second.json": mockDockerConfig},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
 				assert := assert.New(t)
 				creds := d.lookup(t.Context(), mockDockerHubTarget)
 				assert.Len(creds, 1)
@@ -71,7 +73,7 @@ func TestDockerConfig_lookup(t *testing.T) {
 				"first.json":  `{"auths":{"docker.io":{"username":"first","password":"pass"}}}`,
 				"second.json": mockDockerConfig,
 			},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
 				assert := assert.New(t)
 				creds := d.lookup(t.Context(), mockDockerHubTarget)
 				assert.Len(creds, 1)
@@ -81,15 +83,17 @@ func TestDockerConfig_lookup(t *testing.T) {
 		{
 			name:  "no file",
 			files: map[string]string{},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
-				assert.Empty(t, d.lookup(t.Context(), mockDockerHubTarget))
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
+				assert := assert.New(t)
+				assert.Empty(d.lookup(t.Context(), mockDockerHubTarget))
 			},
 		},
 		{
 			name:  "malformed file",
 			files: map[string]string{"first.json": `{"auths":`},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
-				assert.Empty(t, d.lookup(t.Context(), mockDockerHubTarget))
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
+				assert := assert.New(t)
+				assert.Empty(d.lookup(t.Context(), mockDockerHubTarget))
 			},
 		},
 		{
@@ -98,7 +102,7 @@ func TestDockerConfig_lookup(t *testing.T) {
 				"first.json":  `{"auths":`,
 				"second.json": mockDockerConfig,
 			},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
 				assert := assert.New(t)
 				creds := d.lookup(t.Context(), mockDockerHubTarget)
 				assert.Len(creds, 1)
@@ -108,19 +112,46 @@ func TestDockerConfig_lookup(t *testing.T) {
 		{
 			name:  "credential helpers only",
 			files: map[string]string{"first.json": `{"credsStore":"desktop","credHelpers":{"gcr.io":"gcloud"}}`},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
-				assert.Empty(t, d.lookup(t.Context(), mockDockerHubTarget))
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
+				assert := assert.New(t)
+				assert.Empty(d.lookup(t.Context(), mockDockerHubTarget))
+			},
+		},
+		{
+			name: "keep the credentials read last while the file does not parse",
+			files: map[string]string{
+				"first.json":  mockDockerConfig,
+				"second.json": `{"auths":{"registry.example.com":{"username":"user","password":"pass"}}}`,
+			},
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
+				assert := assert.New(t)
+				assert.Len(d.lookup(t.Context(), mockDockerHubTarget), 1)
+				assert.NoError(os.WriteFile(filepath.Join(dir, "first.json"), []byte(`{"auths":`), 0o600))
+				creds := d.lookup(t.Context(), mockDockerHubTarget)
+				assert.Len(creds, 1)
+				assert.Empty(d.lookup(t.Context(), "registry.example.com/app"))
+				assert.NoError(os.WriteFile(filepath.Join(dir, "first.json"), []byte(`{"auths":{}}`), 0o600))
+				assert.Empty(d.lookup(t.Context(), mockDockerHubTarget))
 			},
 		},
 		{
 			name:  "read again after a change",
 			files: map[string]string{"first.json": mockDockerConfig},
-			expect: func(t *testing.T, d *dockerConfig, dir string) {
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
 				assert := assert.New(t)
 				assert.Len(d.lookup(t.Context(), mockDockerHubTarget), 1)
 				assert.NoError(os.WriteFile(filepath.Join(dir, "first.json"), []byte(`{"auths":{"registry.example.com":{"username":"user","password":"pass"}}}`), 0o600))
 				assert.Empty(d.lookup(t.Context(), mockDockerHubTarget))
 				assert.Len(d.lookup(t.Context(), "registry.example.com/app"), 1)
+			},
+		},
+		{
+			name:  "skip a config that is a directory",
+			files: map[string]string{"second.json": mockDockerConfig},
+			expect: func(t *testing.T, d *dockerConfigProvider, dir string) {
+				assert := assert.New(t)
+				assert.NoError(os.Mkdir(filepath.Join(dir, "first.json"), 0o700))
+				assert.Len(d.lookup(t.Context(), mockDockerHubTarget), 1)
 			},
 		},
 	}
@@ -132,7 +163,7 @@ func TestDockerConfig_lookup(t *testing.T) {
 				assert.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
 			}
 
-			d := &dockerConfig{paths: []string{filepath.Join(dir, "first.json"), filepath.Join(dir, "second.json")}}
+			d := &dockerConfigProvider{paths: []string{filepath.Join(dir, "first.json"), filepath.Join(dir, "second.json")}}
 			tc.expect(t, d, dir)
 		})
 	}

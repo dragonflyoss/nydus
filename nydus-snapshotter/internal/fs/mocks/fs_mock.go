@@ -13,9 +13,11 @@ import (
 	context "context"
 	reflect "reflect"
 
+	io_prometheus_client "github.com/prometheus/client_model/go"
+	gomock "go.uber.org/mock/gomock"
+
 	config "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	fs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
-	gomock "go.uber.org/mock/gomock"
 )
 
 // MockFileSystem is a mock of FileSystem interface.
@@ -40,6 +42,21 @@ func NewMockFileSystem(ctrl *gomock.Controller) *MockFileSystem {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockFileSystem) EXPECT() *MockFileSystemMockRecorder {
 	return m.recorder
+}
+
+// Gather mocks base method.
+func (m *MockFileSystem) Gather() ([]*io_prometheus_client.MetricFamily, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Gather")
+	ret0, _ := ret[0].([]*io_prometheus_client.MetricFamily)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// Gather indicates an expected call of Gather.
+func (mr *MockFileSystemMockRecorder) Gather() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Gather", reflect.TypeOf((*MockFileSystem)(nil).Gather))
 }
 
 // Mount mocks base method.
@@ -83,6 +100,18 @@ func (m *MockFileSystem) Reload(ctx context.Context, cfg *config.Config) error {
 func (mr *MockFileSystemMockRecorder) Reload(ctx, cfg any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reload", reflect.TypeOf((*MockFileSystem)(nil).Reload), ctx, cfg)
+}
+
+// Run mocks base method.
+func (m *MockFileSystem) Run(ctx context.Context) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Run", ctx)
+}
+
+// Run indicates an expected call of Run.
+func (mr *MockFileSystemMockRecorder) Run(ctx any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Run", reflect.TypeOf((*MockFileSystem)(nil).Run), ctx)
 }
 
 // RunningBlobs mocks base method.
