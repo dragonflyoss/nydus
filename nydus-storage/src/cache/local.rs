@@ -631,9 +631,10 @@ impl LocalBlobCache {
     }
 
     /// Run `job` over `batches` in blob order, sequentially or through a
-    /// pool of `workers` threads each owning its fetch buffers; the deadline
-    /// is checked before every batch and the first error stops every worker
-    /// after its current batch.
+    /// pool of `workers` threads; the deadline is checked before every batch
+    /// and the first error stops every worker after its current batch. Every
+    /// batch takes fresh fetch buffers, so a worker holds the chunk groups of
+    /// its batch rather than the largest it has seen.
     fn run_batches(
         &self,
         batches: &[Range<usize>],
@@ -642,10 +643,9 @@ impl LocalBlobCache {
         job: &(dyn Fn(&Range<usize>, &mut ChunkGroupBuffers) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         if workers <= 1 || batches.len() == 1 {
-            let mut buffers = ChunkGroupBuffers::default();
             for batch in batches {
                 super::check_prefetch_deadline(deadline)?;
-                job(batch, &mut buffers)?;
+                job(batch, &mut ChunkGroupBuffers::default())?;
             }
             return Ok(());
         }
@@ -653,23 +653,20 @@ impl LocalBlobCache {
         let failure: Mutex<Option<io::Error>> = Mutex::new(None);
         thread::scope(|scope| {
             for _ in 0..workers.min(batches.len()) {
-                scope.spawn(|| {
-                    let mut buffers = ChunkGroupBuffers::default();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= batches.len() {
-                            break;
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= batches.len() {
+                        break;
+                    }
+                    let result = super::check_prefetch_deadline(deadline)
+                        .and_then(|()| job(&batches[index], &mut ChunkGroupBuffers::default()));
+                    if let Err(err) = result {
+                        let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                        if slot.is_none() {
+                            *slot = Some(err);
                         }
-                        let result = super::check_prefetch_deadline(deadline)
-                            .and_then(|()| job(&batches[index], &mut buffers));
-                        if let Err(err) = result {
-                            let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
-                            if slot.is_none() {
-                                *slot = Some(err);
-                            }
-                            next.store(batches.len(), Ordering::Relaxed);
-                            break;
-                        }
+                        next.store(batches.len(), Ordering::Relaxed);
+                        break;
                     }
                 });
             }
@@ -1218,8 +1215,9 @@ fn load_or_fetch_blob_metadata(
     backend: &Arc<dyn Backend>,
     kind: ReadKind,
 ) -> io::Result<BlobMetadata> {
+    // The sidecar is only ever replaced by rename, so it is safe to map.
     if blob_metadata_path.is_file() {
-        match BlobMetadata::from_path(blob_metadata_path) {
+        match BlobMetadata::from_mmap(blob_metadata_path) {
             Ok(blob_metadata) => return Ok(blob_metadata),
             Err(err) => warn!(
                 "cached blob meta {} is invalid, fetching it again: {err}",
@@ -1244,7 +1242,7 @@ fn load_or_fetch_blob_metadata(
     }
     tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
 
-    BlobMetadata::from_path(blob_metadata_path).map_err(io::Error::other)
+    BlobMetadata::from_mmap(blob_metadata_path).map_err(io::Error::other)
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up

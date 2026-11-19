@@ -2501,12 +2501,14 @@ if the kernel cannot provide huge pages. The mapping lifetime is unchanged.
 Smaller buffers use ordinary vectors. Zstandard decodes directly into the
 declared-size output slice, and an unexpected decoded length remains an error.
 This changes temporary memory management, not the persistent data cache or
-fetch concurrency. Prefetch workers continue to reuse their fetch buffers.
+fetch concurrency. Prefetch workers take fresh buffers for every batch, so a
+worker holds the chunk groups of its batch rather than the largest it has seen.
 
 Further measures keep the footprint of a mount service small. The
 standalone bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather
 than pre-faulted, so the whole file is pulled into the page cache but only the
-metadata actually touched counts toward RSS. The
+metadata actually touched counts toward RSS. The blob meta sidecars of the
+cache directory are mapped as well rather than read into memory. The
 asynchronous log writers queue at most 1024 lines each instead of the crate
 default of 128k, which alone pinned about 4 MiB per appender. The `nydus`
 binary allocates with mimalloc, and the long-running services set its options
