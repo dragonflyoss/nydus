@@ -170,11 +170,8 @@ impl NbdCommand {
         let mountpoint = self.mountpoint.clone();
         let device = self.device.clone();
 
-        // Whether the mount at the mountpoint is the one this daemon made and
-        // has not unmounted yet. Unmounting a path removes whatever is mounted
-        // on top of it, so the daemon unmounts only while this holds: before
-        // its mount, or after its own unmount, the path may carry a mount that
-        // was there first.
+        // Whether the mount at the mountpoint is the one this daemon made,
+        // the only one it unmounts.
         let owns_mount = Arc::new(AtomicBool::new(false));
 
         // Signal thread: the first termination signal performs the ordered

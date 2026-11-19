@@ -39,7 +39,6 @@ func mockDockerConfig(t *testing.T, config string) {
 	t.Cleanup(func() { dockerconfig.SetDir(previous) })
 }
 
-// mockStallTimeout shortens the stall timeout until t completes.
 func mockStallTimeout(t *testing.T, timeout time.Duration) {
 	t.Helper()
 	previous := stallTimeout
@@ -66,7 +65,7 @@ func TestStallTransport_RoundTrip(t *testing.T) {
 			expect: func(t *testing.T, resp *http.Response, err error) {
 				assert := assert.New(t)
 				assert.Nil(resp)
-				assert.ErrorIs(err, stallError{timeout})
+				assert.ErrorIs(err, stallError{timeout: timeout})
 				assert.NotErrorIs(err, context.Canceled)
 				assert.True(isTransientPushError(err))
 			},
@@ -84,7 +83,7 @@ func TestStallTransport_RoundTrip(t *testing.T) {
 				assert.NoError(err)
 				data, err := io.ReadAll(resp.Body)
 				assert.Equal("partial", string(data))
-				assert.ErrorIs(err, stallError{timeout})
+				assert.ErrorIs(err, stallError{timeout: timeout})
 				assert.True(isTransientPushError(err))
 			},
 		},
@@ -127,7 +126,7 @@ func TestStallTransport_RoundTrip(t *testing.T) {
 			expect: func(t *testing.T, resp *http.Response, err error) {
 				assert := assert.New(t)
 				assert.Nil(resp)
-				assert.ErrorIs(err, stallError{timeout})
+				assert.ErrorIs(err, stallError{timeout: timeout})
 			},
 		},
 		{
@@ -177,7 +176,7 @@ func TestNewResolver(t *testing.T) {
 			name: "silent token server",
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorIs(err, stallError{stallTimeout})
+				assert.ErrorIs(err, stallError{timeout: stallTimeout})
 			},
 		},
 	}
@@ -186,7 +185,6 @@ func TestNewResolver(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mockStallTimeout(t, 100*time.Millisecond)
 			tokens := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-				// The server only notices the client leaving once the body is read.
 				_, _ = io.Copy(io.Discard, r.Body)
 				<-r.Context().Done()
 			}))
@@ -272,7 +270,7 @@ func TestTransientStatusTransport_RoundTrip(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			resp, err := transientStatusTransport{http.DefaultTransport}.RoundTrip(req)
+			resp, err := transientStatusTransport{RoundTripper: http.DefaultTransport}.RoundTrip(req)
 			if resp != nil {
 				defer func() { _ = resp.Body.Close() }()
 			}

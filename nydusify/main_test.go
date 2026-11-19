@@ -73,10 +73,6 @@ func mockBlockedFile(t *testing.T) string {
 	return path
 }
 
-// mockStallingRegistry starts a registry that answers 403 for the first blob
-// it is asked about and leaves the requests for every other blob unanswered.
-// It returns its host:port and a channel that reports, for each request left
-// unanswered, whether the client gave it up.
 func mockStallingRegistry(t *testing.T) (string, <-chan bool) {
 	var (
 		mu       sync.Mutex
@@ -110,10 +106,6 @@ func mockStallingRegistry(t *testing.T) (string, <-chan bool) {
 	return strings.TrimPrefix(server.URL, "http://"), abandoned
 }
 
-// mockSilentRegistry starts a registry that leaves every request unanswered,
-// creating the file at reached once the first one arrives. It returns its
-// host:port and a channel that reports, for each request, whether the client
-// gave it up.
 func mockSilentRegistry(t *testing.T, reached string) (string, <-chan bool) {
 	abandoned := make(chan bool, 16)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,8 +127,6 @@ func mockSilentRegistry(t *testing.T, reached string) (string, <-chan bool) {
 	return strings.TrimPrefix(server.URL, "http://"), abandoned
 }
 
-// mockBuilder writes a builder that turns each layer into a blob of nothing
-// but a valid footer, and runs the shell commands of merge as `nydus merge`.
 func mockBuilder(t *testing.T, merge string) string {
 	script := `#!/bin/sh
 command=$1
@@ -802,8 +792,6 @@ func TestRunConvert(t *testing.T) {
 				assert.ErrorContains(err, "push local artifact blob")
 				assert.ErrorContains(err, "403 Forbidden")
 
-				// An upload that reached the registry was given up, not left
-				// to run out; one cancelled before its request leaves no report.
 				select {
 				case gaveUp := <-abandoned:
 					assert.True(gaveUp)
@@ -826,8 +814,6 @@ func TestRunConvert(t *testing.T) {
 				assert.ErrorContains(err, "convert: ")
 				assert.ErrorContains(err, "nydus merge")
 
-				// The upload that reached the registry was given up, not left
-				// to run out.
 				select {
 				case gaveUp := <-abandoned:
 					assert.True(gaveUp)
@@ -1201,7 +1187,7 @@ func TestTotalLayerSize(t *testing.T) {
 func TestRunCheck(t *testing.T) {
 	blocked := mockBlockedFile(t)
 
-	var x86 *registrytest.Registry
+	var registry *registrytest.Registry
 
 	tests := []struct {
 		name   string
@@ -1221,7 +1207,7 @@ func TestRunCheck(t *testing.T) {
 		{
 			name: "pull only the requested platform",
 			args: func(t *testing.T, reg *registrytest.Registry, dir string) []string {
-				x86 = reg
+				registry = reg
 				mockOCIImage(t, reg, "x86", "v1", "386", "amd64")
 
 				return []string{"--target", reg.Ref("x86", "v1"), "--platform", "linux/amd64", "--work-dir", dir}
@@ -1235,10 +1221,10 @@ func TestRunCheck(t *testing.T) {
 				assert.Contains(string(data), `"architecture":"amd64"`)
 
 				var index ocispec.Index
-				x86.LoadJSON(t, "x86", "v1", &index)
+				registry.LoadJSON(t, "x86", "v1", &index)
 				assert.Equal("386", index.Manifests[0].Platform.Architecture)
 
-				for _, req := range x86.Requests() {
+				for _, req := range registry.Requests() {
 					assert.NotContains(req.URL, index.Manifests[0].Digest.String())
 				}
 			},

@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use nydus_config::Config;
 use nydus_core::{Extent, NydusCore, ResolveMode};
@@ -24,10 +25,11 @@ pub(crate) const UFFDIO_WAKE: IoctlRequest = 0x8010aa02u32 as IoctlRequest;
 pub(crate) const UFFDIO_COPY: IoctlRequest = 0xc028aa03u32 as IoctlRequest;
 pub(crate) const UFFDIO_ZEROPAGE: IoctlRequest = 0xc020aa04u32 as IoctlRequest;
 
-/// The times a fill is tried again while the address space changes under it,
-/// and the wait between two tries.
+/// The times a fill is tried again while the address space changes under it.
 const FILL_BUSY_RETRIES: u32 = 1000;
-const FILL_BUSY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// The wait between two tries of a fill.
+const FILL_BUSY_INTERVAL: Duration = Duration::from_millis(1);
 
 #[repr(C)]
 struct UffdioRange {
@@ -334,17 +336,9 @@ fn uffdio_zeropage(uffd_fd: RawFd, start: u64, len: u64) -> Result<()> {
     .context("failed to zero-fill faulting range (UFFDIO_ZEROPAGE)")
 }
 
-/// Fills the missing pages of `[start, start + len)` through `fill`, which
-/// runs one `UFFDIO_COPY` or `UFFDIO_ZEROPAGE` over the range it is given and
-/// returns the result of the ioctl with the bytes the kernel reports filled.
-///
-/// The kernel stops at the first page that is already there, one of a block
-/// filled earlier and reclaimed in part since: it fails with `EEXIST` when
-/// that is the first page of the request, and with `EAGAIN` and the bytes
-/// filled when it comes later. The page holds what the fill would have put
-/// there, so it is skipped, waking whoever still waits on it, and the fill
-/// goes on behind it. `EAGAIN` without progress means the address space is
-/// changing under the fill, which is tried again for a while.
+/// Fills the missing pages of `[start, start + len)` through `fill`, one
+/// `UFFDIO_COPY` or `UFFDIO_ZEROPAGE`: a page already there is skipped, an
+/// `EAGAIN` without progress is tried again.
 fn fill_missing_pages(
     uffd_fd: RawFd,
     start: u64,
@@ -401,9 +395,7 @@ mod tests {
     }
 
     impl Region {
-        /// Returns `None` where the kernel or its policy refuses a
-        /// userfaultfd.
-        fn new(pages: usize) -> Option<Self> {
+        fn new(pages: usize) -> Self {
             let open = |flags: libc::c_int| unsafe {
                 libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | flags) as libc::c_int
             };
@@ -411,14 +403,13 @@ mod tests {
             if fd < 0 {
                 fd = open(0);
             }
-            if fd < 0 {
-                return None;
-            }
+            assert!(fd >= 0);
             let uffd = unsafe { OwnedFd::from_raw_fd(fd) };
             let mut api = [0xaau64, 0, 0];
-            if unsafe { libc::ioctl(fd, UFFDIO_API as IoctlRequest, &mut api) } != 0 {
-                return None;
-            }
+            assert_eq!(
+                unsafe { libc::ioctl(fd, UFFDIO_API as IoctlRequest, &mut api) },
+                0
+            );
 
             let len = pages * PAGE;
             let addr = unsafe {
@@ -437,11 +428,11 @@ mod tests {
                 unsafe { libc::ioctl(fd, UFFDIO_REGISTER as IoctlRequest, &mut register) },
                 0
             );
-            Some(Self {
+            Self {
                 uffd,
                 addr: addr.cast(),
                 len,
-            })
+            }
         }
 
         fn page(&self, index: usize) -> u64 {
@@ -470,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires userfaultfd"]
     fn fills_skip_the_pages_that_are_already_there() {
         let mut file = tempfile::tempfile().unwrap();
         let content: Vec<u8> = (0..4u8).flat_map(|page| [page + 1; PAGE]).collect();
@@ -483,12 +475,10 @@ mod tests {
             vec![],
         ];
 
-        for there in test_cases {
-            let Some(copied) = Region::new(4) else {
-                return;
-            };
-            let zeroed = Region::new(4).unwrap();
-            for &index in &there {
+        for filled_pages in test_cases {
+            let copied = Region::new(4);
+            let zeroed = Region::new(4);
+            for &index in &filled_pages {
                 let offset = (index * PAGE) as u64;
                 let uffd = copied.uffd.as_raw_fd();
                 uffdio_copy_from_fd(uffd, copied.page(index), file.as_raw_fd(), offset, 4096)
@@ -507,18 +497,20 @@ mod tests {
             .unwrap();
             uffdio_zeropage(zeroed.uffd.as_raw_fd(), zeroed.page(0), len).unwrap();
 
-            assert_eq!(copied.present(), vec![true; 4], "{there:?}");
-            assert_eq!(zeroed.present(), vec![true; 4], "{there:?}");
-            assert_eq!(copied.bytes(), content, "{there:?}");
-            assert!(zeroed.bytes().iter().all(|byte| *byte == 0), "{there:?}");
+            assert_eq!(copied.present(), vec![true; 4], "{filled_pages:?}");
+            assert_eq!(zeroed.present(), vec![true; 4], "{filled_pages:?}");
+            assert_eq!(copied.bytes(), content, "{filled_pages:?}");
+            assert!(
+                zeroed.bytes().iter().all(|byte| *byte == 0),
+                "{filled_pages:?}"
+            );
         }
     }
 
     #[test]
+    #[ignore = "requires userfaultfd"]
     fn fills_fail_on_a_range_the_userfaultfd_does_not_handle() {
-        let Some(region) = Region::new(1) else {
-            return;
-        };
+        let region = Region::new(1);
         let outside = region.page(0) + (16 * PAGE) as u64;
         assert!(uffdio_zeropage(region.uffd.as_raw_fd(), outside, 4096).is_err());
     }

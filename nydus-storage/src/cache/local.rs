@@ -33,8 +33,7 @@ enum FlightResult {
     Failure {
         kind: io::ErrorKind,
         message: Arc<str>,
-        /// Whether the cache file refused the write, see
-        /// [`CacheWriteFailure::is`].
+        /// Whether the cache file refused the write.
         cache_write: bool,
     },
 }
@@ -134,9 +133,8 @@ pub struct LocalBlobCache {
     chunk_group_locks: ChunkGroupLocks,
     /// The options of the image's caches: fetch size, checksum verification.
     options: CacheOptions,
-    /// Set once a read was served from the backend because the cache file
-    /// refused a write, so that the warning is logged once.
-    cache_write_failed: AtomicBool,
+    /// Whether reads are served uncached, the cache file refusing writes.
+    uncached: AtomicBool,
 }
 
 impl LocalBlobCache {
@@ -214,7 +212,7 @@ impl LocalBlobCache {
             cache_mmap: OnceLock::new(),
             chunk_group_locks,
             options,
-            cache_write_failed: AtomicBool::new(false),
+            uncached: AtomicBool::new(false),
         })
     }
 
@@ -709,9 +707,7 @@ impl LocalBlobCache {
     }
 
     /// Reads `[offset, offset + dst.len())` without writing the cache file:
-    /// the groups already in it from the file, each of the others from the
-    /// backend into memory. This is how a read is served while the cache file
-    /// takes no more data.
+    /// the groups in it from the file, the others from the backend.
     fn read_past_cache(&self, offset: u64, dst: &mut [u8], cache_file: &File) -> io::Result<()> {
         let end = offset + dst.len() as u64;
         // The padding between the chunks of a fetched group reads as zeros.
@@ -879,10 +875,9 @@ impl BlobCache for LocalBlobCache {
             // covering groups are decoded the absolute offset indexes straight
             // into it for a single contiguous read.
             Ok(()) => cache_file.as_ref().read_exact_at(dst, offset),
-            // The cache file takes no more data, a full disk for one. The
-            // read does not need the file: serve it from the backend.
+            // Serve the read from the backend when the cache file refuses the write.
             Err(err) if CacheWriteFailure::is(&err) => {
-                if !self.cache_write_failed.swap(true, Ordering::Relaxed) {
+                if !self.uncached.swap(true, Ordering::Relaxed) {
                     warn!(
                         "serving reads of blob {} from the backend, uncached: {err}",
                         self.blob_index
@@ -1215,8 +1210,7 @@ fn may_hold_data(file: &File, span: &Range<u64>) -> bool {
 }
 
 /// Loads the blob meta kept in the cache directory, fetching it from the
-/// backend when there is none or the kept one does not parse: a file a crash
-/// or the disk left empty or damaged is replaced, not failed on forever.
+/// backend when there is none or the kept one is invalid.
 fn load_or_fetch_blob_metadata(
     blob_id: [u8; SHA256_DIGEST_SIZE],
     cache_dir: &Path,
@@ -2484,9 +2478,7 @@ mod tests {
         assert_eq!(buf, payload[..512]);
     }
 
-    /// A cache file that takes no more data fails the fill but not the read:
-    /// the groups already in the file come from it, the others from the
-    /// backend at every read, and nothing is published as ready.
+    /// A cache file that takes no more data fails the fill but not the read.
     #[test]
     fn reads_are_served_from_the_backend_when_the_cache_file_refuses_writes() {
         let backend_dir = tempdir().unwrap();

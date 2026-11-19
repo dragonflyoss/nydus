@@ -4,6 +4,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::unix::AsyncFd;
 use tokio::net::UnixListener;
@@ -18,7 +19,7 @@ use super::core::{read_uffd_msg, UffdCore, UffdMsg};
 use super::proto::{Connection, FaultPolicy, Request, VmaRegion};
 
 /// The wait after a failed accept before the next one.
-const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 pub struct UffdService {
     core: Arc<UffdCore>,
@@ -96,9 +97,7 @@ impl UffdService {
                     let stream = match accepted {
                         Ok((stream, _)) => stream,
                         Err(err) => {
-                            // Keep the connections being served: a failure such
-                            // as EMFILE says nothing about them. Wait before
-                            // accepting again, it lasts while the peer stays queued.
+                            // Keep serving the live connections and back off.
                             warn!("failed to accept uffd connection: {err}");
                             tokio::select! {
                                 _ = shutdown.changed() => break,
@@ -253,9 +252,8 @@ impl UffdConn {
                 self.send_ranges(None, &ranges).await?;
             }
             Request::Probe => {
-                // Probing opens the caches of the blobs it names, which reads
-                // their blob meta from the backend when the cache directory
-                // lacks it, so it must not run on a runtime thread.
+                // Probing opens blob caches, which may read the backend: run it
+                // off the runtime threads.
                 let core = self.core.clone();
                 let ranges = tokio::task::spawn_blocking(move || core.probe_ranges())
                     .await

@@ -1195,9 +1195,8 @@ Fields:
 - `prefetch.retry_interval` (default `6h`) is the interval before such a
 	prefetch read is sent once more, drawn at random between this and twice
 	this so retry load spreads out instead of stampeding: by default the retry
-	lands 6 to 12 hours later. A read the registry redirected to a signed
-	link finds the link expired by then (a `4xx` other than `408`, `416` or
-	`429`), so the redirect is resolved through the registry once more.
+	lands 6 to 12 hours later. The read starts over, so a redirect to a
+	signed link is resolved through the registry again.
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags

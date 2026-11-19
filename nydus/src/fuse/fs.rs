@@ -141,13 +141,8 @@ impl ErofsFs {
         }
     }
 
-    /// Returns the nid `name` resolves to under the inode `parent_nid`.
-    ///
-    /// "." is the inode itself whatever its type: with FUSE_EXPORT_SUPPORT
-    /// the kernel looks it up on the inode a file handle names, a regular
-    /// file or a symlink included, to get back an inode it evicted. Any other
-    /// name is a dirent, ".." among them, which the kernel looks up to
-    /// reconnect a directory it got from a handle.
+    /// Returns the nid `name` resolves to under the inode `parent_nid`, "."
+    /// being the inode itself whatever its type, see `FUSE_EXPORT_SUPPORT`.
     fn lookup_nid(&self, parent_nid: u64, name: &[u8]) -> io::Result<Option<u64>> {
         if name == b"." {
             return Ok(Some(parent_nid));
@@ -291,12 +286,8 @@ impl Filesystem for ErofsFs {
         // following stat of every entry becomes one LOOKUP round trip each.
         let _ = config.add_capabilities(InitFlags::FUSE_PARALLEL_DIROPS);
         let _ = config.add_capabilities(InitFlags::FUSE_CACHE_SYMLINKS);
-        // A file handle names an inode by its number, which the image fixes.
-        // Without this the kernel resolves a handle only while the inode is
-        // in its cache, and fails with ESTALE once memory pressure evicted
-        // it: an overlayfs on top, or anything else that opens by handle,
-        // then loses files at random. With it the kernel asks for the inode
-        // again by looking up "." on it, see lookup.
+        // Let the kernel resolve the file handle of an inode it evicted, by
+        // looking up "." on it.
         let _ = config.add_capabilities(InitFlags::FUSE_EXPORT_SUPPORT);
         if config
             .add_capabilities(InitFlags::FUSE_NO_OPEN_SUPPORT)
@@ -672,8 +663,7 @@ impl Filesystem for ErofsFs {
             return;
         }
 
-        // A probe for an attribute the file does not carry, `security.capability`
-        // on every exec for one, is an answer and not a failed operation.
+        // A missing attribute is an answer and not a failed operation.
         reply.error(Errno::ENODATA);
     }
 

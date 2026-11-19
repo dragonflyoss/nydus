@@ -30,10 +30,8 @@ type getter interface {
 // The SDK is used as nydus fuse's on-demand reads use it (nydus-backend's
 // registry/transport/dragonfly): requests are sent at Level6, the SDK's default
 // priority, and a transient failure is retried once on the next seed peer
-// after a jittered exponential backoff. The SDK's per-attempt timeout also
-// ends the response body, which here is a whole layer rather than one chunk
-// group, so it is set beyond any download and a silent seed peer is given up
-// by the stall timeout instead.
+// after a jittered exponential backoff. The per-attempt timeout is beyond any
+// layer download, since the SDK ends the response body with it.
 const (
 	dragonflyPriority       = int32(commonv2.Priority_LEVEL6)
 	dragonflyMaxRetries     = 1
@@ -49,9 +47,8 @@ var (
 // resolver built afterwards through the Dragonfly scheduler at endpoint. The
 // returned function releases the SDK proxy. An empty endpoint disables it.
 //
-// A scheduler that cannot be reached is not an error: the requests of this
-// process go to the origin, as the reads of a nydus daemon do, and the
-// endpoint is still reported to the daemons, which keep trying it.
+// An unreachable scheduler is not an error: the requests of this process go to
+// the origin, and the daemons still get the endpoint.
 func EnableDragonfly(ctx context.Context, endpoint string) (func(), error) {
 	if endpoint == "" {
 		return func() {}, nil

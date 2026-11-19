@@ -36,8 +36,7 @@ type fsNode struct {
 // walkRootfs walks root and returns a map of relative path -> node metadata.
 // filepath.Walk uses Lstat, so symlinks are reported as symlinks and never
 // followed. Every entry (directories, regular files, symlinks, device nodes,
-// fifos and sockets) is recorded. The walk ends with the error of ctx once it
-// is done.
+// fifos and sockets) is recorded. The walk stops once ctx is done.
 func walkRootfs(ctx context.Context, root string) (map[string]fsNode, error) {
 	nodes := make(map[string]fsNode)
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -96,8 +95,7 @@ func walkRootfs(ctx context.Context, root string) (map[string]fsNode, error) {
 	return nodes, nil
 }
 
-// hashFile hashes the file at path, stopping between two reads once ctx is
-// done.
+// hashFile hashes the file at path, stopping once ctx is done.
 func hashFile(ctx context.Context, path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

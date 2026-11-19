@@ -43,14 +43,10 @@ var (
 
 	mockFuseMountpoint = "while [ $# -gt 1 ]; do\nif [ \"$1\" = --mountpoint ]; then mnt=$2; fi\nshift\ndone\n"
 
-	// mockFuseUnmounts is a daemon that turns its mountpoint back into a
-	// plain directory when it is told to end, as an unmount would.
 	mockFuseUnmounts = mockFuseMountpoint +
 		"trap 'rm \"$mnt\"; mkdir \"$mnt\"; exit 0' TERM\n" +
 		"touch \"$(dirname \"$0\")/ready\"\nwhile :; do sleep 0.05; done\n"
 
-	// mockFuseVanishes is a daemon that dies and leaves a mountpoint that
-	// answers a stat with an error.
 	mockFuseVanishes = mockFuseMountpoint + "rmdir \"$mnt\"\n" + mockFuseFailure
 
 	mockAbsentImage = &nydusfs.Image{
@@ -80,6 +76,15 @@ func mockFilesystemRule(t *testing.T, builder string) (filesystemRule, *nydusfs.
 
 	img := &nydusfs.Image{Ref: "registry.invalid/source:tag", Kind: nydusfs.KindNydus, Bootstrap: bootstrap}
 	return filesystemRule{cs: provider.ContentStore(), provider: provider, builder: builder, workDir: t.TempDir()}, img
+}
+
+func mockUnmountCalls(t *testing.T, root string) string {
+	calls, err := os.ReadFile(filepath.Join(root, "calls"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+
+	return string(calls)
 }
 
 func TestEnsurePrivileged(t *testing.T) {
@@ -396,8 +401,6 @@ func TestFilesystemRule_mount(t *testing.T) {
 }
 
 func TestFilesystemRule_fuseMount(t *testing.T) {
-	// mockMounted makes the mountpoint look mounted before the daemon runs:
-	// a link to a directory on another device.
 	mockMounted := func(t *testing.T, rule *filesystemRule, img *nydusfs.Image, dir string) {
 		if err := os.Symlink("/proc", filepath.Join(dir, "mnt")); err != nil {
 			t.Fatal(err)
@@ -459,7 +462,6 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 				assert.ErrorContains(err, "mock fuse failure")
 				assert.Empty(mountpoint)
 				assert.Nil(unmount)
-				// Nothing was mounted, so there is nothing to unmount.
 				assert.Empty(mockUnmountCalls(t, root))
 				assert.Equal([]string{
 					"fuse",
@@ -591,16 +593,6 @@ func TestFilesystemRule_fuseMount(t *testing.T) {
 			tc.expect(t, root, dir, mountpoint, unmount, err)
 		})
 	}
-}
-
-// mockUnmountCalls returns the calls of the unmount helper under root.
-func mockUnmountCalls(t *testing.T, root string) string {
-	calls, err := os.ReadFile(filepath.Join(root, "calls"))
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-
-	return string(calls)
 }
 
 func TestWaitForMount(t *testing.T) {

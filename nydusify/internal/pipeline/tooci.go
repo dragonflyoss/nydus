@@ -42,8 +42,7 @@ type ToOCIOption struct {
 	Compressor string
 	// LogLevel is the log level passed to the nydus binary.
 	LogLevel string
-	// PlatformMC selects the manifests of an index to convert, the ones the
-	// source was pulled for; the others are dropped. Nil converts them all.
+	// PlatformMC selects the manifests of an index to convert, all when nil.
 	PlatformMC platforms.MatchComparer
 }
 
@@ -79,8 +78,7 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		return nil, errors.Wrap(err, "read index json")
 	}
 
-	// Keep the manifests of the requested platform: the others were not
-	// pulled, so they can be neither inspected nor carried over.
+	// Keep only the manifests of the requested platform.
 	if opt.PlatformMC != nil {
 		index.Manifests = slices.DeleteFunc(index.Manifests, func(manifest ocispec.Descriptor) bool {
 			return manifest.Platform != nil && !opt.PlatformMC.Match(*manifest.Platform)
@@ -115,8 +113,7 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = newDesc.Digest.String()
 	}
 
-	// One platform was asked for and one manifest is left: return it rather
-	// than an index of one, as the forward conversion does.
+	// Return the only manifest left rather than an index of one.
 	if opt.PlatformMC != nil && len(index.Manifests) == 1 {
 		return &index.Manifests[0], nil
 	}
@@ -232,13 +229,11 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 		return nil, err
 	}
 
-	// A layer repeated in the image is one blob: unpack it once and reuse the
-	// result, since its copies would stage the same scratch file and remove
-	// it under each other.
-	first := make(map[digest.Digest]int, len(blobs))
+	// Unpack a layer repeated in the image once and reuse the result.
+	firstIndex := make(map[digest.Digest]int, len(blobs))
 	for i, blob := range blobs {
-		if _, ok := first[blob.Digest]; !ok {
-			first[blob.Digest] = i
+		if _, ok := firstIndex[blob.Digest]; !ok {
+			firstIndex[blob.Digest] = i
 		}
 	}
 
@@ -248,7 +243,7 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 	// bounds scratch usage as well as CPU.
 	eg.SetLimit(min(runtime.GOMAXPROCS(0), len(blobs)))
 	for i, blob := range blobs {
-		if first[blob.Digest] != i {
+		if firstIndex[blob.Digest] != i {
 			continue
 		}
 
@@ -266,7 +261,7 @@ func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descrip
 	}
 
 	for i, blob := range blobs {
-		unpacked[i] = unpacked[first[blob.Digest]]
+		unpacked[i] = unpacked[firstIndex[blob.Digest]]
 	}
 	return unpacked, nil
 }

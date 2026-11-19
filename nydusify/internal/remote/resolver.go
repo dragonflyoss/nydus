@@ -47,25 +47,19 @@ func newHTTPClient(skipTLSVerify bool) *http.Client {
 	}
 }
 
-// stallTimeout is how long a registry or token server may send nothing, while
-// the response headers or more of a response body are awaited, before the
-// request is given up. It is the image pull progress timeout of containerd's
-// CRI plugin.
+// stallTimeout is how long a registry or token server may send nothing before
+// its request is given up.
 var stallTimeout = 5 * time.Minute
 
-// stallError reports a request given up for a server that sent nothing. It is
-// a timeout to the retries, unlike the canceled context it replaces.
+// stallError reports a request given up for a server that sent nothing.
 type stallError struct{ timeout time.Duration }
 
 func (e stallError) Error() string   { return "server sent nothing for " + e.timeout.String() }
 func (e stallError) Timeout() bool   { return true }
 func (e stallError) Temporary() bool { return true }
 
-// stallTransport gives up a request whose response headers, or whose next
-// bytes of the response body, do not arrive within timeout. The time the
-// caller takes between two reads does not count, so the whole transfer has no
-// limit. Unless everyMethod is set only GET and HEAD are watched: a registry
-// may take minutes to answer the PUT that commits a large blob.
+// stallTransport gives up a GET or HEAD, or with everyMethod any request,
+// whose response headers or next body bytes do not arrive within timeout.
 type stallTransport struct {
 	base        http.RoundTripper
 	timeout     time.Duration
@@ -87,7 +81,7 @@ func (t stallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		cancel()
 		if stalled.Load() {
-			err = stallError{t.timeout}
+			err = stallError{timeout: t.timeout}
 		}
 		return nil, err
 	}
@@ -95,8 +89,7 @@ func (t stallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// stallBody is a response body that arms the timer of its request around each
-// read.
+// stallBody arms the timer of its request around each read.
 type stallBody struct {
 	io.ReadCloser
 	timeout time.Duration
@@ -110,7 +103,7 @@ func (b *stallBody) Read(data []byte) (int, error) {
 	read, err := b.ReadCloser.Read(data)
 	b.timer.Stop()
 	if err != nil && err != io.EOF && b.stalled.Load() {
-		err = stallError{b.timeout}
+		err = stallError{timeout: b.timeout}
 	}
 	return read, err
 }
@@ -123,9 +116,7 @@ func (b *stallBody) Close() error {
 }
 
 // transientStatusTransport returns a GET or HEAD the registry answers with a
-// transient status as the typed error of that status. Containerd's fetcher
-// reports such an answer as an untyped error, which the pull retries could not
-// tell from a definitive one.
+// transient status as the typed error of that status.
 type transientStatusTransport struct{ http.RoundTripper }
 
 func (t transientStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -142,7 +133,7 @@ func (t transientStatusTransport) RoundTrip(req *http.Request) (*http.Response, 
 // and blob GETs through Dragonfly when it is enabled.
 func newRegistryClient(skipTLSVerify bool) *http.Client {
 	client := newHTTPClient(skipTLSVerify)
-	client.Transport = transientStatusTransport{stallTransport{base: client.Transport, timeout: stallTimeout}}
+	client.Transport = transientStatusTransport{RoundTripper: stallTransport{base: client.Transport, timeout: stallTimeout}}
 	if dragonflyProxy != nil {
 		client.Transport = &dragonflyTransport{base: client.Transport, getter: dragonflyProxy}
 	}

@@ -10,10 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// testFileHandle opens files by handle after the kernel evicted their inodes.
-// Without FUSE_EXPORT_SUPPORT the kernel resolves a handle only from its inode
-// cache and fails with ESTALE; with it the daemon is asked for the inode again,
-// which the lookup counter shows.
 func testFileHandle(t *testing.T, a mount.Adapter) {
 	if _, fuse := a.(mount.FUSE); !fuse {
 		t.Skip("a kernel EROFS mount resolves file handles itself")
@@ -43,12 +39,6 @@ func testFileHandle(t *testing.T, a mount.Adapter) {
 		targets = append(targets, target{rel: rel, handle: handle, ino: st.Ino})
 	}
 
-	lookups := func() float64 {
-		return m.API.Metrics(t).Sum("nydus_fs_op_total", `operation="lookup"`)
-	}
-
-	// The kernel gives a recently used inode a second chance, so one drop may
-	// keep it: drop until the daemon sees the kernel ask again.
 	evicted := false
 
 	for range 5 {
@@ -57,40 +47,40 @@ func testFileHandle(t *testing.T, a mount.Adapter) {
 			t.FailNow()
 		}
 
-		before := lookups()
+		before := m.API.Metrics(t).Sum("nydus_fs_op_total", `operation="lookup"`)
 
 		for _, tgt := range targets {
 			fd, err := unix.OpenByHandleAt(mountFd, tgt.handle, unix.O_RDONLY|unix.O_CLOEXEC)
-			if !assert.NoError(t, err, tgt.rel) {
+			if !assert.NoError(t, err) {
 				t.FailNow()
 			}
 
 			f := os.NewFile(uintptr(fd), tgt.rel)
 
 			var st unix.Stat_t
-			if !assert.NoError(t, unix.Fstat(fd, &st), tgt.rel) {
+			if !assert.NoError(t, unix.Fstat(fd, &st)) {
 				t.FailNow()
 			}
 
-			assert.Equal(t, tgt.ino, st.Ino, tgt.rel)
+			assert.Equal(t, tgt.ino, st.Ino)
 
 			if st.Mode&unix.S_IFMT == unix.S_IFREG {
 				got, err := io.ReadAll(f)
-				if !assert.NoError(t, err, tgt.rel) {
+				if !assert.NoError(t, err) {
 					t.FailNow()
 				}
 
-				assert.Equal(t, m.wantBytes(t, tgt.rel), got, tgt.rel)
+				assert.Equal(t, m.wantBytes(t, tgt.rel), got)
 			}
 
 			_ = f.Close()
 		}
 
-		if lookups() > before {
+		if m.API.Metrics(t).Sum("nydus_fs_op_total", `operation="lookup"`) > before {
 			evicted = true
 			break
 		}
 	}
 
-	assert.True(t, evicted, "the kernel never asked the daemon for an evicted inode")
+	assert.True(t, evicted)
 }

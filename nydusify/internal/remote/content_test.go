@@ -1574,7 +1574,14 @@ func (r mockResolver) Resolve(_ context.Context, ref string) (string, ocispec.De
 	return ref, r.desc, r.resolveErr
 }
 
-// mockFailures returns a hook that fails with err the first n times it runs.
+func (r mockResolver) Fetcher(context.Context, string) (remotes.Fetcher, error) {
+	return r.fetcher, r.fetcherErr
+}
+
+func (r mockResolver) Pusher(context.Context, string) (remotes.Pusher, error) {
+	return r.pusher, r.pusherErr
+}
+
 func mockFailures(n int, err error) func() error {
 	return func() error {
 		if n == 0 {
@@ -1584,14 +1591,6 @@ func mockFailures(n int, err error) func() error {
 		n--
 		return err
 	}
-}
-
-func (r mockResolver) Fetcher(context.Context, string) (remotes.Fetcher, error) {
-	return r.fetcher, r.fetcherErr
-}
-
-func (r mockResolver) Pusher(context.Context, string) (remotes.Pusher, error) {
-	return r.pusher, r.pusherErr
 }
 
 type mockFetcher struct {

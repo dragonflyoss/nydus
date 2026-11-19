@@ -186,14 +186,13 @@ impl Node {
             .collect()
     }
 
-    /// Read the whole file. One read of the reader returns less than 4GiB,
-    /// so a larger file takes more than one.
+    /// Read the whole file, in reads of less than 4GiB each.
     pub fn read(&self) -> Result<Vec<u8>> {
         let inode = self.inode()?;
         let mut data = self.read_inode(&inode, 0, u32::MAX)?;
         while (data.len() as u64) < inode.size() {
-            let more = self.read_inode(&inode, data.len() as u64, u32::MAX)?;
-            if more.is_empty() {
+            let next = self.read_inode(&inode, data.len() as u64, u32::MAX)?;
+            if next.is_empty() {
                 return Err(Error::InvalidImage(format!(
                     "file inode {} ends at {} of its {} bytes",
                     self.ino,
@@ -201,7 +200,7 @@ impl Node {
                     inode.size()
                 )));
             }
-            data.extend_from_slice(&more);
+            data.extend_from_slice(&next);
         }
         Ok(data)
     }

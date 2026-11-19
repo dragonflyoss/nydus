@@ -199,14 +199,12 @@ func manifestAnnotationValues(c *cli.Context) []string {
 // SIGINT/SIGTERM/SIGHUP so `nydus` subprocesses are terminated and deferred
 // cleanups (e.g. work dir removal) still run; the returned stop function
 // releases the signal registration and must be deferred by the caller.
-// SIGQUIT keeps the goroutine dump of the Go runtime, which is what tells
-// where a hung command is stuck.
 func setupCommand(c *cli.Context) (context.Context, context.CancelFunc) {
 	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
 		logrus.SetLevel(level)
 	}
 	signals := []os.Signal{os.Interrupt, unix.SIGTERM}
-	// Listening for a hangup would take it from a command started with nohup.
+	// Keep SIGHUP ignored for a command started with nohup.
 	if !signal.Ignored(unix.SIGHUP) {
 		signals = append(signals, unix.SIGHUP)
 	}
@@ -371,17 +369,17 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("converting image back to OCI format")
-		toOCI := pipeline.ToOCIOption{
+		opt := pipeline.ToOCIOption{
 			BuilderPath: c.String("builder"),
 			WorkDir:     scratchDir,
 			Compressor:  compressor,
 			LogLevel:    c.String("log-level"),
 		}
 		if c.String("platform") != "" {
-			toOCI.PlatformMC = platformMC
+			opt.PlatformMC = platformMC
 		}
 
-		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, toOCI)
+		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, opt)
 		if err != nil {
 			return errors.Wrap(err, "convert to oci")
 		}
@@ -508,9 +506,8 @@ func runConvert(c *cli.Context) error {
 		logrus.Infof("converting image to nydus format")
 		// Converted layer blobs are uploaded as soon as they are built, so the
 		// registry upload overlaps the remaining layer conversions; the final
-		// push then skips the blobs that already landed. A conversion that
-		// fails ends the uploads, which would otherwise run to their end for
-		// an image that will not be pushed.
+		// push then skips the blobs that already landed. A failed conversion
+		// cancels the uploads.
 		var eagerPush errgroup.Group
 		pushCtx, cancelPush := context.WithCancel(ctx)
 		defer cancelPush()
@@ -570,8 +567,7 @@ func runConvert(c *cli.Context) error {
 
 	if len(localBlobs) > 0 {
 		logrus.Infof("uploading %d local nydus artifact blob(s)", len(localBlobs))
-		// One failed upload fails the conversion: stop the others rather than
-		// let them run to the end for an image that will not be pushed.
+		// Cancel the other uploads once one fails.
 		uploads, uploadCtx := errgroup.WithContext(ctx)
 		for _, blob := range localBlobs {
 			blob := blob

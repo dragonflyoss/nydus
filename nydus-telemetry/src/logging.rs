@@ -16,9 +16,7 @@ use tracing_subscriber::{
 /// crate default of 128k lines pins about 4 MiB per appender at startup.
 const QUEUED_LOG_LINES: usize = 8192;
 
-/// The size a log file is rolled at, between two hourly rolls. A daemon that
-/// logs a line per failed request would otherwise fill the disk within the
-/// hour; with it the log files take `log_max_files + 1` times this at most.
+/// The size a log file is rolled at, between two hourly rolls.
 const LOG_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
 
 fn non_blocking<T: Write + Send + 'static>(writer: T) -> (NonBlocking, WorkerGuard) {
@@ -28,8 +26,7 @@ fn non_blocking<T: Write + Send + 'static>(writer: T) -> (NonBlocking, WorkerGua
 }
 
 /// Initializes the tracing system for the service, which logs to both stdout
-/// and files under `log_dir` rolled every hour and at 10 MiB, an error when
-/// the directory or the log file cannot be created.
+/// and files under `log_dir` rolled every hour and at 10 MiB.
 pub fn init_tracing(
     name: &str,
     log_dir: PathBuf,

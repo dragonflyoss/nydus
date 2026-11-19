@@ -995,9 +995,6 @@ func TestOptimizer_writeOptimizedImage(t *testing.T) {
 			}
 			config.RootFS = ocispec.RootFS{Type: "layers", DiffIDs: tc.diffIDs}
 
-			// The image's config as the store holds it: the raw source one,
-			// or the typed mock. A rejected image is refused before its
-			// config is read, and its cases assert an untouched store.
 			configDesc := &ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}
 			if !tc.rejected {
 				var stored any = config

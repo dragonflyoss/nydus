@@ -202,9 +202,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 		_ = cmd.Process.Signal(unix.SIGTERM)
 		select {
 		case <-done:
-			// A daemon that shut down in order has unmounted. One that died,
-			// before the signal or of it, left a dead mount, which answers a
-			// stat with an error.
+			// Unmount what a daemon that died left mounted.
 			if mounted, err := isMounted(mountpoint, filepath.Dir(mountpoint)); err != nil || mounted {
 				if err := unmountFuse(mountpoint); err != nil {
 					log.G(ctx).WithError(err).Warnf("unmount nydus fuse at %q", mountpoint)

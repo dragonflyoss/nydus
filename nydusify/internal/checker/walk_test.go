@@ -39,6 +39,10 @@ var (
 	}
 )
 
+type mockReader func([]byte) (int, error)
+
+func (r mockReader) Read(data []byte) (int, error) { return r(data) }
+
 func mockXattrFile(t *testing.T, path string, xattrs map[string][]byte) {
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
@@ -566,7 +570,6 @@ func TestContextReader_Read(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			// Each read cancels, so only the first one gets through.
 			reader := contextReader{ctx: ctx, Reader: mockReader(func(data []byte) (int, error) {
 				cancel()
 				return copy(data, "first"), nil
@@ -577,11 +580,6 @@ func TestContextReader_Read(t *testing.T) {
 		})
 	}
 }
-
-// mockReader makes a function an io.Reader.
-type mockReader func([]byte) (int, error)
-
-func (r mockReader) Read(data []byte) (int, error) { return r(data) }
 
 func TestErrIsXattrUnsupported(t *testing.T) {
 	tests := []struct {

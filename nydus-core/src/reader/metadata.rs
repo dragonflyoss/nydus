@@ -349,9 +349,7 @@ impl ErofsReader {
         Ok(slice.to_vec())
     }
 
-    /// Read symlink target (sync, mmap-only). A target does not exceed one
-    /// block, so a longer `i_size` is rejected before any buffer is sized
-    /// from it.
+    /// Read symlink target (sync, mmap-only), at most one block long.
     pub fn read_symlink(&self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<Vec<u8>> {
         let size = inode.size();
         if size > EROFS_BLOCK_SIZE as u64 {
@@ -385,9 +383,7 @@ impl ErofsReader {
             return Ok(Vec::new());
         }
 
-        // The builder never shares an xattr. An image that does keeps the
-        // entry in the shared area, which is not read here: fail rather than
-        // answer without it, an ACL or a capability the file then lacks.
+        // Fail on shared xattrs, which are not read, rather than answer without them.
         let shared_count = xattr_data[4] as usize;
         if shared_count != 0 {
             return Err(io::Error::new(
@@ -488,8 +484,7 @@ mod tests {
         bootstrap[offset..offset + superblock.as_bytes().len()]
             .copy_from_slice(superblock.as_bytes());
 
-        // An xattr ibody of the 12-byte header, `h_shared_count` at byte 4,
-        // and one 4-byte shared id: an `i_xattr_icount` of 2.
+        // An xattr ibody with `h_shared_count` 1 at byte 4 and one shared id.
         let mut root =
             ErofsInodeCompact::new(EROFS_INODE_FLAT_PLAIN, 0o040755, 2, 0, 0, 0, 0, 0, 0);
         root.i_xattr_icount = 2u16.to_le_bytes();

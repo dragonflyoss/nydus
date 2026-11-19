@@ -1174,10 +1174,7 @@ fn write_erofs_xattr_ibody(buf: &mut [u8], offset: usize, xattrs: &[XattrEntry])
 }
 
 /// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
-///
-/// A filesystem without xattrs has none, and an attribute removed between the
-/// listing and its read is left out. Any other failure is returned: an image
-/// built without the capability or ACL of a file is not the source tree.
+/// A filesystem without xattrs has none, any other failure is returned.
 fn read_xattrs_from_path(path: &Path) -> Result<Vec<XattrEntry>> {
     use std::os::unix::ffi::OsStrExt;
     let names = match xattr::list(path) {

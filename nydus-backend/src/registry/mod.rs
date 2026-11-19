@@ -441,7 +441,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::{self, StreamExt};
-    use nydus_config::{BackendConfig, HttpConfig};
+    use nydus_config::BackendConfig;
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
     use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_RANGE, LOCATION, WWW_AUTHENTICATE};
@@ -736,74 +736,6 @@ mod tests {
         }
     }
 
-    fn scripted_registry(
-        addr: SocketAddr,
-        auth: Option<&str>,
-        registry_token: Option<&str>,
-        transport: impl Fetcher + 'static,
-    ) -> Registry {
-        let http = HttpConfig::default();
-        Registry {
-            client: Arc::new(Client {
-                addr: format!("http://{addr}").parse().unwrap(),
-                repository: "library/ubuntu".to_string(),
-                authorizer: Authorizer::new(auth, registry_token).unwrap(),
-                redirects: RedirectCache::new(),
-                prefetch_retry_interval: Duration::from_millis(1)..=Duration::from_millis(2),
-                auth_transport: Transport::Direct {
-                    fetcher: Box::new(
-                        Http::new(
-                            http.request_timeout,
-                            http.request_read_timeout,
-                            http.max_retries,
-                            None,
-                            &http.tls,
-                            None,
-                        )
-                        .unwrap(),
-                    ),
-                },
-                transport: Transport::Direct {
-                    fetcher: Box::new(transport),
-                },
-            }),
-            runtime: Arc::new(Runtime::new(None).unwrap()),
-            metrics: Arc::new(Metrics::new()),
-        }
-    }
-
-    fn configured_registry(config: &Config, netns: Option<Netns>) -> Registry {
-        let BackendConfig::Registry(registry) = &config.backend else {
-            panic!("expected a registry backend, got {:?}", config.backend);
-        };
-        Registry::new(config, registry, netns, Arc::new(Metrics::new())).unwrap()
-    }
-
-    fn origin_registry(addr: SocketAddr, netns: Option<Netns>) -> Registry {
-        let config: Config = serde_yaml::from_str(&format!(
-            "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n"
-        ))
-        .unwrap();
-        configured_registry(&config, netns)
-    }
-
-    fn read(registry: &Registry, kind: ReadKind, buf: &mut [u8]) -> io::Result<()> {
-        registry.runtime.tokio().block_on(async {
-            let client = &registry.client;
-            let range = Range::Bounded(0..=buf.len() as u64 - 1);
-            let response = match kind {
-                ReadKind::Ondemand => client.get(&TEST_BLOB_ID, &range).await?,
-                ReadKind::Prefetch => client.prefetch(&TEST_BLOB_ID, &range).await?,
-            };
-            if !response.status.is_success() {
-                return Err(response.into_io_error().await);
-            }
-
-            buf.copy_from_slice(&response.bytes(buf.len()).await?);
-            Ok(())
-        })
-    }
-
     #[test]
     fn blob_metadata_and_ranges_are_read_from_the_origin_for_both_read_kinds() {
         let dir = tempdir().unwrap();
@@ -814,7 +746,12 @@ mod tests {
             .save_in(dir.path());
         let blob = fs::read(dir.path().join(hex::encode(full_blob_id))).unwrap();
         let origin = OriginStub::serve(&["206 Partial Content"], blob);
-        let registry = origin_registry(origin.addr, None);
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+            origin.addr
+        ))
+        .unwrap();
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let blob_metadata = match kind {
@@ -868,7 +805,12 @@ mod tests {
             .save_in(dir.path());
         let blob = fs::read(dir.path().join(hex::encode(full_blob_id))).unwrap();
         let origin = OriginStub::serve_on(listener, &["206 Partial Content"], blob);
-        let registry = origin_registry(origin.addr, Some(netns));
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+            origin.addr
+        ))
+        .unwrap();
+        let registry = <dyn Backend>::new(&config, Some(netns), Arc::new(Metrics::new())).unwrap();
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let blob_metadata = match kind {
@@ -901,7 +843,12 @@ mod tests {
 
         for (offset, len) in test_cases {
             let origin = OriginStub::serve(&["206 Partial Content"], b"abcd".to_vec());
-            let registry = origin_registry(origin.addr, None);
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+                origin.addr
+            ))
+            .unwrap();
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let read = registry.get(&TEST_BLOB_ID, offset, len);
             let prefetch = registry.prefetch(&TEST_BLOB_ID, offset, len);
@@ -929,7 +876,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
             let mut head = [0u8; 1];
@@ -966,7 +913,7 @@ mod tests {
                 "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_read_timeout: 1s\n      max_retries: 0\n"
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let mut buf = [0u8; 4];
             let now = Instant::now();
@@ -983,7 +930,12 @@ mod tests {
     fn origin_body_that_breaks_off_fails_both_read_kinds() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let origin = OriginStub::serve(&["206 Truncated"], b"abcd".to_vec());
-            let registry = origin_registry(origin.addr, None);
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+                origin.addr
+            ))
+            .unwrap();
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let mut buf = [0u8; 4];
             let result = match kind {
@@ -1036,7 +988,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
             let mut head = [0u8; 1];
@@ -1104,7 +1056,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let now = Instant::now();
             let mut data = Vec::new();
@@ -1208,10 +1160,10 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
             let reads = || -> f64 {
                 registry
-                    .metrics
+                    .metrics()
                     .registry()
                     .gather()
                     .iter()
@@ -1345,7 +1297,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let result = match kind {
                 ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, 4),
@@ -1379,10 +1331,15 @@ mod tests {
 
         for (consume, failures) in test_cases {
             let origin = OriginStub::serve(&["206 Partial Content"], vec![7u8; 1 << 20]);
-            let registry = origin_registry(origin.addr, None);
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+                origin.addr
+            ))
+            .unwrap();
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
             let counter = |name: &str| -> f64 {
                 registry
-                    .metrics
+                    .metrics()
                     .registry()
                     .gather()
                     .iter()
@@ -1430,10 +1387,10 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n      request_read_timeout: 60s\n"
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
         let counter = |name: &str| -> f64 {
             registry
-                .metrics
+                .metrics()
                 .registry()
                 .gather()
                 .iter()
@@ -1461,7 +1418,12 @@ mod tests {
     #[test]
     fn whole_blob_answers_from_the_origin_are_rejected_for_both_read_kinds() {
         let origin = OriginStub::serve(&["200 OK"], (0..64).collect());
-        let registry = origin_registry(origin.addr, None);
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+            origin.addr
+        ))
+        .unwrap();
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let err = match kind {
@@ -1482,10 +1444,27 @@ mod tests {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport =
                 ScriptedTransport::new(vec![Scripted::Status(StatusCode::OK, HeaderMap::new())]);
-            let registry = scripted_registry(origin.addr, None, None, transport.clone());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
 
             let mut buf = vec![0u8; 4];
-            let err = read(&registry, kind, &mut buf).unwrap_err();
+            let err = match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap_err();
 
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(transport.calls(), 1);
@@ -1503,10 +1482,27 @@ mod tests {
                 Scripted::Status(StatusCode::TEMPORARY_REDIRECT, redirect),
                 Scripted::Status(StatusCode::OK, HeaderMap::new()),
             ]);
-            let registry = scripted_registry(origin.addr, None, None, transport.clone());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
 
             let mut buf = vec![0u8; 4];
-            let err = read(&registry, kind, &mut buf).unwrap_err();
+            let err = match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap_err();
 
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(transport.calls(), 2);
@@ -1524,14 +1520,31 @@ mod tests {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport =
                 ScriptedTransport::new(vec![Scripted::Status(StatusCode::OK, HeaderMap::new())]);
-            let registry = scripted_registry(origin.addr, None, None, transport.clone());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
             registry.client.redirects.insert(
                 &hex::encode(TEST_BLOB_ID),
                 "http://cdn.example.com/signed".parse().unwrap(),
             );
 
             let mut buf = vec![0u8; 4];
-            let err = read(&registry, kind, &mut buf).unwrap_err();
+            let err = match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap_err();
 
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
             assert_eq!(transport.calls(), 1);
@@ -1549,11 +1562,16 @@ mod tests {
             origin.addr
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let mut buf = [0u8; 4];
-        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
-        let prefetch = read(&registry, ReadKind::Prefetch, &mut [0u8; 4]);
+        registry
+            .get(&TEST_BLOB_ID, 0, buf.len())
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap();
+        let prefetch = registry
+            .prefetch(&TEST_BLOB_ID, 0, 4)
+            .and_then(|mut reader| reader.read_exact(&mut [0u8; 4]));
 
         assert_eq!(&buf, b"abcd");
         assert_eq!(prefetch.unwrap_err().kind(), io::ErrorKind::TimedOut);
@@ -1581,10 +1599,14 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
             let sources = || -> Vec<String> {
                 registry
-                    .metrics
+                    .metrics()
                     .registry()
                     .gather()
                     .iter()
@@ -1628,11 +1650,14 @@ mod tests {
             scheduler.local_addr().unwrap()
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let now = Instant::now();
         let mut buf = [0u8; 4];
-        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        registry
+            .get(&TEST_BLOB_ID, 0, buf.len())
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap();
 
         assert_eq!(&buf, b"abcd");
         assert_eq!(origin.hits(), 1);
@@ -1665,7 +1690,11 @@ mod tests {
                 "backend:\n  type: registry\n  config:\n    addr: {addr}\n    repository: library/ubuntu\n"
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
             assert_eq!(
                 registry.client.blob_url("abc123").unwrap().as_str(),
                 expected
@@ -1685,7 +1714,11 @@ backend:
     registry_token: xyz
 ";
         let config: Config = serde_yaml::from_str(yaml).unwrap();
-        let registry = configured_registry(&config, None);
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let registry =
+            Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -1764,10 +1797,10 @@ backend:
                 origin.addr, proxy.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
             let reads = || -> f64 {
                 registry
-                    .metrics
+                    .metrics()
                     .registry()
                     .gather()
                     .iter()
@@ -1806,10 +1839,10 @@ backend:
             proxy.addr
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
         let failures = || -> Vec<String> {
             registry
-                .metrics
+                .metrics()
                 .registry()
                 .gather()
                 .iter()
@@ -1843,7 +1876,7 @@ backend:
             origin.addr
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let mut buf = [0u8; 4];
         registry
@@ -1872,7 +1905,11 @@ backend:
                 "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: library/ubuntu\n{http}"
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
             assert_eq!(registry.client.transport.source(), source);
         }
     }
@@ -1892,7 +1929,11 @@ backend:
                 runtime_dir.path().display()
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
 
             assert_eq!(registry.client.transport.source(), Source::Dragonfly);
             assert!(runtime_dir.path().join("dragonfly").is_dir());
@@ -1958,9 +1999,12 @@ backend:
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
-            let err = read(&registry, ReadKind::Ondemand, &mut [0u8; 4]).unwrap_err();
+            let err = registry
+                .get(&TEST_BLOB_ID, 0, 4)
+                .and_then(|mut reader| reader.read_exact(&mut [0u8; 4]))
+                .unwrap_err();
 
             assert!(err.to_string().contains("503"));
             assert_eq!(origin.hits(), origin_hits);
@@ -1986,10 +2030,13 @@ backend:
             .unwrap();
 
             let now = Instant::now();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
             for _ in 0..2 {
                 let mut buf = [0u8; 4];
-                read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+                registry
+                    .get(&TEST_BLOB_ID, 0, buf.len())
+                    .and_then(|mut reader| reader.read_exact(&mut buf))
+                    .unwrap();
                 assert_eq!(&buf, b"abcd");
             }
 
@@ -2009,10 +2056,28 @@ backend:
                 let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
                 let transport =
                     ScriptedTransport::new(vec![Scripted::Status(terminal, HeaderMap::new())]);
-                let registry = scripted_registry(origin.addr, None, None, transport.clone());
+                let config: Config = serde_yaml::from_str(&format!(
+                    "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                    origin.addr
+                ))
+                .unwrap();
+                let BackendConfig::Registry(registry_config) = &config.backend else {
+                    unreachable!()
+                };
+                let mut registry =
+                    Registry::new(&config, registry_config, None, Arc::new(Metrics::new()))
+                        .unwrap();
+                Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                    fetcher: Box::new(transport.clone()),
+                };
 
                 let mut buf = vec![0u8; 4];
-                let err = read(&registry, kind, &mut buf).unwrap_err();
+                let err = match kind {
+                    ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                    ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+                }
+                .and_then(|mut reader| reader.read_exact(&mut buf))
+                .unwrap_err();
 
                 assert!(err.to_string().contains(terminal.as_str()));
                 assert_eq!(transport.calls(), 1);
@@ -2029,10 +2094,13 @@ backend:
             origin.addr
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let mut buf = vec![0u8; 4];
-        let err = read(&registry, ReadKind::Ondemand, &mut buf).unwrap_err();
+        let err = registry
+            .get(&TEST_BLOB_ID, 0, buf.len())
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap_err();
 
         assert!(err.to_string().contains("503"));
         assert_eq!(origin.hits(), 1);
@@ -2060,7 +2128,7 @@ backend:
                 origin.addr
             ))
             .unwrap();
-            let registry = configured_registry(&config, None);
+            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
             let mut buf = [0u8; 4];
             let result = registry
@@ -2081,7 +2149,7 @@ backend:
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 2s\n"
         ))
         .unwrap();
-        let registry = configured_registry(&config, None);
+        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
 
         let now = Instant::now();
         let mut buf = [0u8; 4];
@@ -2107,15 +2175,27 @@ backend:
                 Scripted::Status(StatusCode::UNAUTHORIZED, challenge),
                 Scripted::Body(body.clone()),
             ]);
-            let registry = scripted_registry(
-                origin.addr,
-                Some("YWxpY2U6c2VjcmV0"),
-                None,
-                transport.clone(),
-            );
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    auth: YWxpY2U6c2VjcmV0\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
 
             let mut buf = vec![0u8; body.len()];
-            read(&registry, kind, &mut buf).unwrap();
+            match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap();
 
             assert_eq!(buf, body);
             assert_eq!(transport.calls(), 2);
@@ -2132,15 +2212,27 @@ backend:
             let body = b"authorized".to_vec();
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
             let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
-            let registry = scripted_registry(
-                origin.addr,
-                Some("YWxpY2U6c2VjcmV0"),
-                Some("xyz"),
-                transport.clone(),
-            );
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    auth: YWxpY2U6c2VjcmV0\n    registry_token: xyz\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
 
             let mut buf = vec![0u8; body.len()];
-            read(&registry, kind, &mut buf).unwrap();
+            match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap();
 
             assert_eq!(buf, body);
             assert_eq!(origin.hits(), 0);
@@ -2177,15 +2269,28 @@ backend:
                     Scripted::Status(StatusCode::UNAUTHORIZED, unauthorized),
                     Scripted::Body(body.clone()),
                 ]);
-                let registry = scripted_registry(
-                    origin.addr,
-                    Some("YWxpY2U6c2VjcmV0"),
-                    Some("xyz"),
-                    transport.clone(),
-                );
+                let config: Config = serde_yaml::from_str(&format!(
+                    "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    auth: YWxpY2U6c2VjcmV0\n    registry_token: xyz\nprefetch:\n  retry_interval: 1ms\n",
+                    origin.addr
+                ))
+                .unwrap();
+                let BackendConfig::Registry(registry_config) = &config.backend else {
+                    unreachable!()
+                };
+                let mut registry =
+                    Registry::new(&config, registry_config, None, Arc::new(Metrics::new()))
+                        .unwrap();
+                Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                    fetcher: Box::new(transport.clone()),
+                };
 
                 let mut buf = vec![0u8; body.len()];
-                read(&registry, kind, &mut buf).unwrap();
+                match kind {
+                    ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                    ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+                }
+                .and_then(|mut reader| reader.read_exact(&mut buf))
+                .unwrap();
 
                 assert_eq!(buf, body);
                 assert_eq!(origin.hits(), fetches);
@@ -2206,7 +2311,19 @@ backend:
                 StatusCode::NOT_FOUND,
                 HeaderMap::new(),
             )]);
-            let registry = scripted_registry(origin.addr, None, None, transport.clone());
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
 
             let err = match kind {
                 ReadKind::Ondemand => registry.get_blob_metadata(&TEST_BLOB_ID),
@@ -2227,12 +2344,19 @@ backend:
             .unwrap()
             .local_addr()
             .unwrap();
-        let registry = Arc::new(scripted_registry(
-            dead_addr,
-            Some("YWxpY2U6c2VjcmV0"),
-            None,
-            gate.clone(),
-        ));
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{dead_addr}\n    repository: library/ubuntu\n    auth: YWxpY2U6c2VjcmV0\nprefetch:\n  retry_interval: 1ms\n"
+        ))
+        .unwrap();
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let mut registry =
+            Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+        Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+            fetcher: Box::new(gate.clone()),
+        };
+        let registry = Arc::new(registry);
 
         let readers: Vec<_> = (0..2)
             .map(|_| {
@@ -2260,7 +2384,19 @@ backend:
         let body = b"redirected".to_vec();
         let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
         let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
-        let registry = scripted_registry(origin.addr, None, None, transport.clone());
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+            origin.addr
+        ))
+        .unwrap();
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let mut registry =
+            Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+        Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+            fetcher: Box::new(transport.clone()),
+        };
         let hex = hex::encode(TEST_BLOB_ID);
         registry
             .client
@@ -2268,7 +2404,10 @@ backend:
             .insert(&hex, "http://cdn.example.com/signed".parse().unwrap());
 
         let mut buf = vec![0u8; body.len()];
-        read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
+        registry
+            .get(&TEST_BLOB_ID, 0, buf.len())
+            .and_then(|mut reader| reader.read_exact(&mut buf))
+            .unwrap();
 
         assert_eq!(buf, body);
         assert_eq!(transport.calls(), 1);
@@ -2302,7 +2441,20 @@ backend:
                 }
                 let calls = script.len() as u32;
                 let transport = ScriptedTransport::new(script);
-                let registry = scripted_registry(origin.addr, None, None, transport.clone());
+                let config: Config = serde_yaml::from_str(&format!(
+                    "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                    origin.addr
+                ))
+                .unwrap();
+                let BackendConfig::Registry(registry_config) = &config.backend else {
+                    unreachable!()
+                };
+                let mut registry =
+                    Registry::new(&config, registry_config, None, Arc::new(Metrics::new()))
+                        .unwrap();
+                Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                    fetcher: Box::new(transport.clone()),
+                };
                 let hex = hex::encode(TEST_BLOB_ID);
                 registry
                     .client
@@ -2310,7 +2462,11 @@ backend:
                     .insert(&hex, "http://cdn.example.com/expired".parse().unwrap());
 
                 let mut buf = vec![0u8; body.len()];
-                let result = read(&registry, kind, &mut buf);
+                let result = match kind {
+                    ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                    ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+                }
+                .and_then(|mut reader| reader.read_exact(&mut buf));
 
                 assert_eq!(result.is_ok(), evicted);
                 assert_eq!(transport.calls(), calls);
@@ -2321,63 +2477,102 @@ backend:
 
     #[test]
     fn prefetch_resolves_the_redirect_again_when_the_read_is_sent_once_more() {
-        let redirect = |link: &'static str| {
-            let mut headers = HeaderMap::new();
-            headers.insert(LOCATION, link.parse().unwrap());
-            Scripted::Status(StatusCode::TEMPORARY_REDIRECT, headers)
-        };
-        let status = |status: StatusCode| Scripted::Status(status, HeaderMap::new());
         let body = b"fresh".to_vec();
-        let test_cases: Vec<(ReadKind, Vec<Scripted>, Option<&str>)> = vec![
+        let test_cases: Vec<(ReadKind, Vec<(StatusCode, Option<&str>)>, Option<&str>)> = vec![
             (
                 ReadKind::Prefetch,
                 vec![
-                    redirect("http://cdn.example.com/busy"),
-                    status(StatusCode::SERVICE_UNAVAILABLE),
-                    redirect("http://cdn.example.com/fresh"),
-                    Scripted::Body(body.clone()),
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        Some("http://cdn.example.com/busy"),
+                    ),
+                    (StatusCode::SERVICE_UNAVAILABLE, None),
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        Some("http://cdn.example.com/fresh"),
+                    ),
+                    (StatusCode::PARTIAL_CONTENT, None),
                 ],
                 Some("http://cdn.example.com/fresh"),
             ),
             (
                 ReadKind::Prefetch,
                 vec![
-                    redirect("http://cdn.example.com/busy"),
-                    status(StatusCode::SERVICE_UNAVAILABLE),
-                    redirect("http://cdn.example.com/busy"),
-                    status(StatusCode::SERVICE_UNAVAILABLE),
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        Some("http://cdn.example.com/busy"),
+                    ),
+                    (StatusCode::SERVICE_UNAVAILABLE, None),
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        Some("http://cdn.example.com/busy"),
+                    ),
+                    (StatusCode::SERVICE_UNAVAILABLE, None),
                 ],
                 None,
             ),
             (
                 ReadKind::Prefetch,
                 vec![
-                    redirect("http://cdn.example.com/rejected"),
-                    status(StatusCode::FORBIDDEN),
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        Some("http://cdn.example.com/rejected"),
+                    ),
+                    (StatusCode::FORBIDDEN, None),
                 ],
                 None,
             ),
             (
                 ReadKind::Ondemand,
                 vec![
-                    redirect("http://cdn.example.com/busy"),
-                    status(StatusCode::SERVICE_UNAVAILABLE),
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        Some("http://cdn.example.com/busy"),
+                    ),
+                    (StatusCode::SERVICE_UNAVAILABLE, None),
                 ],
                 None,
             ),
         ];
 
-        for (kind, script, link) in test_cases {
-            let calls = script.len() as u32;
+        for (kind, answers, link) in test_cases {
             let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
-            let transport = ScriptedTransport::new(script);
-            let registry = scripted_registry(origin.addr, None, None, transport.clone());
+            let transport = ScriptedTransport::new(answers.iter().map(|(status, location)| {
+                if *status == StatusCode::PARTIAL_CONTENT {
+                    return Scripted::Body(body.clone());
+                }
+
+                Scripted::Status(
+                    *status,
+                    location
+                        .iter()
+                        .map(|location| (LOCATION, location.parse().unwrap()))
+                        .collect(),
+                )
+            }));
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\nprefetch:\n  retry_interval: 1ms\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let mut registry =
+                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                fetcher: Box::new(transport.clone()),
+            };
 
             let mut buf = vec![0u8; body.len()];
-            let result = read(&registry, kind, &mut buf);
+            let result = match kind {
+                ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+            }
+            .and_then(|mut reader| reader.read_exact(&mut buf));
 
             assert_eq!(result.is_ok(), link.is_some());
-            assert_eq!(transport.calls(), calls);
+            assert_eq!(transport.calls(), answers.len() as u32);
             assert_eq!(
                 registry
                     .client

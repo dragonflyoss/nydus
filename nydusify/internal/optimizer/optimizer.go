@@ -302,10 +302,7 @@ func (o *Optimizer) writeOptimizedImage(ctx context.Context, cs content.Store, i
 	}
 	layers = append(layers, ondemandDesc, bootstrapDesc)
 
-	// Patch the config as the image carries it: writing the parsed one back
-	// would drop the fields the image spec does not name (Healthcheck,
-	// Shell, ...) and the empty ones, which `nydusify check` then reports as
-	// a config that differs from the source.
+	// Patch the raw config to keep the fields the image spec does not name.
 	rawConfig, err := content.ReadBlob(ctx, cs, img.Manifest.Config)
 	if err != nil {
 		return nil, errors.Wrap(err, "read image config")

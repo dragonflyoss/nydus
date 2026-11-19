@@ -138,10 +138,8 @@ impl Unpacker<'_> {
             EROFS_FT_SYMLINK => {
                 header.set_entry_type(EntryType::Symlink);
                 let target = self.reader.read_symlink(nid, &inode)?;
-                // A target that fits the header is written as the image holds
-                // it: append_link would rewrite it as a path, dropping its `.`
-                // components and repeated slashes. A longer one goes through
-                // append_link, which keeps it whole in a long link record.
+                // Write a target that fits the header as the image holds it,
+                // append_link would rewrite it as a path.
                 if target.len() <= header.as_old().linkname.len() {
                     header.set_link_name_literal(&target)?;
                 } else {

@@ -730,9 +730,8 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<ChunkGroupCrcMismatch>())
 }
 
-/// The marker of an error from writing a decoded chunk group to the cache
-/// file, a full disk for one: the group was fetched and validated, so a read
-/// can still be served, see [`CacheWriteFailure::is`].
+/// The marker of an error from writing the cache file, which a read is still
+/// served past, see [`CacheWriteFailure::is`].
 #[derive(Debug)]
 pub(crate) struct CacheWriteFailure(pub(crate) String);
 

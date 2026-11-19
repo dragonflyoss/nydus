@@ -203,9 +203,7 @@ async fn serve(
                     });
                 }
                 Err(err) => {
-                    // Wait before accepting again: a failure such as EMFILE
-                    // lasts while the connection stays queued, and accepting
-                    // at once would spin and flood the log until it clears.
+                    // Back off before accepting again, a failure such as EMFILE lasts.
                     error!("apiserver accept error: {err}");
                     tokio::select! {
                         _ = stopped.changed() => break,

@@ -149,11 +149,9 @@ pub struct ChunkGroupMap {
 }
 
 impl ChunkGroupMap {
-    /// Reserves the blocks of the first `len` bytes of `file` without changing its
-    /// size. The ready bits are stored through a shared mapping, and a store that
-    /// has to allocate its block on a full disk kills the process with `SIGBUS`
-    /// instead of returning an error. A filesystem that cannot reserve keeps the
-    /// file sparse.
+    /// Reserves the blocks of the first `len` bytes of `file` without changing
+    /// its size, so a ready bit stored through the mapping never allocates.
+    #[allow(unused_variables)]
     fn reserve_blocks(file: &File, len: u64) -> io::Result<()> {
         #[cfg(target_os = "linux")]
         loop {
@@ -176,8 +174,6 @@ impl ChunkGroupMap {
                 _ => return Err(err),
             }
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = (file, len);
 
         Ok(())
     }
@@ -197,8 +193,7 @@ impl ChunkGroupMap {
         if file_len == 0 {
             // First creation. Racing creators run the same idempotent
             // sequence: reserve the blocks, size the file, then write the
-            // identical header bytes. A reservation that fails leaves the
-            // file empty, so the next open creates it again.
+            // identical header bytes.
             Self::reserve_blocks(&file, expected_len)?;
             file.set_len(expected_len)?;
             file.write_all_at(&header_bytes(chunk_group_count), 0)?;

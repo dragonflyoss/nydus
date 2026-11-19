@@ -31,6 +31,9 @@ use nydus_format::erofs::{
     EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_NULL_ADDR,
 };
 
+/// The longest name of a directory entry, Linux `NAME_MAX` and `EROFS_NAME_LEN`.
+const NAME_MAX: usize = 255;
+
 // Replacement buffers describe a prefix; truncate extension stays sparse.
 fn replacement_chunk(data: &[u8], start: usize, len: usize) -> std::borrow::Cow<'_, [u8]> {
     if start <= data.len() && len <= data.len() - start {
@@ -2026,10 +2029,6 @@ impl<'a> TreeNode<ParentTreeContext> for ParentTreeNode<'a> {
         Ok(())
     }
 }
-
-/// The longest name of a directory entry, Linux `NAME_MAX` and
-/// `EROFS_NAME_LEN`: the kernel rejects a directory holding a longer one.
-const NAME_MAX: usize = 255;
 
 fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();

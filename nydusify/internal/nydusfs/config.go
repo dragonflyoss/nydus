@@ -146,11 +146,8 @@ func WriteRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image,
 	return string(out), nil
 }
 
-// registryProxy returns the proxy the environment names for registry, as the
-// requests of this process pick it (HTTP_PROXY, HTTPS_PROXY and NO_PROXY). The
-// daemon ignores these variables and connects directly unless its config
-// carries the proxy. It only takes an HTTP forward proxy, so any other kind
-// is left out.
+// registryProxy returns the HTTP forward proxy the environment names for
+// registry (HTTP_PROXY, HTTPS_PROXY and NO_PROXY), or nil when there is none.
 func registryProxy(registry *url.URL) (*proxySection, error) {
 	proxy, err := httpproxy.FromEnvironment().ProxyFunc()(registry)
 	if err != nil {

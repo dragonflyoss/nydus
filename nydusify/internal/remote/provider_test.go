@@ -133,8 +133,6 @@ func mockRangeRegistry(t *testing.T, upstreamRange string) (string, *atomic.Int3
 	return strings.TrimPrefix(registry.URL, "http://") + "/test:v1", transferred
 }
 
-// mockFlakyRegistry fronts the registry at host with a server that lets fail
-// answer the first GET of dgst, and returns its host:port.
 func mockFlakyRegistry(t *testing.T, host string, dgst digest.Digest, fail http.HandlerFunc) string {
 	t.Helper()
 	failed := &atomic.Bool{}

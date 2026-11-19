@@ -214,8 +214,6 @@ func TestEnableDragonfly(t *testing.T) {
 	}
 }
 
-// attemptTimeout reads the per-attempt timeout of an SDK request, which the
-// SDK keeps to itself.
 func attemptTimeout(t *testing.T, req *request.GetRequest) time.Duration {
 	t.Helper()
 	field := reflect.ValueOf(req).Elem().FieldByName("timeout")
@@ -252,7 +250,7 @@ func TestDragonflyTransportStalls(t *testing.T) {
 		wantErr  error
 	}{
 		{"silent seed peer falls back", silent, "from-origin", nil},
-		{"seed peer that stops sending is a timeout", partial, "partial", stallError{100 * time.Millisecond}},
+		{"seed peer that stops sending is a timeout", partial, "partial", stallError{timeout: 100 * time.Millisecond}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -284,8 +282,6 @@ func TestDragonflyTransportOutlivesSDKDeadline(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	// The SDK ends the body with the attempt, so its default would cut a
-	// layer that takes longer to download.
 	if sdk := attemptTimeout(t, request.NewGetRequest("http://registry.test")); got < 24*time.Hour || got <= sdk {
 		t.Fatalf("attempt timeout = %v, want at least a day and beyond the SDK default %v", got, sdk)
 	}

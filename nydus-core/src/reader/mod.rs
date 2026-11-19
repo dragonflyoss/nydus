@@ -546,8 +546,7 @@ impl ErofsReader {
     }
 
     /// Returns the offset of the inode `nid` in the bootstrap, an error when
-    /// the nid of a damaged dirent or superblock places it past the address
-    /// space instead of wrapping onto another inode.
+    /// it overflows.
     pub(crate) fn nid_to_offset(&self, nid: u64) -> io::Result<usize> {
         nid.checked_mul(EROFS_SLOTSIZE as u64)
             .and_then(|offset| {

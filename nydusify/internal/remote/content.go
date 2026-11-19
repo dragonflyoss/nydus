@@ -53,7 +53,8 @@ func fetch(ctx context.Context, store content.Store, resolver remotes.Resolver, 
 		name string
 		desc ocispec.Descriptor
 	)
-	if err := retryPull(ctx, "resolve "+ref, func() (err error) {
+	if err := retryPull(ctx, "resolve "+ref, func() error {
+		var err error
 		name, desc, err = resolver.Resolve(ctx, ref)
 		return err
 	}); err != nil {
@@ -143,15 +144,14 @@ func fetchHandler(ingester content.Ingester, fetcher remotes.Fetcher) images.Han
 }
 
 // retryPull runs op until it succeeds, fails for good or has been tried
-// pushRetries times, waiting between the attempts as a push does. A fetch that
-// is tried again resumes after the bytes it already ingested.
-func retryPull(ctx context.Context, what string, op func() error) error {
+// pushRetries times, waiting between the attempts as a push does.
+func retryPull(ctx context.Context, name string, op func() error) error {
 	for attempt := 1; ; attempt++ {
 		err := op()
 		if err == nil || ctx.Err() != nil || attempt >= pushRetries || !isTransientPushError(err) {
 			return err
 		}
-		logrus.Warnf("%s attempt %d/%d failed, retrying: %v", what, attempt, pushRetries, err)
+		logrus.Warnf("%s attempt %d/%d failed, retrying: %v", name, attempt, pushRetries, err)
 		timer := time.NewTimer(time.Duration(attempt) * 500 * time.Millisecond)
 		select {
 		case <-ctx.Done():

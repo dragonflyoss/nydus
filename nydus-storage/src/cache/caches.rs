@@ -62,11 +62,8 @@ impl BlobSlot {
     /// The blob's cache, `kind` attributing the blob metadata fetch a cold
     /// open may need.
     ///
-    /// An on-demand open holds the slot's write lock, so the readers of a
-    /// cold blob wait for one open. A prefetch open may wait out the prefetch
-    /// retry interval on the backend, hours by default, so it runs outside
-    /// that lock: an on-demand read arriving meanwhile opens the blob itself,
-    /// and the prefetch open then adopts the cache the read installed.
+    /// A prefetch open may wait out the prefetch retry interval, so it runs
+    /// outside the slot lock and an on-demand read does not wait behind it.
     fn cache(&self, kind: ReadKind) -> io::Result<Arc<dyn BlobCache>> {
         if let Some(cache) = self.cache.read().unwrap().as_ref() {
             return Ok(cache.clone());
@@ -395,10 +392,7 @@ impl BlobCaches {
         filled: &AtomicU64,
         skipped: &AtomicU64,
     ) -> io::Result<(u64, u64)> {
-        // Each source blob is opened once for the stream, a failed open
-        // included: every group asks for its source several times, and a
-        // source that does not open would otherwise be tried, and warned
-        // about, for each of them.
+        // Open each source blob once for the stream, a failed open included.
         type Source = Arc<OnceLock<Option<Arc<dyn BlobCache>>>>;
         let sources: Mutex<HashMap<u16, Source>> = Mutex::new(HashMap::new());
         let source_of = |group: &BlobMetadataChunkGroupExtent| -> Option<Arc<dyn BlobCache>> {
