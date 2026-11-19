@@ -121,13 +121,8 @@ func (i *Installer) kubeSecretEnabled() (bool, error) {
 		return false, err
 	}
 
-	data, readErr := os.ReadFile(path)
-	if readErr != nil {
-		return false, err
-	}
-
-	installed, parseErr := config.Parse(data)
-	if parseErr != nil {
+	installed, loadErr := config.Load(path)
+	if loadErr != nil {
 		return false, err
 	}
 

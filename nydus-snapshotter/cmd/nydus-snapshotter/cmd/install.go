@@ -38,6 +38,5 @@ func newInstallCmd() *cobra.Command {
 	flags.StringVar(&cfg.PayloadDir, "payload-dir", installer.DefaultPayloadDir, "directory holding bin/, systemd/ and config/ to install")
 	flags.StringVar(&cfg.TokenDir, "token-dir", installer.DefaultTokenDir, "service account token directory to copy to the host when kube_secret is enabled")
 	flags.DurationVar(&cfg.SyncInterval, "sync-interval", installer.DefaultSyncInterval, "how often the token and the config are copied to the host")
-
 	return cmd
 }

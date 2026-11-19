@@ -72,7 +72,6 @@ func newRootCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&o.configPath, "config", config.DefaultPath, "path to the config file")
 	cmd.AddCommand(newInstallCmd())
-
 	return cmd
 }
 

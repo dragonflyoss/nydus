@@ -924,7 +924,7 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 │   ├── main.go                     cmd.Execute()
 │   └── cmd/{root.go,install.go}    serve; install (DaemonSet entrypoint)
 ├── internal/
-│   ├── config/                     config.go (Config, Load, Validate), defaults.go, types.go, watch.go; testdata/
+│   ├── config/                     config.go (Config, New, Load, Validate), constants.go, types.go, watch.go; testdata/
 │   ├── snapshot/                   snapshots.Snapshotter on core/snapshots/storage: snapshot.go, mount.go, label.go, blobs.go, release.go
 │   ├── fs/                         FileSystem (fs.go), daemon.go, limits.go, pusher.go, render.go, bootstrap.go, gather.go, Driver and fuse
 │   ├── systemd/                    Manager (systemd.go), units and slices (unit.go) over systemd's D-Bus API (dbus.go)

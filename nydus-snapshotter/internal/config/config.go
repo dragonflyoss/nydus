@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -29,41 +28,6 @@ import (
 	"gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/labels"
 )
-
-const (
-	// maxSocketPath is the length limit of a unix socket path (sun_path).
-	maxSocketPath = 107
-
-	// daemonIDLength is the length of a daemon ID, the hex of a sha256 chain
-	// ID.
-	daemonIDLength = 64
-
-	// maxDragonflyRetries is the retry limit nydus accepts for Dragonfly
-	// reads, refer to the Registry backend section of docs/nydus.md.
-	maxDragonflyRetries = 3
-
-	// minMountTimeout is the shortest mount timeout: systemd counts a unit's
-	// stop timeout in microseconds and reads zero as none.
-	minMountTimeout = time.Second
-
-	// minWatchdogTimeout is the shortest watchdog timeout: a daemon sends a
-	// keep-alive every half of it, and a shorter one would have systemd kill
-	// a healthy daemon over a scheduling delay.
-	minWatchdogTimeout = 10 * time.Second
-)
-
-// DriverFUSE is the FUSE mount driver.
-const DriverFUSE = "fuse"
-
-// PrefetchScopes are the prefetch scopes nydusd accepts.
-var PrefetchScopes = []string{"none", "ondemand", "all", "auto"}
-
-// nydusdLogLevels are the log levels nydusd accepts.
-var nydusdLogLevels = []string{"trace", "debug", "info", "warn", "error"}
-
-// sliceRegexp matches a slice unit name, refer to
-// https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html.
-var sliceRegexp = regexp.MustCompile(`^[0-9A-Za-z:_\\-][0-9A-Za-z:_.\\-]*\.slice$`)
 
 // Config is the snapshotter config.
 type Config struct {
@@ -368,6 +332,90 @@ type GCPolicyConfig struct {
 	DiskLowThresholdPercent int `yaml:"disk_low_threshold_percent"`
 }
 
+// New returns a config holding the defaults.
+func New() *Config {
+	return &Config{
+		RootDir:    DefaultRootDir,
+		RuntimeDir: DefaultRuntimeDir,
+		GRPC: GRPCConfig{
+			Addr: DefaultGRPCAddr,
+		},
+		Log: LogConfig{
+			Level: DefaultLogLevel,
+		},
+		Metrics: MetricsConfig{
+			Addr: DefaultMetricsAddr,
+		},
+		Registry: RegistryConfig{
+			ConfigPath: DefaultRegistryConfigPath,
+		},
+		Auth: AuthConfig{
+			KubeSecret: AuthKubeSecretConfig{
+				Kubeconfig: DefaultAuthKubeconfig,
+			},
+		},
+		Nydusd: NydusdConfig{
+			Driver:          DriverFUSE,
+			Binary:          DefaultNydusdBinary,
+			LogDir:          DefaultNydusdLogDir,
+			LogLevel:        DefaultNydusdLogLevel,
+			LogMaxFiles:     DefaultNydusdLogMaxFiles,
+			MountTimeout:    DefaultNydusdMountTimeout,
+			WatchdogTimeout: DefaultNydusdWatchdogTimeout,
+			Config: NydusdDaemonConfig{
+				RuntimeDir: DefaultNydusdRuntimeDir,
+				Backend: NydusdBackendConfig{
+					Config: NydusdRegistryConfig{
+						HTTP: NydusdHTTPConfig{
+							RequestTimeout:     DefaultNydusdHTTPRequestTimeout,
+							RequestReadTimeout: DefaultNydusdHTTPRequestReadTimeout,
+							MaxRetries:         DefaultNydusdHTTPMaxRetries,
+						},
+						Dragonfly: NydusdDragonflyConfig{
+							RequestTimeout:     DefaultNydusdDragonflyRequestTimeout,
+							RequestReadTimeout: DefaultNydusdDragonflyRequestReadTimeout,
+							MaxRetries:         DefaultNydusdDragonflyMaxRetries,
+						},
+						Fallback: NydusdFallbackConfig{
+							RequestTimeout:     DefaultNydusdFallbackRequestTimeout,
+							RequestReadTimeout: DefaultNydusdFallbackRequestReadTimeout,
+							MaxRetries:         DefaultNydusdFallbackMaxRetries,
+							RateLimit:          DefaultNydusdFallbackRateLimit,
+						},
+					},
+				},
+				Storage: NydusdStorageConfig{
+					FetchSize: DefaultNydusdStorageFetchSize,
+				},
+				Prefetch: NydusdPrefetchConfig{
+					ConcurrentBlobCount: DefaultNydusdPrefetchConcurrentBlobCount,
+					RequestTimeout:      DefaultNydusdPrefetchRequestTimeout,
+					RetryInterval:       DefaultNydusdPrefetchRetryInterval,
+					Scope:               DefaultNydusdPrefetchScope,
+				},
+			},
+		},
+		Cgroup: CgroupConfig{
+			Slice:      DefaultCgroupSlice,
+			MemoryMax:  DefaultCgroupMemoryMax,
+			MemoryHigh: DefaultCgroupMemoryHigh,
+			CPUQuota:   DefaultCgroupCPUQuota,
+			Daemon: CgroupDaemonConfig{
+				MemoryHigh: DefaultCgroupDaemonMemoryHigh,
+				CPUQuota:   DefaultCgroupDaemonCPUQuota,
+			},
+		},
+		GC: GCConfig{
+			Interval: DefaultGCInterval,
+			Policy: GCPolicyConfig{
+				BlobTTL:                  DefaultGCBlobTTL,
+				DiskHighThresholdPercent: DefaultGCDiskHighThresholdPercent,
+				DiskLowThresholdPercent:  DefaultGCDiskLowThresholdPercent,
+			},
+		},
+	}
+}
+
 // Load reads, decodes strictly and validates the config at path.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -405,42 +453,8 @@ func Parse(data []byte) (*Config, error) {
 	return cfg, nil
 }
 
-// Validate checks the config, section by section, as containerd validates its
-// CRI config, refer to
-// https://github.com/containerd/containerd/blob/main/internal/cri/config/config.go.
+// Validate checks the config values.
 func (c *Config) Validate() error {
-	if err := c.validatePaths(); err != nil {
-		return err
-	}
-
-	if _, err := logrus.ParseLevel(c.Log.Level); err != nil {
-		return fmt.Errorf("invalid log.level: %w", err)
-	}
-
-	if c.Metrics.Addr != "" {
-		if _, _, err := net.SplitHostPort(c.Metrics.Addr); err != nil {
-			return fmt.Errorf("invalid metrics.addr: %w", err)
-		}
-	}
-
-	if _, err := labels.Parse(c.Auth.KubeSecret.LabelSelector); err != nil {
-		return fmt.Errorf("invalid auth.kube_secret.label_selector: %w", err)
-	}
-
-	if err := c.Nydusd.validate(); err != nil {
-		return err
-	}
-
-	if !sliceRegexp.MatchString(c.Cgroup.Slice) {
-		return fmt.Errorf("invalid cgroup.slice %q", c.Cgroup.Slice)
-	}
-
-	return c.GC.validate()
-}
-
-// validatePaths checks that paths are absolute and that the socket paths fit
-// a unix socket address.
-func (c *Config) validatePaths() error {
 	for _, p := range []struct {
 		name, path string
 		optional   bool
@@ -478,129 +492,118 @@ func (c *Config) validatePaths() error {
 		return fmt.Errorf("runtime_dir %q makes the daemon API socket %d bytes long, over the %d byte limit", c.RuntimeDir, len(socket), maxSocketPath)
 	}
 
-	return nil
-}
-
-// validate checks the daemon config.
-func (n *NydusdConfig) validate() error {
-	if n.Driver != DriverFUSE {
-		return fmt.Errorf("unsupported nydusd.driver %q", n.Driver)
+	if _, err := logrus.ParseLevel(c.Log.Level); err != nil {
+		return fmt.Errorf("invalid log.level: %w", err)
 	}
 
-	if !slices.Contains(nydusdLogLevels, n.LogLevel) {
-		return fmt.Errorf("invalid nydusd.log_level %q, want one of %s", n.LogLevel, strings.Join(nydusdLogLevels, ", "))
+	if c.Metrics.Addr != "" {
+		if _, _, err := net.SplitHostPort(c.Metrics.Addr); err != nil {
+			return fmt.Errorf("invalid metrics.addr: %w", err)
+		}
 	}
 
-	if n.LogMaxFiles < 1 {
+	if _, err := labels.Parse(c.Auth.KubeSecret.LabelSelector); err != nil {
+		return fmt.Errorf("invalid auth.kube_secret.label_selector: %w", err)
+	}
+
+	if c.Nydusd.Driver != DriverFUSE {
+		return fmt.Errorf("unsupported nydusd.driver %q", c.Nydusd.Driver)
+	}
+
+	if !slices.Contains(nydusdLogLevels, c.Nydusd.LogLevel) {
+		return fmt.Errorf("invalid nydusd.log_level %q, want one of %s", c.Nydusd.LogLevel, strings.Join(nydusdLogLevels, ", "))
+	}
+
+	if c.Nydusd.LogMaxFiles < 1 {
 		return errors.New("nydusd.log_max_files must be at least 1")
 	}
 
-	if time.Duration(n.MountTimeout) < minMountTimeout {
+	if time.Duration(c.Nydusd.MountTimeout) < minMountTimeout {
 		return fmt.Errorf("nydusd.mount_timeout must be at least %s", minMountTimeout)
 	}
 
-	if timeout := time.Duration(n.WatchdogTimeout); timeout != 0 && timeout < minWatchdogTimeout {
+	if timeout := time.Duration(c.Nydusd.WatchdogTimeout); timeout != 0 && timeout < minWatchdogTimeout {
 		return fmt.Errorf("nydusd.watchdog_timeout must be 0 or at least %s", minWatchdogTimeout)
 	}
 
-	if err := n.Config.Backend.Config.validate(); err != nil {
-		return err
-	}
-
-	return n.Config.Prefetch.validate()
-}
-
-// validate checks the prefetch config.
-func (p *NydusdPrefetchConfig) validate() error {
-	if p.ConcurrentBlobCount < 1 {
-		return errors.New("nydusd.config.prefetch.concurrent_blob_count must be at least 1")
-	}
-
-	if p.RequestTimeout <= 0 {
-		return errors.New("nydusd.config.prefetch.request_timeout must be positive")
-	}
-
-	if p.RetryInterval < 0 {
-		return errors.New("nydusd.config.prefetch.retry_interval must not be negative")
-	}
-
-	if !slices.Contains(PrefetchScopes, p.Scope) {
-		return fmt.Errorf("invalid nydusd.config.prefetch.scope %q, want one of %s", p.Scope, strings.Join(PrefetchScopes, ", "))
-	}
-
-	return nil
-}
-
-// validate checks the registry backend config.
-func (r *NydusdRegistryConfig) validate() error {
-	for _, c := range []struct {
+	registry := c.Nydusd.Config.Backend.Config
+	for _, client := range []struct {
 		name                               string
 		requestTimeout, requestReadTimeout Duration
 		maxRetries                         int
 	}{
-		{name: "http", requestTimeout: r.HTTP.RequestTimeout, requestReadTimeout: r.HTTP.RequestReadTimeout, maxRetries: r.HTTP.MaxRetries},
-		{name: "fallback", requestTimeout: r.Fallback.RequestTimeout, requestReadTimeout: r.Fallback.RequestReadTimeout, maxRetries: r.Fallback.MaxRetries},
+		{name: "http", requestTimeout: registry.HTTP.RequestTimeout, requestReadTimeout: registry.HTTP.RequestReadTimeout, maxRetries: registry.HTTP.MaxRetries},
+		{name: "fallback", requestTimeout: registry.Fallback.RequestTimeout, requestReadTimeout: registry.Fallback.RequestReadTimeout, maxRetries: registry.Fallback.MaxRetries},
 	} {
-		if c.requestTimeout <= 0 {
-			return fmt.Errorf("nydusd.config.backend.config.%s.request_timeout must be positive", c.name)
+		if client.requestTimeout <= 0 {
+			return fmt.Errorf("nydusd.config.backend.config.%s.request_timeout must be positive", client.name)
 		}
 
-		if c.requestReadTimeout <= 0 {
-			return fmt.Errorf("nydusd.config.backend.config.%s.request_read_timeout must be positive", c.name)
+		if client.requestReadTimeout <= 0 {
+			return fmt.Errorf("nydusd.config.backend.config.%s.request_read_timeout must be positive", client.name)
 		}
 
-		if c.maxRetries < 0 {
-			return fmt.Errorf("nydusd.config.backend.config.%s.max_retries must not be negative", c.name)
+		if client.maxRetries < 0 {
+			return fmt.Errorf("nydusd.config.backend.config.%s.max_retries must not be negative", client.name)
 		}
 	}
 
-	if r.Fallback.RateLimit < 1 {
+	if registry.Fallback.RateLimit < 1 {
 		return errors.New("nydusd.config.backend.config.fallback.rate_limit must be at least 1")
 	}
 
 	// The address may carry the proxy's credentials, so it is never echoed.
-	if addr := r.HTTP.Proxy.Addr; addr != "" {
+	if addr := registry.HTTP.Proxy.Addr; addr != "" {
 		if u, err := url.Parse(addr); err != nil || u.Scheme == "" || u.Host == "" {
 			return errors.New("nydusd.config.backend.config.http.proxy.addr must be a URL with a scheme and a host")
 		}
 	}
 
-	return r.Dragonfly.validate()
-}
+	// Dragonfly counts only with a scheduler endpoint.
+	if dragonfly := registry.Dragonfly; dragonfly.SchedulerEndpoint != "" {
+		if dragonfly.RequestTimeout <= 0 {
+			return errors.New("nydusd.config.backend.config.dragonfly.request_timeout must be positive")
+		}
 
-// validate checks the Dragonfly config, which counts only with a scheduler
-// endpoint.
-func (d *NydusdDragonflyConfig) validate() error {
-	if d.SchedulerEndpoint == "" {
-		return nil
+		if dragonfly.RequestReadTimeout <= 0 {
+			return errors.New("nydusd.config.backend.config.dragonfly.request_read_timeout must be positive")
+		}
+
+		if dragonfly.MaxRetries < 0 || dragonfly.MaxRetries > maxDragonflyRetries {
+			return fmt.Errorf("nydusd.config.backend.config.dragonfly.max_retries must be within [0, %d]", maxDragonflyRetries)
+		}
 	}
 
-	if d.RequestTimeout <= 0 {
-		return errors.New("nydusd.config.backend.config.dragonfly.request_timeout must be positive")
+	prefetch := c.Nydusd.Config.Prefetch
+	if prefetch.ConcurrentBlobCount < 1 {
+		return errors.New("nydusd.config.prefetch.concurrent_blob_count must be at least 1")
 	}
 
-	if d.RequestReadTimeout <= 0 {
-		return errors.New("nydusd.config.backend.config.dragonfly.request_read_timeout must be positive")
+	if prefetch.RequestTimeout <= 0 {
+		return errors.New("nydusd.config.prefetch.request_timeout must be positive")
 	}
 
-	if d.MaxRetries < 0 || d.MaxRetries > maxDragonflyRetries {
-		return fmt.Errorf("nydusd.config.backend.config.dragonfly.max_retries must be within [0, %d]", maxDragonflyRetries)
+	if prefetch.RetryInterval < 0 {
+		return errors.New("nydusd.config.prefetch.retry_interval must not be negative")
 	}
 
-	return nil
-}
+	if !slices.Contains(PrefetchScopes, prefetch.Scope) {
+		return fmt.Errorf("invalid nydusd.config.prefetch.scope %q, want one of %s", prefetch.Scope, strings.Join(PrefetchScopes, ", "))
+	}
 
-// validate checks the blob cache GC config.
-func (g *GCConfig) validate() error {
-	if g.Interval <= 0 {
+	if !sliceRegexp.MatchString(c.Cgroup.Slice) {
+		return fmt.Errorf("invalid cgroup.slice %q", c.Cgroup.Slice)
+	}
+
+	if c.GC.Interval <= 0 {
 		return errors.New("gc.interval must be positive")
 	}
 
-	if g.Policy.BlobTTL <= 0 {
+	if c.GC.Policy.BlobTTL <= 0 {
 		return errors.New("gc.policy.blob_ttl must be positive")
 	}
 
-	if low, high := g.Policy.DiskLowThresholdPercent, g.Policy.DiskHighThresholdPercent; high < 1 || high > 99 || low < 1 || low >= high {
+	if low, high := c.GC.Policy.DiskLowThresholdPercent, c.GC.Policy.DiskHighThresholdPercent; high < 1 || high > 99 || low < 1 || low >= high {
 		return fmt.Errorf("invalid gc.policy thresholds: low %d%%, high %d%%", low, high)
 	}
 
