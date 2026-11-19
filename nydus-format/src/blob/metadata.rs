@@ -1452,7 +1452,7 @@ pub struct BlobMetadata {
 
 /// The serialized bytes of a blob meta.
 #[derive(Debug)]
-enum BlobMetadataBytes {
+pub enum BlobMetadataBytes {
     /// The bytes in memory, built or fetched.
     Owned(Vec<u8>),
 
@@ -1470,6 +1470,22 @@ impl Deref for BlobMetadataBytes {
             Self::Owned(bytes) => bytes,
             Self::Mapped(mmap) => mmap,
         }
+    }
+}
+
+/// Implements [From] for the bytes in memory.
+impl From<Vec<u8>> for BlobMetadataBytes {
+    /// Returns the bytes as owned.
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Owned(bytes)
+    }
+}
+
+/// Implements [From] for a mapped sidecar file.
+impl From<Mmap> for BlobMetadataBytes {
+    /// Returns the mapping as mapped.
+    fn from(mmap: Mmap) -> Self {
+        Self::Mapped(mmap)
     }
 }
 
@@ -1627,9 +1643,10 @@ impl BlobMetadata {
             &metadata.bytes[BlobMetadataHeader::SIZE..],
         );
 
-        let mut bytes = metadata.bytes.to_vec();
-        write_bytes_at(&mut bytes, 0, &metadata.header.to_bytes());
-        metadata.bytes = BlobMetadataBytes::Owned(bytes);
+        // A built blob meta owns its bytes, so the header is rewritten in place.
+        if let BlobMetadataBytes::Owned(bytes) = &mut metadata.bytes {
+            write_bytes_at(bytes, 0, &metadata.header.to_bytes());
+        }
         Ok(metadata)
     }
 
@@ -1654,15 +1671,11 @@ impl BlobMetadata {
         Ok((incremental, ondemand))
     }
 
-    /// Parses a blob meta from its bytes, which it keeps. The header, the table
-    /// walk, the supported tables and their header extensions, then
-    /// `validate_fields`.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
-        Self::parse(BlobMetadataBytes::Owned(bytes))
-    }
-
-    /// Parses a blob meta from its serialized bytes, which it keeps.
-    fn parse(bytes: BlobMetadataBytes) -> Result<Self> {
+    /// Parses a blob meta from its bytes, in memory or mapped, which it keeps.
+    /// The header, the table walk, the supported tables and their header
+    /// extensions, then `validate_fields`.
+    pub fn from_bytes(bytes: impl Into<BlobMetadataBytes>) -> Result<Self> {
+        let bytes = bytes.into();
         let header = BlobMetadataHeader::from_bytes(&bytes)?;
 
         // The tables follow the header back to back. The first table of a type
@@ -1881,15 +1894,6 @@ impl BlobMetadata {
     pub fn from_path(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
         Self::from_bytes(bytes)
-    }
-
-    /// Maps a blob meta from a file, with the same checks as
-    /// [`Self::from_bytes`]. The file must not be truncated or rewritten in
-    /// place while the blob meta lives.
-    pub fn from_mmap(path: &Path) -> Result<Self> {
-        // SAFETY: the caller keeps the file from changing under the mapping.
-        let mmap = unsafe { Mmap::map(&fs::File::open(path)?)? };
-        Self::parse(BlobMetadataBytes::Mapped(mmap))
     }
 
     /// Writes the serialized metadata verbatim, including tables this reader
@@ -2488,7 +2492,10 @@ mod tests {
         let test_cases = vec![
             BlobMetadata::from_bytes(blob_metadata.bytes.to_vec()).unwrap(),
             BlobMetadata::from_path(&path).unwrap(),
-            BlobMetadata::from_mmap(&path).unwrap(),
+            BlobMetadata::from_bytes(
+                unsafe { Mmap::map(&fs::File::open(&path).unwrap()) }.unwrap(),
+            )
+            .unwrap(),
         ];
 
         for loaded in test_cases {
