@@ -2073,6 +2073,27 @@ backend:
     }
 
     #[test]
+    fn origin_transport_failure_fails_a_prefetch_read_at_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 2s\n"
+        ))
+        .unwrap();
+        let registry = configured_registry(&config, None);
+
+        let now = Instant::now();
+        let mut buf = [0u8; 4];
+        let result = registry
+            .prefetch(&TEST_BLOB_ID, 0, buf.len())
+            .and_then(|mut reader| reader.read_exact(&mut buf));
+
+        assert!(result.is_err());
+        assert!(now.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
     fn unauthorized_answer_triggers_the_auth_handshake() {
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let body = b"authorized".to_vec();

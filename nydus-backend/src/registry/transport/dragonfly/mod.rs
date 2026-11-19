@@ -156,6 +156,11 @@ impl Dragonfly {
 /// Implements the fetcher over the Dragonfly SDK.
 #[async_trait]
 impl Fetcher for Dragonfly {
+    /// Returns the `source` label of the reads the seed peers serve.
+    fn source(&self) -> Source {
+        Source::Dragonfly
+    }
+
     /// Fetches `url` through the on-demand client at `Level6`.
     async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
@@ -169,8 +174,6 @@ impl Fetcher for Dragonfly {
         let client = self.ondemand_client.ready().await?;
         let now = Instant::now();
         let result = Self::response(client.get(&request).await);
-
-        // Keep the query, which signs a redirect URL, out of the log.
         let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
@@ -183,6 +186,7 @@ impl Fetcher for Dragonfly {
                 now.elapsed()
             ),
         }
+
         result
     }
 
@@ -200,8 +204,6 @@ impl Fetcher for Dragonfly {
         let client = self.prefetch_client.ready().await?;
         let now = Instant::now();
         let result = Self::response(client.get(&request).await);
-
-        // Keep the query, which signs a redirect URL, out of the log.
         let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
@@ -214,12 +216,8 @@ impl Fetcher for Dragonfly {
                 now.elapsed()
             ),
         }
-        result
-    }
 
-    /// Returns the `source` label of the reads the seed peers serve.
-    fn source(&self) -> Source {
-        Source::Dragonfly
+        result
     }
 }
 

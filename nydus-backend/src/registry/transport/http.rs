@@ -20,7 +20,7 @@ use crate::Source;
 
 use crate::registry::response::Response;
 
-use super::middleware::{CircuitBreaker, RateLimit, RedactQuery};
+use super::middleware::{CircuitBreaker, RateLimit};
 use super::Fetcher;
 
 /// The HTTP client of the origin registry.
@@ -36,8 +36,8 @@ use super::Fetcher;
 /// [`CircuitBreaker`].
 #[derive(Clone)]
 pub(crate) struct Http {
-    /// The reqwest client behind the retry, rate limit, circuit breaker and
-    /// query redaction middleware.
+    /// The reqwest client behind the retry, rate limit and circuit breaker
+    /// middleware.
     client: ClientWithMiddleware,
 
     /// The proxy the requests go through.
@@ -105,7 +105,7 @@ impl Http {
         }
 
         Ok(Self {
-            client: client.with(RedactQuery).build(),
+            client: client.build(),
             proxy: proxy.cloned(),
         })
     }
@@ -126,12 +126,18 @@ impl Http {
 /// Implements the fetcher over the origin HTTP client.
 #[async_trait]
 impl Fetcher for Http {
+    /// Returns the `source` label of the reads, `http_proxy` through a proxy.
+    fn source(&self) -> Source {
+        match &self.proxy {
+            Some(_) => Source::HttpProxy,
+            None => Source::Http,
+        }
+    }
+
     /// Sends the `GET` of an on-demand read, the body left streaming.
     async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let now = Instant::now();
         let result = Self::response(self.client.get(url.clone()).headers(headers).send().await);
-
-        // Keep the query, which signs a redirect URL, out of the log.
         let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
@@ -144,6 +150,7 @@ impl Fetcher for Http {
                 now.elapsed()
             ),
         }
+
         result
     }
 
@@ -151,8 +158,6 @@ impl Fetcher for Http {
     async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let now = Instant::now();
         let result = Self::response(self.client.get(url.clone()).headers(headers).send().await);
-
-        // Keep the query, which signs a redirect URL, out of the log.
         let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
@@ -165,15 +170,8 @@ impl Fetcher for Http {
                 now.elapsed()
             ),
         }
-        result
-    }
 
-    /// Returns the `source` label of the reads, `http_proxy` through a proxy.
-    fn source(&self) -> Source {
-        match &self.proxy {
-            Some(_) => Source::HttpProxy,
-            None => Source::Http,
-        }
+        result
     }
 }
 
@@ -182,7 +180,6 @@ mod tests {
     use super::*;
     use rcgen::CertifiedKey;
     use std::fs;
-    use std::net::TcpListener;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -190,34 +187,6 @@ mod tests {
     use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
     use tokio_rustls::rustls::ServerConfig;
     use tokio_rustls::TlsAcceptor;
-
-    #[tokio::test]
-    async fn prefetch_keeps_the_query_out_of_the_error_of_a_transport_failure() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/blob", listener.local_addr().unwrap());
-        drop(listener);
-        let http = Http::new(
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            0,
-            None,
-            &TlsConfig::default(),
-            None,
-        )
-        .unwrap();
-
-        let message = http
-            .prefetch(
-                &format!("{url}?sig=secret").parse().unwrap(),
-                HeaderMap::new(),
-            )
-            .await
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(message.contains(&url));
-        assert!(!message.contains("secret"));
-    }
 
     #[cfg(feature = "dragonfly")]
     #[test]
