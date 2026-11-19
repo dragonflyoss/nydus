@@ -65,17 +65,11 @@ func ExtractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 	return bootstrapPath, blobMetaPaths, nil
 }
 
-// WriteTarEntry copies the current tar entry body into destPath.
+// WriteTarEntry copies the current tar entry body into destPath, replacing the
+// file rather than rewriting it: an extracted blob meta may be hardlinked into
+// a cache dir, where a daemon maps it.
 func WriteTarEntry(tr *tar.Reader, destPath string) error {
-	out, err := os.Create(destPath)
-	if err != nil {
-		return errors.Wrap(err, "create file")
-	}
-	if _, err := io.Copy(out, tr); err != nil {
-		_ = out.Close()
-		return errors.Wrap(err, "copy file")
-	}
-	return out.Close()
+	return writeFile(tr, destPath, 0o644)
 }
 
 // LinkBlobMetaFiles populates cacheDir with the blob meta artifacts so the
@@ -138,7 +132,13 @@ func copyFile(src, dst string) error {
 	}
 	defer func() { _ = in.Close() }()
 
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".blob-meta-*")
+	return writeFile(in, dst, 0o600)
+}
+
+// writeFile writes r to dst with mode perm atomically, via a temporary file in
+// the same dir, so dst is a new file and never a rewritten one.
+func writeFile(r io.Reader, dst string, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".tmp-*")
 	if err != nil {
 		return errors.Wrap(err, "create temp file")
 	}
@@ -151,8 +151,11 @@ func copyFile(src, dst string) error {
 		}
 	}()
 
-	if _, err := io.Copy(tmp, in); err != nil {
+	if _, err := io.Copy(tmp, r); err != nil {
 		return errors.Wrap(err, "copy data")
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return errors.Wrap(err, "chmod temp file")
 	}
 	if err := tmp.Close(); err != nil {
 		return errors.Wrap(err, "close temp file")

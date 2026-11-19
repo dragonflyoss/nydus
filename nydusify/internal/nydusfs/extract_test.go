@@ -153,6 +153,32 @@ func TestExtractBootstrapLayer(t *testing.T) {
 			},
 		},
 		{
+			name: "replace a blob meta hardlinked elsewhere",
+			mock: func(t *testing.T, dest string) []byte {
+				stale := filepath.Join(dest, "blob.blob.meta")
+				if err := os.WriteFile(stale, []byte("stale bytes"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(stale, filepath.Join(dest, "linked")); err != nil {
+					t.Fatal(err)
+				}
+
+				return mockTarLayer(t, mockBootstrapEntries...)
+			},
+			expect: func(t *testing.T, dest, bootstrap string, blobMetas []string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				data, err := os.ReadFile(filepath.Join(dest, "blob.blob.meta"))
+				assert.NoError(err)
+				assert.Equal("metadata bytes", string(data))
+
+				data, err = os.ReadFile(filepath.Join(dest, "linked"))
+				assert.NoError(err)
+				assert.Equal("stale bytes", string(data))
+			},
+		},
+		{
 			name: "missing bootstrap",
 			mock: func(t *testing.T, dest string) []byte {
 				return mockTarLayer(t, mockBootstrapEntries[1:]...)
