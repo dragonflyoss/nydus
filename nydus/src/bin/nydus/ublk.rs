@@ -6,9 +6,10 @@ use nydus::ublk::{
 };
 use nydus_config::Config;
 use nydus_telemetry::logging::init_tracing;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use super::*;
 
@@ -133,13 +134,12 @@ impl UblkCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
-        // Load the storage config.
-        let config = Config::load(&self.config)?;
-
-        // Runs the ublk block device service until shutdown.
-        self.run(signals, config)
+        // Load the storage config and run the ublk service until shutdown.
+        Config::load(&self.config)
+            .and_then(|config| self.run(signals, config))
+            .inspect_err(|err| error!("nydus ublk failed: {}", err.report()))
     }
 
     /// Runs the ublk service: builds the core, attaches the device, prints
@@ -163,7 +163,10 @@ impl UblkCommand {
         let ondemand_recorder = core.core().ondemand_recorder().clone();
         let backend = core.core().backend().clone();
         let service = UblkService::new(core, &options)?;
-        println!("{}", service.dev_path());
+        if let Err(err) = writeln!(io::stdout(), "{}", service.dev_path()) {
+            service.delete();
+            return Err(err.into());
+        }
 
         // Non-fatal like the fuse service: the device keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {

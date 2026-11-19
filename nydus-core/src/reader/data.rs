@@ -5,7 +5,7 @@ use std::io::Write;
 use nydus_format::erofs::{
     ErofsChunkAddr, ErofsChunkIndex, ErofsInode, ZErofsCompressor, ZErofsLclusterIndex,
     EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
-    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
+    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
     Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
     Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
     Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_MAP_HEADER_SIZE,
@@ -140,7 +140,7 @@ impl ErofsReader {
         }
         let chunk_size = self.chunk_size(inode);
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
-        let inode_offset = self.nid_to_offset(nid);
+        let inode_offset = self.nid_to_offset(nid)?;
         let header_size = inode.header_size() + inode.xattr_size();
         let index_offset = inode_offset
             + align_up_usize(header_size, EROFS_CHUNK_INDEX_SIZE).expect("alignment overflowed");
@@ -173,7 +173,7 @@ impl ErofsReader {
                 "not a z_erofs compressed inode",
             ));
         }
-        let inode_offset = self.z_inode_offset(nid)?;
+        let inode_offset = self.nid_to_offset(nid)?;
         let header_size = inode.header_size() + inode.xattr_size();
         let tail_offset = align_up_usize(header_size, 8)
             .and_then(|size| inode_offset.checked_add(size))
@@ -284,7 +284,7 @@ impl ErofsReader {
                 w.write_all(block_data)?;
 
                 let inline_read_size = size - block_read_size;
-                let inode_offset = self.nid_to_offset(nid);
+                let inode_offset = self.nid_to_offset(nid)?;
                 let header_size = inode.header_size() + inode.xattr_size();
                 let inline_data = self.mmap_slice(inode_offset + header_size, inline_read_size)?;
                 w.write_all(inline_data)?;
@@ -352,24 +352,12 @@ impl ErofsReader {
     // (compressed) layer data.
     // ------------------------------------------------------------------
 
-    fn z_inode_offset(&self, nid: u64) -> io::Result<usize> {
-        nid.checked_mul(EROFS_SLOTSIZE as u64)
-            .and_then(|offset| {
-                offset
-                    .checked_add(self.superblock().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64)
-            })
-            .and_then(|offset| usize::try_from(offset).ok())
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "z_erofs inode offset overflow")
-            })
-    }
-
     fn z_packed_inode(&self) -> io::Result<(u64, ErofsInode<'_>)> {
         let nid = self.superblock().packed_nid().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "fragment without packed inode")
         })?;
         let inode = self
-            .inode_at(self.z_inode_offset(nid)?)
+            .inode_at(self.nid_to_offset(nid)?)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         Ok((nid, inode))
     }
@@ -762,7 +750,7 @@ mod tests {
     use super::*;
     use nydus_format::erofs::{
         ErofsInodeCompact, ErofsSuperblock, EROFS_FEATURE_INCOMPAT_FRAGMENTS,
-        EROFS_INODE_COMPACT_SIZE, EROFS_SUPER_OFFSET,
+        EROFS_INODE_COMPACT_SIZE, EROFS_SLOTSIZE, EROFS_SUPER_OFFSET,
     };
 
     #[test]

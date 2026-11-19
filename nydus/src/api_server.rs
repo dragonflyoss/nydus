@@ -42,6 +42,9 @@ pub struct ControlProtocol {
 /// The bound for reading request headers and completing an upgrade.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The wait after a failed accept before the next one.
+const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+
 /// The route that describes the daemon: its build, its process and the
 /// optional calls it serves.
 const DAEMON_PATH: &str = "/api/v1/daemon";
@@ -344,7 +347,14 @@ async fn serve(
                         }
                     });
                 }
-                Err(err) => error!("apiserver accept error: {err}"),
+                Err(err) => {
+                    // Back off before accepting again, a failure such as EMFILE lasts.
+                    error!("apiserver accept error: {err}");
+                    tokio::select! {
+                        _ = stopped.changed() => break,
+                        _ = tokio::time::sleep(ACCEPT_BACKOFF) => {}
+                    }
+                }
             }
         }
     }

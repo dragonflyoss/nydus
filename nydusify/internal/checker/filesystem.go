@@ -75,11 +75,11 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 	}
 	defer cleanupTarget()
 
-	sourceNodes, err := walkRootfs(sourceRoot)
+	sourceNodes, err := walkRootfs(ctx, sourceRoot)
 	if err != nil {
 		return errors.Wrap(err, "walk source rootfs")
 	}
-	targetNodes, err := walkRootfs(targetRoot)
+	targetNodes, err := walkRootfs(ctx, targetRoot)
 	if err != nil {
 		return errors.Wrap(err, "walk target rootfs")
 	}
@@ -202,6 +202,12 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 		_ = cmd.Process.Signal(unix.SIGTERM)
 		select {
 		case <-done:
+			// Unmount what a daemon that died left mounted.
+			if mounted, err := isMounted(mountpoint, filepath.Dir(mountpoint)); err != nil || mounted {
+				if err := unmountFuse(mountpoint); err != nil {
+					log.G(ctx).WithError(err).Warnf("unmount nydus fuse at %q", mountpoint)
+				}
+			}
 		case <-time.After(10 * time.Second):
 			// Helpers may issue FUSE requests, so disconnect an unresponsive daemon first.
 			_ = cmd.Process.Kill()

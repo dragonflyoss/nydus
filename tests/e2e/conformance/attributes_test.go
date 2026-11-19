@@ -557,9 +557,6 @@ func processView(t *testing.T, m *mounted) {
 
 		mountFd := openDir(t, m.Root)
 		fd, err := unix.OpenByHandleAt(mountFd, handle, unix.O_RDONLY|unix.O_CLOEXEC)
-		if !m.isKernelEROFS() && errors.Is(err, unix.ESTALE) {
-			return
-		}
 		if !assert.NoError(t, err) {
 			t.FailNow()
 		}

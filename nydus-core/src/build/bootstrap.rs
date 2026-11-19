@@ -1180,6 +1180,40 @@ mod tests {
         assert!(hit, "no image ended in a compact inode");
     }
 
+    #[test]
+    fn no_dirent_names_nid_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(source.join("sub")).unwrap();
+        let scratch = dir.path().join("scratch.blob");
+        let mut blob_writer =
+            BlobWriter::plain(fs::File::create(&scratch).unwrap(), EROFS_BLOCK_SIZE);
+        let mut inodes =
+            build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        blob_writer.finish().unwrap();
+        let epoch = choose_epoch(&inodes);
+        let bootstrap = render_flattened_bootstrap(&mut inodes, epoch, &[], &[0u8; 16]).unwrap();
+        let path = dir.path().join("bootstrap");
+        fs::write(&path, &bootstrap).unwrap();
+        let reader = ErofsReader::open_metadata_only(&path).unwrap();
+
+        let root_nid = reader.superblock().root_nid();
+        let root = reader.inode(root_nid).unwrap();
+        let sub_nid = reader
+            .lookup_dir_entry(root_nid, &root, b"sub")
+            .unwrap()
+            .unwrap();
+        let sub = reader.inode(sub_nid).unwrap();
+
+        for (nid, inode) in [(root_nid, &root), (sub_nid, &sub)] {
+            let entries = reader.read_dir(nid, inode).unwrap();
+            assert_eq!(entries.len(), 2 + usize::from(nid == root_nid));
+            for entry in entries {
+                assert_ne!(entry.nid, 0, "{}", String::from_utf8_lossy(&entry.name));
+            }
+        }
+    }
+
     /// Directories pack their last dirent block behind the inode and a
     /// directory's children get consecutive nids; both must read back through
     /// the metadata reader exactly.

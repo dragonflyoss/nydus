@@ -7,14 +7,18 @@
 package remote
 
 import (
+	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	remoteserrors "github.com/containerd/containerd/v2/core/remotes/errors"
 	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/pkg/errors"
 )
@@ -43,10 +47,93 @@ func newHTTPClient(skipTLSVerify bool) *http.Client {
 	}
 }
 
+// stallTimeout is how long a registry or token server may send nothing before
+// its request is given up.
+var stallTimeout = 5 * time.Minute
+
+// stallError reports a request given up for a server that sent nothing.
+type stallError struct{ timeout time.Duration }
+
+func (e stallError) Error() string   { return "server sent nothing for " + e.timeout.String() }
+func (e stallError) Timeout() bool   { return true }
+func (e stallError) Temporary() bool { return true }
+
+// stallTransport gives up a GET or HEAD, or with everyMethod any request,
+// whose response headers or next body bytes do not arrive within timeout.
+type stallTransport struct {
+	base        http.RoundTripper
+	timeout     time.Duration
+	everyMethod bool
+}
+
+func (t stallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if !t.everyMethod && req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return t.base.RoundTrip(req)
+	}
+	ctx, cancel := context.WithCancel(req.Context())
+	stalled := &atomic.Bool{}
+	timer := time.AfterFunc(t.timeout, func() {
+		stalled.Store(true)
+		cancel()
+	})
+	resp, err := t.base.RoundTrip(req.WithContext(ctx))
+	timer.Stop()
+	if err != nil {
+		cancel()
+		if stalled.Load() {
+			err = stallError{timeout: t.timeout}
+		}
+		return nil, err
+	}
+	resp.Body = &stallBody{ReadCloser: resp.Body, timeout: t.timeout, timer: timer, stalled: stalled, cancel: cancel}
+	return resp, nil
+}
+
+// stallBody arms the timer of its request around each read.
+type stallBody struct {
+	io.ReadCloser
+	timeout time.Duration
+	timer   *time.Timer
+	stalled *atomic.Bool
+	cancel  context.CancelFunc
+}
+
+func (b *stallBody) Read(data []byte) (int, error) {
+	b.timer.Reset(b.timeout)
+	read, err := b.ReadCloser.Read(data)
+	b.timer.Stop()
+	if err != nil && err != io.EOF && b.stalled.Load() {
+		err = stallError{timeout: b.timeout}
+	}
+	return read, err
+}
+
+func (b *stallBody) Close() error {
+	b.timer.Stop()
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
+// transientStatusTransport returns a GET or HEAD the registry answers with a
+// transient status as the typed error of that status.
+type transientStatusTransport struct{ http.RoundTripper }
+
+func (t transientStatusTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.RoundTripper.RoundTrip(req)
+	if err != nil || (req.Method != http.MethodGet && req.Method != http.MethodHead) ||
+		!isTransientPushError(remoteserrors.ErrUnexpectedStatus{StatusCode: resp.StatusCode}) {
+		return resp, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return nil, remoteserrors.NewUnexpectedStatusErr(resp)
+}
+
 // newRegistryClient builds the client of registry requests, routing manifest
 // and blob GETs through Dragonfly when it is enabled.
 func newRegistryClient(skipTLSVerify bool) *http.Client {
 	client := newHTTPClient(skipTLSVerify)
+	client.Transport = transientStatusTransport{RoundTripper: stallTransport{base: client.Transport, timeout: stallTimeout}}
 	if dragonflyProxy != nil {
 		client.Transport = &dragonflyTransport{base: client.Transport, getter: dragonflyProxy}
 	}
@@ -78,10 +165,13 @@ func NewResolver(insecure, plainHTTP bool, credFunc CredentialFunc) remotes.Reso
 }
 
 func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) remotes.Resolver {
+	// A token request is small whatever its method, so all of them are watched.
+	authClient := newHTTPClient(insecure)
+	authClient.Transport = stallTransport{base: authClient.Transport, timeout: stallTimeout, everyMethod: true}
 	registryHosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
-				docker.WithAuthClient(newHTTPClient(insecure)),
+				docker.WithAuthClient(authClient),
 				docker.WithAuthCreds(credFunc),
 			),
 		),

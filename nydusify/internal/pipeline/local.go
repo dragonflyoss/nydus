@@ -10,7 +10,6 @@ import (
 	"context"
 
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -24,6 +23,8 @@ type LocalDirOption struct {
 	SourceDir         string
 	AppendInBootstrap []string
 	Annotations       map[string]string
+	// Platform is the platform the output image is for, the host's when unset.
+	Platform ocispec.Platform
 }
 
 // ConvertLocalDir converts a local directory into a single-layer nydus image
@@ -44,7 +45,7 @@ func ConvertLocalDir(ctx context.Context, cs content.Store, opt LocalDirOption) 
 		ChunkSize:         opt.ChunkSize,
 		Compressor:        opt.Compressor,
 		LogLevel:          opt.LogLevel,
-		Platform:          platforms.DefaultSpec(),
+		Platform:          opt.Platform,
 		Sources:           []Source{{Dir: opt.SourceDir}},
 		AppendInBootstrap: opt.AppendInBootstrap,
 		Annotations:       opt.Annotations,

@@ -56,6 +56,7 @@ func TestWriteRegistryConfig(t *testing.T) {
 		name       string
 		opt        remote.Option
 		ref        string
+		env        map[string]string
 		prefetch   bool
 		configPath string
 		expect     func(t *testing.T, cacheDir, configPath, out string, err error)
@@ -128,10 +129,86 @@ func TestWriteRegistryConfig(t *testing.T) {
 				assert.Empty(out)
 			},
 		},
+		{
+			name:       "proxy of a tls registry",
+			ref:        "registry.test/ns/image:v1",
+			env:        map[string]string{"HTTPS_PROXY": "http://user:pass@proxy.test:3128", "HTTP_PROXY": "http://plain.test:3128"},
+			configPath: "config.yaml",
+			expect: func(t *testing.T, cacheDir, configPath, out string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				var decoded struct {
+					Backend struct {
+						Config struct {
+							HTTP struct {
+								Proxy map[string]string `yaml:"proxy"`
+							} `yaml:"http"`
+						} `yaml:"config"`
+					} `yaml:"backend"`
+				}
+				assert.NoError(yaml.Unmarshal([]byte(out), &decoded))
+				assert.Equal(map[string]string{"addr": "http://user:pass@proxy.test:3128"}, decoded.Backend.Config.HTTP.Proxy)
+			},
+		},
+		{
+			name:       "proxy of a plain http registry",
+			opt:        remote.Option{TargetPlainHTTP: true},
+			ref:        "registry.test:5000/ns/image:v1",
+			env:        map[string]string{"HTTPS_PROXY": "http://tls.test:3128", "HTTP_PROXY": "https://proxy.test"},
+			configPath: "config.yaml",
+			expect: func(t *testing.T, cacheDir, configPath, out string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+
+				var cfg storageConfig
+				assert.NoError(yaml.Unmarshal([]byte(out), &cfg))
+				assert.Equal(&proxySection{Addr: "https://proxy.test"}, cfg.Backend.Config.HTTP.Proxy)
+			},
+		},
+		{
+			name:       "registry excluded by NO_PROXY",
+			ref:        "registry.test/ns/image:v1",
+			env:        map[string]string{"HTTPS_PROXY": "http://proxy.test:3128", "NO_PROXY": "other.test,registry.test"},
+			configPath: "config.yaml",
+			expect: func(t *testing.T, cacheDir, configPath, out string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.NotContains(out, "proxy:")
+			},
+		},
+		{
+			name:       "proxy the daemon cannot use",
+			ref:        "registry.test/ns/image:v1",
+			env:        map[string]string{"HTTPS_PROXY": "socks5://proxy.test:1080"},
+			configPath: "config.yaml",
+			expect: func(t *testing.T, cacheDir, configPath, out string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.NotContains(out, "proxy:")
+			},
+		},
+		{
+			name:       "proxy the environment forbids",
+			opt:        remote.Option{TargetPlainHTTP: true},
+			ref:        "registry.test/ns/image:v1",
+			env:        map[string]string{"HTTP_PROXY": "http://proxy.test:3128", "REQUEST_METHOD": "GET"},
+			configPath: "config.yaml",
+			expect: func(t *testing.T, cacheDir, configPath, out string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, `resolve the proxy of "http://registry.test" from the environment`)
+				assert.Empty(out)
+				assert.NoFileExists(configPath)
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			for _, key := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"} {
+				t.Setenv(key, tc.env[key])
+			}
+
 			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"auths":{"registry.test":{"auth":"`+mockAuth+`"}}}`), 0o600); err != nil {
 				t.Fatal(err)

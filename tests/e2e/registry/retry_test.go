@@ -112,7 +112,7 @@ func TestPrefetchStatus(t *testing.T) {
 			config.prefetch.Scope = "all"
 			config.prefetch.RetryInterval = "1s"
 			m := image.mount(t, config)
-			m.Daemon.WaitForLog(t, 10*time.Second, "origin request failed, retrying in")
+			m.Daemon.WaitForLog(t, 10*time.Second, "http request failed, retrying in")
 
 			if !assert.Positive(t, proxy.injected()) {
 				t.FailNow()

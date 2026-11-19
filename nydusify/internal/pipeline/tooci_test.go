@@ -24,6 +24,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/platforms"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -400,6 +401,33 @@ func TestConvertToOCI(t *testing.T) {
 			},
 		},
 		{
+			name:    "convert only the requested platform of an index",
+			builder: true,
+			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
+				return mockIndex(t, cs,
+					ocispec.Descriptor{
+						MediaType: ocispec.MediaTypeImageManifest,
+						Digest:    digest.FromString("platform that was not pulled"),
+						Platform:  &ocispec.Platform{OS: "linux", Architecture: "arm64"},
+					},
+					mockNydusPlatformManifest(t, cs, builder, "amd64", "zstd"),
+				)
+			},
+			opt: ToOCIOption{PlatformMC: platforms.OnlyStrict(ocispec.Platform{OS: "linux", Architecture: "amd64"})},
+			expect: func(t *testing.T, cs content.Store, opt ToOCIOption, source ocispec.Descriptor, desc *ocispec.Descriptor, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(ocispec.MediaTypeImageManifest, desc.MediaType)
+				assert.Equal("amd64", desc.Platform.Architecture)
+
+				manifest, _ := readManifest(t, cs, *desc)
+				assert.NotEmpty(manifest.Layers)
+				for _, layer := range manifest.Layers {
+					assert.Equal(ocispec.MediaTypeImageLayer, layer.MediaType)
+				}
+			},
+		},
+		{
 			name:    "reject index with missing later platform",
 			builder: true,
 			source: func(t *testing.T, cs content.Store) ocispec.Descriptor {
@@ -706,6 +734,37 @@ func TestUnpackLayers(t *testing.T) {
 			tc.expect(t, ctx, blobs, layers, unpackErr)
 		})
 	}
+}
+
+func TestUnpackLayers_RepeatedBlob(t *testing.T) {
+	builder := os.Getenv("NYDUS_TEST_BUILDER")
+	if builder == "" {
+		t.Skip("set NYDUS_TEST_BUILDER to run reverse conversion tests")
+	}
+
+	procs := runtime.GOMAXPROCS(max(2, runtime.GOMAXPROCS(0)))
+	defer runtime.GOMAXPROCS(procs)
+
+	cs := mockStore(t)
+	blob := mockBuiltBlob(t, cs, nydus.PackOption{BuilderPath: builder}, "file", []byte("repeated layer"))
+	workDir := t.TempDir()
+
+	layers, err := unpackLayers(context.Background(), cs, []ocispec.Descriptor{blob, blob, blob},
+		ToOCIOption{BuilderPath: builder, WorkDir: workDir, Compressor: "oci-tar"})
+
+	assert := assert.New(t)
+	assert.NoError(err)
+	if !assert.Len(layers, 3) {
+		return
+	}
+
+	assert.NotEmpty(layers[0].diffID)
+	assert.Equal(layers[0], layers[1])
+	assert.Equal(layers[0], layers[2])
+
+	entries, err := os.ReadDir(workDir)
+	assert.NoError(err)
+	assert.Empty(entries)
 }
 
 func TestRewriteOCIConfig(t *testing.T) {

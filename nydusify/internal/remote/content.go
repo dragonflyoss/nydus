@@ -49,8 +49,15 @@ import (
 //
 // Adapted from containerd's client pull flow.
 func fetch(ctx context.Context, store content.Store, resolver remotes.Resolver, ref string, platformMC platforms.MatchComparer, opt PullOption) (ocispec.Descriptor, error) {
-	name, desc, err := resolver.Resolve(ctx, ref)
-	if err != nil {
+	var (
+		name string
+		desc ocispec.Descriptor
+	)
+	if err := retryPull(ctx, "resolve "+ref, func() error {
+		var err error
+		name, desc, err = resolver.Resolve(ctx, ref)
+		return err
+	}); err != nil {
 		return ocispec.Descriptor{}, errors.Wrapf(err, "resolve %q", ref)
 	}
 
@@ -126,11 +133,32 @@ func fetchHandler(ingester content.Ingester, fetcher remotes.Fetcher) images.Han
 		if desc.MediaType == images.MediaTypeDockerSchema1Manifest {
 			return nil, errors.Errorf("%v not supported", desc.MediaType)
 		}
-		err := remotes.Fetch(ctx, ingester, fetcher, desc)
+		err := retryPull(ctx, "fetch "+desc.Digest.String(), func() error {
+			return remotes.Fetch(ctx, ingester, fetcher, desc)
+		})
 		if errdefs.IsAlreadyExists(err) {
 			return nil, nil
 		}
 		return nil, err
+	}
+}
+
+// retryPull runs op until it succeeds, fails for good or has been tried
+// pushRetries times, waiting between the attempts as a push does.
+func retryPull(ctx context.Context, name string, op func() error) error {
+	for attempt := 1; ; attempt++ {
+		err := op()
+		if err == nil || ctx.Err() != nil || attempt >= pushRetries || !isTransientPushError(err) {
+			return err
+		}
+		logrus.Warnf("%s attempt %d/%d failed, retrying: %v", name, attempt, pushRetries, err)
+		timer := time.NewTimer(time.Duration(attempt) * 500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }
 
@@ -194,7 +222,9 @@ func ensureParentBlob(ctx context.Context, store content.Store, resolver remotes
 	if err != nil {
 		return errors.Wrapf(err, "get fetcher for parent %q", parent)
 	}
-	if err := remotes.Fetch(ctx, store, fetcher, desc); err != nil && !errdefs.IsAlreadyExists(err) {
+	if err := retryPull(ctx, "fetch "+desc.Digest.String(), func() error {
+		return remotes.Fetch(ctx, store, fetcher, desc)
+	}); err != nil && !errdefs.IsAlreadyExists(err) {
 		return errors.Wrapf(err, "download parent blob %s", desc.Digest)
 	}
 	reader, err := store.ReaderAt(ctx, desc)

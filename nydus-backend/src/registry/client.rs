@@ -3,11 +3,15 @@
 
 use std::future::Future;
 use std::io;
+use std::ops::RangeInclusive;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
+use rand::Rng;
 use reqwest::header::{HeaderMap, AUTHORIZATION, RANGE, WWW_AUTHENTICATE};
 use reqwest::StatusCode;
+use tracing::warn;
 use url::Url;
 
 use nydus_format::utils::SHA256_DIGEST_SIZE;
@@ -42,6 +46,9 @@ use super::transport::{Fetcher, Transport};
 /// a read once the token expired, or the registry refuses it
 ///   4. GET blob URL ──▶ 401 ──▶ the token is forgotten ────────────▶ step 2
 ///
+/// a prefetch read answered with a `429`, `5xx` or `408`
+///   sent once more after the retry interval, from step 1
+///
 /// a read through the proxy or Dragonfly whose body breaks off, see
 /// [`Response::resumable`]
 ///   the same steps from the origin, for the bytes left
@@ -62,6 +69,9 @@ pub(crate) struct Client {
     /// The signed URLs blob `GET`s were redirected to, by blob hex digest.
     pub(crate) redirects: RedirectCache,
 
+    /// The random wait before a prefetch read is sent once more.
+    pub(crate) prefetch_retry_interval: RangeInclusive<Duration>,
+
     /// The transport of token fetches, never Dragonfly: `http.proxy` when
     /// configured, falling back to the origin, or the origin.
     pub(crate) auth_transport: Transport,
@@ -74,12 +84,13 @@ pub(crate) struct Client {
 /// Implements the registry requests.
 impl Client {
     /// Returns the URL of blob `hex`, `<addr>/v2/<repository>/blobs/sha256:<hex>`.
-    pub(crate) fn blob_url(&self, hex: &str) -> String {
-        format!(
+    pub(crate) fn blob_url(&self, hex: &str) -> io::Result<Url> {
+        Url::parse(&format!(
             "{}/v2/{}/blobs/sha256:{hex}",
             self.addr.as_str().trim_end_matches('/'),
             self.repository
-        )
+        ))
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
     }
 
     /// Executes `request` with the kept token, answering a `401` with the auth
@@ -186,7 +197,7 @@ impl Client {
             }
         }
 
-        let url = self.blob_url(&hex);
+        let url = self.blob_url(&hex)?;
         let response = self
             .execute(headers.clone(), |headers| fetcher.get(&url, headers))
             .await?;
@@ -200,7 +211,7 @@ impl Client {
             return Ok(response);
         }
 
-        let location = response.location()?;
+        let location = response.location(&url)?;
         let redirected = fetcher.get(&location, headers).await?;
         if !redirected.status.is_success() {
             return Ok(redirected);
@@ -212,7 +223,7 @@ impl Client {
     }
 
     /// Fetches the `range` of a blob for a prefetch read, through the cached
-    /// redirect when there is one.
+    /// redirect when there is one, once more on a `429`, `5xx` or `408`.
     pub(crate) async fn prefetch(
         &self,
         blob_id: &[u8; SHA256_DIGEST_SIZE],
@@ -222,40 +233,62 @@ impl Client {
         let mut headers = HeaderMap::new();
         headers.insert(RANGE, range.to_string().parse().map_err(io::Error::other)?);
         let transport = &self.transport;
-        if let Some(redirect) = self.redirects.get(&hex) {
-            let response = transport.prefetch(&redirect, headers.clone()).await?;
-            match response.status {
-                status if status.is_success() => {
-                    response.validate_range(range)?;
-                    return Ok(response);
+        let url = self.blob_url(&hex)?;
+        let mut retried = false;
+        loop {
+            // Fetch through the cached redirect, evicting one that expired.
+            let cached = match self.redirects.get(&hex) {
+                Some(redirect) => {
+                    let response = transport.prefetch(&redirect, headers.clone()).await?;
+                    if response.is_redirect_expired() {
+                        self.redirects.remove(&hex);
+                        None
+                    } else {
+                        Some(response)
+                    }
                 }
-                _ if response.is_redirect_expired() => self.redirects.remove(&hex),
-                _ => return Err(response.into_io_error().await),
+                None => None,
+            };
+
+            // Resolve the redirect at the registry without a cached one.
+            let (response, location) = match cached {
+                Some(response) => (response, None),
+                None => {
+                    let response = self
+                        .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
+                        .await?;
+                    if response.status.is_redirection() {
+                        let location = response.location(&url)?;
+                        let redirected = transport.prefetch(&location, headers.clone()).await?;
+                        (redirected, Some(location))
+                    } else {
+                        (response, None)
+                    }
+                }
+            };
+
+            if response.status.is_success() {
+                response.validate_range(range)?;
+                if let Some(location) = location {
+                    self.redirects.insert(&hex, location);
+                }
+
+                return Ok(response);
             }
+
+            if !response.is_transient() || retried {
+                return Err(response.into_io_error().await);
+            }
+
+            // Retry once after a random interval, resolving the redirect again.
+            let err = response.into_io_error().await;
+            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
+            warn!(
+                "{} request failed, retrying in {delay:?}: {err}",
+                transport.source()
+            );
+            tokio::time::sleep(delay).await;
+            retried = true;
         }
-
-        let url = self.blob_url(&hex);
-        let response = self
-            .execute(headers.clone(), |headers| transport.prefetch(&url, headers))
-            .await?;
-
-        if response.status.is_success() {
-            response.validate_range(range)?;
-            return Ok(response);
-        }
-
-        if !response.status.is_redirection() {
-            return Err(response.into_io_error().await);
-        }
-
-        let location = response.location()?;
-        let redirected = transport.prefetch(&location, headers).await?;
-        if !redirected.status.is_success() {
-            return Err(redirected.into_io_error().await);
-        }
-
-        redirected.validate_range(range)?;
-        self.redirects.insert(&hex, location);
-        Ok(redirected)
     }
 }

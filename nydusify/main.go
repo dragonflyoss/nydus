@@ -196,14 +196,19 @@ func manifestAnnotationValues(c *cli.Context) []string {
 
 // setupCommand applies the --log-level flag and returns the logger-carrying
 // base context shared by every subcommand. The context is canceled on
-// SIGINT/SIGTERM so `nydus` subprocesses are terminated and deferred cleanups
-// (e.g. work dir removal) still run; the returned stop function releases the
-// signal registration and must be deferred by the caller.
+// SIGINT/SIGTERM/SIGHUP so `nydus` subprocesses are terminated and deferred
+// cleanups (e.g. work dir removal) still run; the returned stop function
+// releases the signal registration and must be deferred by the caller.
 func setupCommand(c *cli.Context) (context.Context, context.CancelFunc) {
 	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
 		logrus.SetLevel(level)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, unix.SIGTERM)
+	signals := []os.Signal{os.Interrupt, unix.SIGTERM}
+	// Keep SIGHUP ignored for a command started with nohup.
+	if !signal.Ignored(unix.SIGHUP) {
+		signals = append(signals, unix.SIGHUP)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), signals...)
 	return log.WithLogger(ctx, log.L), stop
 }
 
@@ -307,13 +312,13 @@ func runConvert(c *cli.Context) error {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
 		platform = parsed
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	} else if multiSource || (artifactMode && len(parentImages) > 0) {
 		// Multiple inputs are merged into one single-platform manifest, so image
 		// inputs must be resolved to exactly one platform. Default to the host
 		// platform when --platform is not given.
 		logrus.Infof("merged image: defaulting to platform %s", platforms.Format(platform))
-		platformMC = platforms.Only(platform)
+		platformMC = platforms.OnlyStrict(platform)
 	}
 
 	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-")
@@ -364,12 +369,17 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("converting image back to OCI format")
-		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, pipeline.ToOCIOption{
+		opt := pipeline.ToOCIOption{
 			BuilderPath: c.String("builder"),
 			WorkDir:     scratchDir,
 			Compressor:  compressor,
 			LogLevel:    c.String("log-level"),
-		})
+		}
+		if c.String("platform") != "" {
+			opt.PlatformMC = platformMC
+		}
+
+		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, opt)
 		if err != nil {
 			return errors.Wrap(err, "convert to oci")
 		}
@@ -480,6 +490,7 @@ func runConvert(c *cli.Context) error {
 			SourceDir:         source,
 			AppendInBootstrap: appendFiles,
 			Annotations:       manifestAnnotations,
+			Platform:          platform,
 		})
 		if err != nil {
 			return errors.Wrap(err, "convert local directory")
@@ -495,8 +506,11 @@ func runConvert(c *cli.Context) error {
 		logrus.Infof("converting image to nydus format")
 		// Converted layer blobs are uploaded as soon as they are built, so the
 		// registry upload overlaps the remaining layer conversions; the final
-		// push then skips the blobs that already landed.
+		// push then skips the blobs that already landed. A failed conversion
+		// cancels the uploads.
 		var eagerPush errgroup.Group
+		pushCtx, cancelPush := context.WithCancel(ctx)
+		defer cancelPush()
 		newDesc, err = pipeline.Convert(ctx, provider.ContentStore(), srcDesc, pipeline.Option{
 			BuilderPath: c.String("builder"),
 			WorkDir:     scratchDir,
@@ -507,7 +521,7 @@ func runConvert(c *cli.Context) error {
 			Annotations: manifestAnnotations,
 			OnBlobConverted: func(desc ocispec.Descriptor) {
 				eagerPush.Go(func() error {
-					if err := provider.PushBlob(ctx, desc, target); err != nil {
+					if err := provider.PushBlob(pushCtx, desc, target); err != nil && pushCtx.Err() == nil {
 						// Non-fatal: the final push uploads it again.
 						logrus.Warnf("eager blob push %s: %v", desc.Digest, err)
 					}
@@ -515,6 +529,9 @@ func runConvert(c *cli.Context) error {
 				})
 			},
 		})
+		if err != nil {
+			cancelPush()
+		}
 		// Eager pushes never return errors (failures fall back to the final
 		// push); waiting only bounds their lifetime.
 		_ = eagerPush.Wait()
@@ -550,11 +567,12 @@ func runConvert(c *cli.Context) error {
 
 	if len(localBlobs) > 0 {
 		logrus.Infof("uploading %d local nydus artifact blob(s)", len(localBlobs))
-		var uploads errgroup.Group
+		// Cancel the other uploads once one fails.
+		uploads, uploadCtx := errgroup.WithContext(ctx)
 		for _, blob := range localBlobs {
 			blob := blob
 			uploads.Go(func() error {
-				if err := provider.PushBlobFile(ctx, blob.Path, blob.Descriptor, target); err != nil {
+				if err := provider.PushBlobFile(uploadCtx, blob.Path, blob.Descriptor, target); err != nil {
 					return errors.Wrapf(err, "push local artifact blob %s", blob.Descriptor.Digest)
 				}
 				return nil
@@ -696,7 +714,7 @@ func runCheck(c *cli.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	}
 
 	// Prepare the work directory. It holds checking scratch state and, for
@@ -802,7 +820,7 @@ func runMount(c *cli.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	}
 
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
@@ -912,7 +930,7 @@ func runOptimize(c *cli.Context) error {
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
-		platformMC = platforms.Only(parsed)
+		platformMC = platforms.OnlyStrict(parsed)
 	}
 
 	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-optimize-")

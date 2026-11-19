@@ -58,7 +58,13 @@ func TestENOSPC(t *testing.T) {
 				}
 
 				t.Logf("pass %d: %d files ok, %d failed; %s free in the cache", pass, ok, failed, free(t, cache))
-				assert.NotZero(t, failed)
+
+				if a.Name() == "fuse" {
+					assert.Zero(t, failed)
+				} else {
+					assert.NotZero(t, failed)
+				}
+
 				assert.NotZero(t, ok)
 				assert.Greater(t, m.API.Metrics(t).Sum("nydus_cache_write_failure_total", `reason="io"`), before)
 
