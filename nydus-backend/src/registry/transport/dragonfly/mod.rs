@@ -4,7 +4,6 @@ mod seed_peer_resolver;
 
 use std::fs::DirBuilder;
 use std::io;
-use std::ops::RangeInclusive;
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,11 +11,11 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream, StreamExt, TryStreamExt};
-use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
 use tokio::sync::watch;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
+use url::{Position, Url};
 
 use dragonfly_api::common::v2::Priority;
 use dragonfly_client_request::errors::{BackendError, DfdaemonError, Error, ProxyError};
@@ -43,8 +42,7 @@ use self::seed_peer_resolver::SeedPeerResolver;
 ///           │                      │            └─ on-demand body breaks off ─▶ SDK: the next seed peer ─▶ error
 ///           │ no seed peer         │ 429 / 5xx / 408 / transport failure
 ///           │                      ├─ on-demand ─▶ next seed peer, max_retries times ─▶ error
-///           │                      └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more ─▶ error
-///           │                                    └─ transport failure ──────────▶ error
+///           │                      └─ prefetch ──▶ handed back as is, a transport failure as an error
 ///           ├─ on-demand ─▶ error
 ///           └─ prefetch ──▶ wait for a seed peer, within the prefetch request timeout
 /// ```
@@ -54,9 +52,6 @@ pub(crate) struct Dragonfly {
 
     /// The seed peer client of prefetch reads, never retrying at once.
     prefetch_client: SeedPeerClient,
-
-    /// The random wait before a prefetch read is sent once more.
-    prefetch_retry_interval: RangeInclusive<Duration>,
 
     /// The timeout of each attempt of a request.
     request_timeout: Duration,
@@ -97,8 +92,6 @@ impl Dragonfly {
             ondemand_client,
             prefetch_client,
             request_timeout: dragonfly.request_timeout,
-            prefetch_retry_interval: config.prefetch.retry_interval
-                ..=config.prefetch.retry_interval.saturating_mul(2),
         })
     }
 
@@ -163,8 +156,13 @@ impl Dragonfly {
 /// Implements the fetcher over the Dragonfly SDK.
 #[async_trait]
 impl Fetcher for Dragonfly {
+    /// Returns the `source` label of the reads the seed peers serve.
+    fn source(&self) -> Source {
+        Source::Dragonfly
+    }
+
     /// Fetches `url` through the on-demand client at `Level6`.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+    async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
@@ -176,6 +174,7 @@ impl Fetcher for Dragonfly {
         let client = self.ondemand_client.ready().await?;
         let now = Instant::now();
         let result = Self::response(client.get(&request).await);
+        let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) through dragonfly returned {} in {:?}",
@@ -187,12 +186,13 @@ impl Fetcher for Dragonfly {
                 now.elapsed()
             ),
         }
+
         result
     }
 
     /// Fetches `url` through the prefetch client at `Level3`, below normal
     /// peers, never touching the origin.
-    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+    async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
@@ -202,41 +202,22 @@ impl Fetcher for Dragonfly {
         };
 
         let client = self.prefetch_client.ready().await?;
-        let mut retried = false;
-        loop {
-            let now = Instant::now();
-            let result = Self::response(client.get(&request).await);
-
-            match &result {
-                Ok(response) => debug!(
-                    "GET {url} (prefetch) through dragonfly returned {} in {:?}",
-                    response.status,
-                    now.elapsed()
-                ),
-                Err(err) => debug!(
-                    "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
-                    now.elapsed()
-                ),
-            }
-
-            // Serve a definitive answer, or the second transient one.
-            let response = result?;
-            if !response.is_transient() || retried {
-                return Ok(response);
-            }
-
-            // Retry once after a random interval in the configured window.
-            let err = response.into_io_error().await;
-            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
-            warn!("dragonfly request failed, retrying in {delay:?}: {err}");
-            tokio::time::sleep(delay).await;
-            retried = true;
+        let now = Instant::now();
+        let result = Self::response(client.get(&request).await);
+        let url = &url[..Position::AfterPath];
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (prefetch) through dragonfly returned {} in {:?}",
+                response.status,
+                now.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (prefetch) through dragonfly failed in {:?}: {err}",
+                now.elapsed()
+            ),
         }
-    }
 
-    /// Returns the `source` label of the reads the seed peers serve.
-    fn source(&self) -> Source {
-        Source::Dragonfly
+        result
     }
 }
 

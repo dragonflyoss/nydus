@@ -1,19 +1,18 @@
 //! The direct HTTP transport to the origin registry.
 
 use std::io;
-use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
-use rand::Rng;
 use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use tracing::{debug, warn};
+use tracing::debug;
+use url::{Position, Url};
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
@@ -30,9 +29,7 @@ use super::Fetcher;
 /// GET ──▶ origin ──▶ 2xx / 3xx / 4xx ────────────────────────────────▶ handed back as is
 ///           │ 429 / 5xx / 408 / transport failure
 ///           ├─ again, max_retries times, exponential backoff
-///           ├─ on-demand ─▶ error
-///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more after the retry interval ─▶ error
-///                         └─ transport failure ───────────────────────────▶ error
+///           └─ then handed back as is, a transport failure as an error
 /// ```
 ///
 /// A proxy that fails to connect is never tried again at once, see
@@ -42,9 +39,6 @@ pub(crate) struct Http {
     /// The reqwest client behind the retry, rate limit and circuit breaker
     /// middleware.
     client: ClientWithMiddleware,
-
-    /// The random wait before a prefetch read is sent once more.
-    prefetch_retry_interval: RangeInclusive<Duration>,
 
     /// The proxy the requests go through.
     proxy: Option<ProxyConfig>,
@@ -60,7 +54,6 @@ impl Http {
         max_retries: u32,
         proxy: Option<&ProxyConfig>,
         tls: &TlsConfig,
-        prefetch_retry_interval: Duration,
         rate_limit: Option<RateLimit>,
     ) -> io::Result<Self> {
         // Return redirects so the caller caches them, and keep rustls even when
@@ -113,8 +106,6 @@ impl Http {
 
         Ok(Self {
             client: client.build(),
-            prefetch_retry_interval: prefetch_retry_interval
-                ..=prefetch_retry_interval.saturating_mul(2),
             proxy: proxy.cloned(),
         })
     }
@@ -135,11 +126,19 @@ impl Http {
 /// Implements the fetcher over the origin HTTP client.
 #[async_trait]
 impl Fetcher for Http {
-    /// Sends the `GET` of an on-demand read, the body left streaming.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let now = Instant::now();
-        let result = Self::response(self.client.get(url).headers(headers).send().await);
+    /// Returns the `source` label of the reads, `http_proxy` through a proxy.
+    fn source(&self) -> Source {
+        match &self.proxy {
+            Some(_) => Source::HttpProxy,
+            None => Source::Http,
+        }
+    }
 
+    /// Sends the `GET` of an on-demand read, the body left streaming.
+    async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
+        let now = Instant::now();
+        let result = Self::response(self.client.get(url.clone()).headers(headers).send().await);
+        let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) from the origin returned {} in {:?}",
@@ -151,49 +150,28 @@ impl Fetcher for Http {
                 now.elapsed()
             ),
         }
+
         result
     }
 
     /// Sends the `GET` of a prefetch read, the body left streaming.
-    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let mut retried = false;
-        loop {
-            let now = Instant::now();
-            let result = Self::response(self.client.get(url).headers(headers.clone()).send().await);
-
-            match &result {
-                Ok(response) => debug!(
-                    "GET {url} (prefetch) from the origin returned {} in {:?}",
-                    response.status,
-                    now.elapsed()
-                ),
-                Err(err) => debug!(
-                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
-                    now.elapsed()
-                ),
-            }
-
-            // Serve a definitive answer, or the second transient one.
-            let response = result?;
-            if !response.is_transient() || retried {
-                return Ok(response);
-            }
-
-            // Retry once after a random interval in the configured window.
-            let err = response.into_io_error().await;
-            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
-            warn!("origin request failed, retrying in {delay:?}: {err}");
-            tokio::time::sleep(delay).await;
-            retried = true;
+    async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
+        let now = Instant::now();
+        let result = Self::response(self.client.get(url.clone()).headers(headers).send().await);
+        let url = &url[..Position::AfterPath];
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (prefetch) from the origin returned {} in {:?}",
+                response.status,
+                now.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                now.elapsed()
+            ),
         }
-    }
 
-    /// Returns the `source` label of the reads, `http_proxy` through a proxy.
-    fn source(&self) -> Source {
-        match &self.proxy {
-            Some(_) => Source::HttpProxy,
-            None => Source::Http,
-        }
+        result
     }
 }
 
@@ -202,7 +180,6 @@ mod tests {
     use super::*;
     use rcgen::CertifiedKey;
     use std::fs;
-    use std::net::TcpListener;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -210,28 +187,6 @@ mod tests {
     use tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer;
     use tokio_rustls::rustls::ServerConfig;
     use tokio_rustls::TlsAcceptor;
-
-    #[tokio::test]
-    async fn prefetch_fails_at_once_on_a_transport_failure() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/blob", listener.local_addr().unwrap());
-        drop(listener);
-        let retry_interval = Duration::from_secs(60 * 60);
-        let http = Http::new(
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            0,
-            None,
-            &TlsConfig::default(),
-            retry_interval,
-            None,
-        )
-        .unwrap();
-
-        let now = Instant::now();
-        assert!(http.prefetch(&url, HeaderMap::new()).await.is_err());
-        assert!(now.elapsed() < retry_interval);
-    }
 
     #[cfg(feature = "dragonfly")]
     #[test]
@@ -243,7 +198,6 @@ mod tests {
             3,
             None,
             &tls,
-            Duration::from_secs(1),
             None,
         )
         .is_ok());
@@ -253,7 +207,6 @@ mod tests {
             3,
             None,
             &tls,
-            Duration::from_secs(1),
             Some(RateLimit::new(10, Duration::from_secs(1))),
         )
         .is_ok());
@@ -316,7 +269,7 @@ mod tests {
             (true, None, true),
         ];
 
-        let url = start_https_server(cert).await;
+        let url = start_https_server(cert).await.parse().unwrap();
         for (skip_verify, ca_cert, expected) in test_cases {
             let http = Http::new(
                 Duration::from_secs(5),
@@ -327,7 +280,6 @@ mod tests {
                     skip_verify,
                     ca_cert,
                 },
-                Duration::from_secs(1),
                 None,
             )
             .unwrap();

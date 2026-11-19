@@ -558,11 +558,21 @@ fn incremental_writer_create_file_rejects_invalid_paths() {
     let temp = tempfile::tempdir().unwrap();
     let (mut writer, _output_dir) = create_parentless_writer(&temp);
 
-    for path in ["", "/absolute", "../outside", "missing/child"] {
+    let long_name = "n".repeat(256);
+    for path in [
+        "",
+        "/absolute",
+        "../outside",
+        "missing/child",
+        long_name.as_str(),
+    ] {
         assert!(writer
             .create_file(Path::new(path), 0, CreateFileOptions::default())
             .is_err());
     }
+    writer
+        .create_file(Path::new(&long_name[1..]), 0, CreateFileOptions::default())
+        .unwrap();
     writer
         .create_file(Path::new("file"), 0, CreateFileOptions::default())
         .unwrap();

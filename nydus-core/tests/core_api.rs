@@ -88,6 +88,21 @@ fn read_at_returns_the_file_bytes_up_to_the_end() {
 }
 
 #[test]
+fn read_at_fills_a_buffer_of_4gib_with_what_the_file_holds() {
+    let image = Image::build();
+    let cache_dir = tempdir().unwrap();
+    let core = image.core(cache_dir.path(), &[]);
+    let node = core.fs.open(FILE_NAME).unwrap();
+    // Zeroed pages the test never touches past the file: no memory is used.
+    let mut buf = vec![0u8; 1 << 32];
+
+    let len = node.read_at(0, &mut buf).unwrap();
+
+    assert_eq!(len, image.file.len());
+    assert_eq!(buf[..len], image.file[..]);
+}
+
+#[test]
 fn fetch_makes_the_requested_groups_resident_in_the_cache_file() {
     let image = Image::build();
     let cache_dir = tempdir().unwrap();

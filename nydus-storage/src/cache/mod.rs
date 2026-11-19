@@ -730,6 +730,26 @@ pub fn is_chunk_group_crc_mismatch(err: &io::Error) -> bool {
         .is_some_and(|inner| inner.is::<ChunkGroupCrcMismatch>())
 }
 
+/// The marker of an error from writing the cache file, which a read is still
+/// served past, see [`CacheWriteFailure::is`].
+#[derive(Debug)]
+pub(crate) struct CacheWriteFailure(pub(crate) String);
+
+impl CacheWriteFailure {
+    /// Whether an error denotes the cache file refusing a write.
+    pub(crate) fn is(err: &io::Error) -> bool {
+        err.get_ref().is_some_and(|inner| inner.is::<Self>())
+    }
+}
+
+impl std::fmt::Display for CacheWriteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CacheWriteFailure {}
+
 /// The `reason` a cache write failed with `err`: a crc32c mismatch is
 /// `checksum`; any other malformed chunk group, a redirect pointing past
 /// its source blob's chunk groups included, `decode`; and everything else,

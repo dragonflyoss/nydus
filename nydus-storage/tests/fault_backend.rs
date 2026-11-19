@@ -13,7 +13,9 @@ use nydus_format::blob::{BlobMetadata, BlobMetadataCompressor, BlobMetadataDiges
 use nydus_storage::cache::{self, BlobCache, BlobCaches, CacheOptions, LocalBlobCache};
 use nydus_test_utils::blob::uncompressed_data;
 use nydus_test_utils::fault::{Fault, FaultBackend, FaultRule};
-use nydus_test_utils::metadata::from_chunk_groups;
+use nydus_test_utils::metadata::{
+    from_chunk_groups, single_chunk_group, single_chunk_group_ondemand,
+};
 use tempfile::tempdir;
 
 const BLOB_ID: [u8; 32] = [0x5a; 32];
@@ -275,6 +277,72 @@ fn prefetch_all_reports_backend_errors_without_blocking_ondemand_reads() {
 }
 
 #[test]
+fn prefetch_open_waiting_on_the_backend_does_not_block_an_ondemand_open() {
+    let blob = Blob::new(false);
+    let backend = blob.backend();
+    let cache_dir = tempdir().unwrap();
+    let caches = Arc::new(
+        BlobCaches::new(
+            [(1, BLOB_ID)],
+            backend.clone(),
+            Some(cache_dir.path()),
+            None,
+            options(),
+        )
+        .unwrap(),
+    );
+    let delay = Duration::from_secs(2);
+    backend.inject(FaultRule::metadata(Fault::Delay(delay)).times(1));
+    let prefetch = {
+        let caches = caches.clone();
+        thread::spawn(move || caches.cache(1, ReadKind::Prefetch))
+    };
+    while backend.metadata_calls() == 0 {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    let start = Instant::now();
+    let cached = caches.cache(1, ReadKind::Ondemand).unwrap();
+
+    assert_eq!(
+        read(cached.as_ref(), blob.logical(0)).unwrap(),
+        blob.expected(blob.logical(0))
+    );
+    assert!(start.elapsed() < delay / 2);
+    assert!(Arc::ptr_eq(&prefetch.join().unwrap().unwrap(), &cached));
+}
+
+#[test]
+fn prefetch_of_an_ondemand_blob_tries_an_unopenable_source_blob_once() {
+    let payload = vec![0xabu8; 4096];
+    let (source_id, ondemand_id) = ([0x11; 32], [0x22; 32]);
+    let backend = Arc::new(
+        FaultBackend::in_memory()
+            .with_blob(source_id, payload.clone(), &single_chunk_group(&payload))
+            .with_blob(
+                ondemand_id,
+                payload.clone(),
+                &single_chunk_group_ondemand(&payload, 1),
+            ),
+    );
+    backend.inject(FaultRule::metadata(Fault::Error(io::ErrorKind::NotFound)).on_blob(source_id));
+    let cache_dir = tempdir().unwrap();
+    let caches = BlobCaches::new(
+        [(1, source_id), (2, ondemand_id)],
+        backend.clone(),
+        Some(cache_dir.path()),
+        None,
+        options(),
+    )
+    .unwrap();
+
+    caches.prefetch_blob(2, 1, Duration::ZERO).unwrap();
+
+    // The blob meta of the ondemand blob, and one attempt at its source's.
+    assert_eq!(backend.metadata_calls(), 2);
+}
+
+#[test]
 fn open_fails_on_a_blob_metadata_error_and_looks_it_up_again() {
     let blob = Blob::new(false);
     let backend = blob.backend();
@@ -306,6 +374,35 @@ fn open_fails_on_a_blob_metadata_error_and_looks_it_up_again() {
     open_local(&backend, cache_dir.path());
 
     assert_eq!(backend.metadata_calls(), 2);
+}
+
+#[test]
+fn open_fetches_the_blob_metadata_again_when_the_cached_one_is_invalid() {
+    let blob = Blob::new(false);
+    let backend = blob.backend();
+    let cache_dir = tempdir().unwrap();
+    drop(open_local(&backend, cache_dir.path()));
+    let sidecar = fs::read_dir(cache_dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(BlobMetadata::SUFFIX))
+        .unwrap();
+    let saved = fs::read(&sidecar).unwrap();
+    let mut flipped = saved.clone();
+    *flipped.last_mut().unwrap() ^= 0xff;
+
+    for (calls, invalid) in [(2, Vec::new()), (3, flipped)] {
+        fs::write(&sidecar, invalid).unwrap();
+
+        let cached = open_local(&backend, cache_dir.path());
+
+        assert_eq!(
+            read(&cached, blob.logical(0)).unwrap(),
+            blob.expected(blob.logical(0))
+        );
+        assert_eq!(backend.metadata_calls(), calls);
+        assert_eq!(fs::read(&sidecar).unwrap(), saved);
+    }
 }
 
 #[test]

@@ -1802,12 +1802,22 @@ impl BlobMetadata {
             )));
         }
 
+        // Validate that each index entry names the chunk group holding its first block.
         for index in 0..self.chunk_group_indexes.len() {
             let chunk_group = self.chunk_group_indexes.get(&self.bytes, index).get();
             if chunk_group >= self.chunk_group_count {
                 return Err(Error::InvalidImage(format!(
                     "blob meta ChunkGroupIndexTable entry {index} names chunk group {chunk_group} of {}",
                     self.chunk_group_count
+                )));
+            }
+
+            let block = index as u32 * self.blocks_per_chunk_group_index;
+            let start = self.chunk_groups.get(&self.bytes, chunk_group as usize);
+            let end = self.chunk_groups.get(&self.bytes, chunk_group as usize + 1);
+            if !(start.logical_block_offset..end.logical_block_offset).contains(&block) {
+                return Err(Error::InvalidImage(format!(
+                    "blob meta ChunkGroupIndexTable entry {index} names chunk group {chunk_group}, which does not hold block {block}"
                 )));
             }
         }
@@ -2606,6 +2616,11 @@ mod tests {
                 272,
                 5u32.to_le_bytes().to_vec(),
                 Err("blob meta ChunkGroupIndexTable entry 0 names chunk group 5 of 5"),
+            ),
+            (
+                272,
+                4u32.to_le_bytes().to_vec(),
+                Err("blob meta ChunkGroupIndexTable entry 0 names chunk group 4, which does not hold block 0"),
             ),
             (
                 394,

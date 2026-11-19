@@ -13,9 +13,6 @@ use url::Url;
 
 use super::transport::Fetcher;
 
-/// The lifetime of a bearer token when the token server does not say.
-const DEFAULT_TOKEN_EXPIRATION: Duration = Duration::from_secs(10 * 60);
-
 /// The margin before expiry within which a token counts as expired.
 const TOKEN_EXPIRY_LEEWAY: Duration = Duration::from_secs(20);
 
@@ -109,8 +106,7 @@ enum Authorization {
         /// The instant the token was configured or fetched.
         created_at: Instant,
 
-        /// The lifetime the token server gave the token, `None` for the
-        /// configured token, whose expiry is unknown.
+        /// The lifetime of the token, `None` when it does not expire.
         expires_in: Option<Duration>,
     },
 }
@@ -155,7 +151,7 @@ impl Authorization {
     }
 
     /// Returns whether the authorization is still valid, a bearer token until
-    /// the leeway before it expires when its expiry is known.
+    /// the leeway before it expires, at most half its lifetime.
     fn is_valid(&self) -> bool {
         match self {
             Self::Basic(_) => true,
@@ -163,8 +159,10 @@ impl Authorization {
                 created_at,
                 expires_in,
                 ..
-            } => expires_in
-                .is_none_or(|expires_in| created_at.elapsed() + TOKEN_EXPIRY_LEEWAY < expires_in),
+            } => expires_in.is_none_or(|expires_in| {
+                let leeway = TOKEN_EXPIRY_LEEWAY.min(expires_in / 2);
+                created_at.elapsed() + leeway < expires_in
+            }),
         }
     }
 }
@@ -201,13 +199,13 @@ impl FetchTokenResponse {
             ));
         }
 
-        Authorization::bearer(
-            &token,
-            Some(
-                self.expires_in
-                    .map_or(DEFAULT_TOKEN_EXPIRATION, Duration::from_secs),
-            ),
-        )
+        if self.expires_in == Some(0) {
+            return Err(io::Error::other(
+                "invalid expires_in 0 from token server".to_string(),
+            ));
+        }
+
+        Authorization::bearer(&token, self.expires_in.map(Duration::from_secs))
     }
 }
 
@@ -331,7 +329,7 @@ impl Authorizer {
             headers.insert(AUTHORIZATION, basic.value().clone());
         }
 
-        let response = fetcher.get(url.as_str(), headers).await?;
+        let response = fetcher.get(&url, headers).await?;
         if !response.status.is_success() {
             return Err(response.into_io_error().await);
         }
@@ -475,6 +473,11 @@ mod tests {
 
     #[test]
     fn authorize_adds_the_header_until_the_token_nears_expiry() {
+        let bearer = |expires_in: u64, age: u64| Authorization::Bearer {
+            value: HeaderValue::from_static("Bearer xyz"),
+            created_at: Instant::now() - Duration::from_secs(age),
+            expires_in: Some(Duration::from_secs(expires_in)),
+        };
         let test_cases = vec![
             (
                 Authorization::basic("YWxpY2U6c2VjcmV0").unwrap(),
@@ -484,18 +487,17 @@ mod tests {
                 Authorization::bearer("xyz", None).unwrap(),
                 Some("Bearer xyz"),
             ),
-            (
-                Authorization::bearer("xyz", Some(Duration::from_secs(3600))).unwrap(),
-                Some("Bearer xyz"),
-            ),
-            (
-                Authorization::bearer("xyz", Some(TOKEN_EXPIRY_LEEWAY)).unwrap(),
-                None,
-            ),
-            (
-                Authorization::bearer("xyz", Some(Duration::ZERO)).unwrap(),
-                None,
-            ),
+            (bearer(3600, 0), Some("Bearer xyz")),
+            (bearer(40, 19), Some("Bearer xyz")),
+            (bearer(40, 21), None),
+            (bearer(30, 14), Some("Bearer xyz")),
+            (bearer(30, 16), None),
+            (bearer(21, 9), Some("Bearer xyz")),
+            (bearer(21, 11), None),
+            (bearer(20, 9), Some("Bearer xyz")),
+            (bearer(20, 11), None),
+            (bearer(1, 0), Some("Bearer xyz")),
+            (bearer(0, 0), None),
         ];
 
         for (authorization, expected) in test_cases {
@@ -521,7 +523,6 @@ mod tests {
             3,
             None,
             &TlsConfig::default(),
-            Duration::from_secs(1),
             None,
         )
         .unwrap();
@@ -584,7 +585,6 @@ mod tests {
             3,
             None,
             &TlsConfig::default(),
-            Duration::from_secs(1),
             None,
         )
         .unwrap();
@@ -631,15 +631,28 @@ mod tests {
             (r#"{"token":"abc","expires_in":300}"#, |authorization| {
                 let authorization = authorization.unwrap();
                 assert_eq!(authorization.value(), "Bearer abc");
-                assert!(authorization.is_valid());
+                assert!(matches!(
+                    authorization,
+                    Authorization::Bearer { expires_in: Some(expires_in), .. }
+                        if expires_in == Duration::from_secs(300)
+                ));
             }),
             (r#"{"access_token":"abc"}"#, |authorization| {
                 let authorization = authorization.unwrap();
                 assert_eq!(authorization.value(), "Bearer abc");
-                assert!(authorization.is_valid());
+                assert!(matches!(
+                    authorization,
+                    Authorization::Bearer {
+                        expires_in: None,
+                        ..
+                    }
+                ));
             }),
             (r#"{"token":"abc","expires_in":1}"#, |authorization| {
-                assert!(!authorization.unwrap().is_valid());
+                assert!(authorization.unwrap().is_valid());
+            }),
+            (r#"{"token":"abc","expires_in":0}"#, |authorization| {
+                assert!(authorization.is_err());
             }),
             (r#"{"token":"","access_token":""}"#, |authorization| {
                 assert!(authorization.is_err());

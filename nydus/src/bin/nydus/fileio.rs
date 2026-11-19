@@ -8,7 +8,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use super::*;
 
@@ -130,10 +130,11 @@ impl FileioCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
-        let config = Config::load(&self.config)?;
-        self.run(signals, config)
+        Config::load(&self.config)
+            .and_then(|config| self.run(signals, config))
+            .inspect_err(|err| error!("nydus fileio failed: {}", err.report()))
     }
 
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {

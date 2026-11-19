@@ -133,13 +133,12 @@ impl FanotifyCommand {
             self.log_level,
             self.log_max_files,
             self.console,
-        );
+        )?;
 
-        // Load the storage config.
-        let config = Config::load(&self.config)?;
-
-        // Runs the fanotify service until shutdown.
-        self.run(signals, config)
+        // Load the storage config and run the fanotify service until shutdown.
+        Config::load(&self.config)
+            .and_then(|config| self.run(signals, config))
+            .inspect_err(|err| error!("nydus fanotify failed: {}", err.report()))
     }
 
     /// Runs the fanotify service: builds the core, spawns the event loop,

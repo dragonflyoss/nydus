@@ -146,7 +146,7 @@ impl RemoteBlobCache {
 
 /// Copy the part of `group`'s chunks, cut out of its uncompressed `payload`,
 /// that overlaps `[offset, offset + dst.len())` into `dst`.
-fn copy_group_chunks(
+pub(super) fn copy_group_chunks(
     meta: &BlobMetadata,
     group: &BlobMetadataChunkGroupExtent,
     payload: &[u8],
