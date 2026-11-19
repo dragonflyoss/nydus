@@ -14,7 +14,7 @@ use tracing_subscriber::{
 
 /// Lines queued per appender before the writer thread drains them. The
 /// crate default of 128k lines pins about 4 MiB per appender at startup.
-const QUEUED_LOG_LINES: usize = 8192;
+const QUEUED_LOG_LINES: usize = 1024;
 
 /// The size a log file is rolled at, between two hourly rolls.
 const LOG_FILE_MAX_SIZE: u64 = 10 * 1024 * 1024;
