@@ -53,7 +53,6 @@ impl RedirectCache {
             return None;
         }
 
-        // Keep the query, which signs the URL, out of the log.
         debug!(
             "found cached redirect for blob {hex} -> {}",
             &entry.url[..Position::AfterPath]
@@ -64,11 +63,6 @@ impl RedirectCache {
     /// Remembers `url` as the redirect of `hex`, evicting the least recently
     /// used blob when full.
     pub(crate) fn insert(&self, hex: &str, url: Url) {
-        // Keep the query, which signs the URL, out of the log.
-        debug!(
-            "caching redirect for blob {hex} -> {}",
-            &url[..Position::AfterPath]
-        );
         self.redirects.lock().unwrap().put(
             hex.to_string(),
             RedirectEntry {
@@ -80,7 +74,6 @@ impl RedirectCache {
 
     /// Forgets the redirect of `hex`, after the link rejected a request.
     pub(crate) fn remove(&self, hex: &str) {
-        debug!("evicting cached redirect for blob {hex}");
         self.redirects.lock().unwrap().pop(hex);
     }
 }
