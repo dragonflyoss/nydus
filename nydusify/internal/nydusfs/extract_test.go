@@ -147,6 +147,10 @@ func TestExtractBootstrapLayer(t *testing.T) {
 				assert.NoError(err)
 				assert.Equal("metadata bytes", string(data))
 
+				info, err := os.Stat(filepath.Join(dest, "blob.blob.meta"))
+				assert.NoError(err)
+				assert.Equal(os.FileMode(0o644), info.Mode().Perm())
+
 				entries, err := os.ReadDir(dest)
 				assert.NoError(err)
 				assert.Len(entries, 2)
@@ -155,10 +159,7 @@ func TestExtractBootstrapLayer(t *testing.T) {
 		{
 			name: "replace a blob meta hardlinked elsewhere",
 			mock: func(t *testing.T, dest string) []byte {
-				stale := filepath.Join(dest, "blob.blob.meta")
-				if err := os.WriteFile(stale, []byte("stale bytes"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+				stale := mockFile(t, filepath.Join(dest, "blob.blob.meta"), []byte("stale bytes"))
 				if err := os.Link(stale, filepath.Join(dest, "linked")); err != nil {
 					t.Fatal(err)
 				}
@@ -176,6 +177,10 @@ func TestExtractBootstrapLayer(t *testing.T) {
 				data, err = os.ReadFile(filepath.Join(dest, "linked"))
 				assert.NoError(err)
 				assert.Equal("stale bytes", string(data))
+
+				entries, err := os.ReadDir(dest)
+				assert.NoError(err)
+				assert.Len(entries, 3)
 			},
 		},
 		{

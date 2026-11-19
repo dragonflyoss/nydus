@@ -42,24 +42,30 @@ impl Mimalloc {
     /// Sets [`Self::OPTIONS`] for a mount service, each unless already set.
     /// It must not allocate, which would initialize mimalloc first.
     extern "C" fn tune() {
-        let mut cmdline = [0u8; 4096];
-        // SAFETY: plain syscalls on a stack buffer of the length given.
-        let len = unsafe {
-            let fd = libc::open(
+        // SAFETY: the path is a NUL-terminated literal.
+        let fd = unsafe {
+            libc::open(
                 c"/proc/self/cmdline".as_ptr(),
                 libc::O_RDONLY | libc::O_CLOEXEC,
-            );
-            if fd < 0 {
-                return;
-            }
-            let len = libc::read(fd, cmdline.as_mut_ptr().cast(), cmdline.len());
-            libc::close(fd);
-            len
+            )
         };
+        if fd < 0 {
+            return;
+        }
 
+        // Read the first page of the command line, which holds the subcommand.
+        let mut cmdline = [0u8; 4096];
+
+        // SAFETY: `cmdline` is writable for the length given.
+        let len = unsafe { libc::read(fd, cmdline.as_mut_ptr().cast(), cmdline.len()) };
+
+        // SAFETY: `fd` is open and not used afterwards.
+        unsafe { libc::close(fd) };
         let Ok(len) = usize::try_from(len) else {
             return;
         };
+
+        // Leave the one-shot tools alone.
         if !Self::is_daemon(&cmdline[..len]) {
             return;
         }
@@ -72,7 +78,8 @@ impl Mimalloc {
     }
 }
 
-/// The `.init_array` entry that runs [`Mimalloc::tune`] before `main`.
+/// The `.init_array` entry that runs [`Mimalloc::tune`] before `main`, its
+/// priority 99 sorting ahead of mimalloc's constructor, 101 at the earliest.
 #[used]
 #[unsafe(link_section = ".init_array.00099")]
 static TUNE_MIMALLOC: extern "C" fn() = Mimalloc::tune;
@@ -85,14 +92,13 @@ mod tests {
 
     #[test]
     fn is_daemon_tells_the_mount_services_from_the_one_shot_tools() {
-        let oneshot = ["build", "repack", "export", "check", "merge", "optimize"];
-
+        let one_shot_commands = ["build", "repack", "export", "check", "merge", "optimize"];
         for command in Args::command().get_subcommands() {
             let name = command.get_name();
             let cmdline = format!("nydus\0{name}\0--help\0");
             assert_ne!(
                 Mimalloc::is_daemon(cmdline.as_bytes()),
-                oneshot.contains(&name),
+                one_shot_commands.contains(&name),
                 "{name}"
             );
         }

@@ -69,7 +69,7 @@ func ExtractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 // file rather than rewriting it: an extracted blob meta may be hardlinked into
 // a cache dir, where a daemon maps it.
 func WriteTarEntry(tr *tar.Reader, destPath string) error {
-	return writeFile(tr, destPath, 0o644)
+	return atomicWriteFile(tr, destPath, 0o644)
 }
 
 // LinkBlobMetaFiles populates cacheDir with the blob meta artifacts so the
@@ -132,12 +132,12 @@ func copyFile(src, dst string) error {
 	}
 	defer func() { _ = in.Close() }()
 
-	return writeFile(in, dst, 0o600)
+	return atomicWriteFile(in, dst, 0o600)
 }
 
-// writeFile writes r to dst with mode perm atomically, via a temporary file in
-// the same dir, so dst is a new file and never a rewritten one.
-func writeFile(r io.Reader, dst string, perm os.FileMode) error {
+// atomicWriteFile writes r to dst with mode perm via a temporary file in the
+// same dir, so dst is a new file and never a rewritten one.
+func atomicWriteFile(r io.Reader, dst string, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(dst), ".tmp-*")
 	if err != nil {
 		return errors.Wrap(err, "create temp file")

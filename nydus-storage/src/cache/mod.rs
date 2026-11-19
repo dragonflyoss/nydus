@@ -467,8 +467,7 @@ impl<'b> ChunkGroupReader<'b> {
         self.skip_to(group.compressed_offset())?;
         let end = group.compressed_range().end;
         let mut decoder = Decoder::new()?;
-        // `decoded` holds the whole frame, so zstd decodes into it in place
-        // instead of through a window buffer of its own.
+        // `decoded` holds the whole frame, so zstd decodes into it without a window buffer.
         decoder.set_parameter(DParameter::StableOutBuffer(true))?;
         let mut output = OutBuffer::around(decoded);
         let mut hint = 0;

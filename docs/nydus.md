@@ -2514,11 +2514,12 @@ default of 128k, which alone pinned about 4 MiB per appender. The `nydus`
 binary allocates with mimalloc, and the long-running services set its options
 before the first allocation, each unless its `MIMALLOC_*` environment variable
 is already set: transparent huge pages are disabled for the process
-(`MIMALLOC_ALLOW_THP=0`), freed pages go back to the OS at once
-(`MIMALLOC_PURGE_DELAY=0`), objects over 4 MiB are mapped from the OS
-(`MIMALLOC_ARENA_MAX_OBJECT_SIZE=4MiB`, which keeps the zeroed 16 MiB request
-buffer of every FUSE thread untouched), and arenas are reserved 64 MiB at a
-time (`MIMALLOC_ARENA_RESERVE=64MiB`). On glibc, the `nydus` binary caps malloc at
+(`MIMALLOC_ALLOW_THP=0`, which also leaves the huge-page hint of the fetch
+buffers above without effect in these services), freed pages go back to the
+OS at once (`MIMALLOC_PURGE_DELAY=0`), objects over 4 MiB are mapped from the
+OS (`MIMALLOC_ARENA_MAX_OBJECT_SIZE=4MiB`, which keeps the zeroed 16 MiB
+request buffer of every FUSE thread untouched), and arenas are reserved
+64 MiB at a time (`MIMALLOC_ARENA_RESERVE=64MiB`). On glibc, the `nydus` binary caps malloc at
 two arenas and fixes the mmap threshold at 512 KiB (trim threshold 1 MiB) for
 the long-running services only; build, check, merge, export and optimize keep
 the allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,

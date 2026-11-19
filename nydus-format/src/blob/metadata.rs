@@ -2522,6 +2522,26 @@ mod tests {
     }
 
     #[test]
+    fn new_upper_seals_the_incremental_flag_into_its_bytes() {
+        let (chunk_groups, chunk_lengths, chunk_group_digests) = entries(&chunks());
+        let upper = BlobMetadata::new_upper(
+            16,
+            1,
+            BlobMetadataCompressor::None,
+            Some(BlobMetadataDigester::Blake3),
+            chunk_groups,
+            chunk_lengths,
+            chunk_group_digests,
+        )
+        .unwrap();
+        assert!(upper.is_incremental());
+
+        let loaded = BlobMetadata::from_bytes(upper.bytes.to_vec()).unwrap();
+        assert!(loaded.is_incremental());
+        assert_eq!(loaded.header(), upper.header());
+    }
+
+    #[test]
     fn from_bytes_rejects_a_bad_magic_size_or_crc32() {
         let bytes = blob_metadata().bytes.to_vec();
         let mut bad_magic = bytes.clone();
