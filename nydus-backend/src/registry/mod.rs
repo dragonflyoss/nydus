@@ -244,7 +244,7 @@ impl Backend for Registry {
             }
 
             let blob_metadata_bytes = response.bytes(blob_metadata_size).await?;
-            BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
+            BlobMetadata::from_bytes(Vec::from(blob_metadata_bytes)).map_err(io::Error::other)
         })
     }
 
@@ -287,7 +287,7 @@ impl Backend for Registry {
                 .bytes(blob_metadata_size)
                 .await?;
 
-            BlobMetadata::from_bytes(blob_metadata_bytes.into()).map_err(io::Error::other)
+            BlobMetadata::from_bytes(Vec::from(blob_metadata_bytes)).map_err(io::Error::other)
         })
     }
 

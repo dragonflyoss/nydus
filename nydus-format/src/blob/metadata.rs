@@ -11,11 +11,12 @@ use crate::utils::bytes::{
 };
 use crate::utils::FeatureFlags;
 use crc32c::{crc32c, crc32c_append};
+use memmap2::Mmap;
 use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::marker::PhantomData;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::path::Path;
 
 /// The `type` field of a table header. Not an enum, since a reader keeps
@@ -1446,7 +1447,46 @@ pub struct BlobMetadata {
     chunk_count: u32,
     logical_block_count: u32,
     chunk_group_digest_algorithm: Option<u8>,
-    bytes: Vec<u8>,
+    bytes: BlobMetadataBytes,
+}
+
+/// The serialized bytes of a blob meta.
+#[derive(Debug)]
+pub enum BlobMetadataBytes {
+    /// The bytes in memory, built or fetched.
+    Owned(Vec<u8>),
+
+    /// A sidecar file mapped read-only, page cache rather than private memory.
+    Mapped(Mmap),
+}
+
+/// Implements [Deref] as the serialized bytes.
+impl Deref for BlobMetadataBytes {
+    type Target = [u8];
+
+    /// Returns the serialized bytes.
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Mapped(mmap) => mmap,
+        }
+    }
+}
+
+/// Implements [From] for the bytes in memory.
+impl From<Vec<u8>> for BlobMetadataBytes {
+    /// Returns the bytes as owned.
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Owned(bytes)
+    }
+}
+
+/// Implements [From] for a mapped sidecar file.
+impl From<Mmap> for BlobMetadataBytes {
+    /// Returns the mapping as mapped.
+    fn from(mmap: Mmap) -> Self {
+        Self::Mapped(mmap)
+    }
 }
 
 /// Builds a blob meta for a writer, parses one for a reader, and answers
@@ -1567,7 +1607,7 @@ impl BlobMetadata {
                 .get(&bytes, chunk_group_count)
                 .logical_block_offset,
             chunk_group_digest_algorithm: digester.map(BlobMetadataDigester::code),
-            bytes,
+            bytes: BlobMetadataBytes::Owned(bytes),
         };
 
         blob_metadata.validate_fields()?;
@@ -1603,7 +1643,10 @@ impl BlobMetadata {
             &metadata.bytes[BlobMetadataHeader::SIZE..],
         );
 
-        write_bytes_at(&mut metadata.bytes, 0, &metadata.header.to_bytes());
+        // A built blob meta owns its bytes, so the header is rewritten in place.
+        if let BlobMetadataBytes::Owned(bytes) = &mut metadata.bytes {
+            write_bytes_at(bytes, 0, &metadata.header.to_bytes());
+        }
         Ok(metadata)
     }
 
@@ -1628,10 +1671,11 @@ impl BlobMetadata {
         Ok((incremental, ondemand))
     }
 
-    /// Parses a blob meta from its bytes, which it keeps. The header, the table
-    /// walk, the supported tables and their header extensions, then
-    /// `validate_fields`.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+    /// Parses a blob meta from its bytes, in memory or mapped, which it keeps.
+    /// The header, the table walk, the supported tables and their header
+    /// extensions, then `validate_fields`.
+    pub fn from_bytes(bytes: impl Into<BlobMetadataBytes>) -> Result<Self> {
+        let bytes = bytes.into();
         let header = BlobMetadataHeader::from_bytes(&bytes)?;
 
         // The tables follow the header back to back. The first table of a type
@@ -1861,7 +1905,7 @@ impl BlobMetadata {
 
     /// Writes the serialized metadata to a new sidecar file at `path`.
     pub fn save(&self, path: &Path) -> Result<()> {
-        fs::write(path, &self.bytes)?;
+        fs::write(path, &*self.bytes)?;
         Ok(())
     }
 
@@ -2134,7 +2178,7 @@ mod tests {
 
     #[test]
     fn new_writes_the_header_and_tables_back_to_back() {
-        let bytes = blob_metadata().bytes;
+        let bytes = blob_metadata().bytes.to_vec();
         let chunks = chunks();
         assert_eq!(bytes.len(), 4096);
         assert_eq!(&bytes[..8], b"NDBLMETA");
@@ -2438,20 +2482,24 @@ mod tests {
         let blob_metadata = blob_metadata();
         let mut written = Vec::new();
         blob_metadata.write_to(&mut written).unwrap();
-        assert_eq!(written, blob_metadata.bytes);
+        assert_eq!(written, *blob_metadata.bytes);
 
         let temp_dir = tempdir().unwrap();
         let path = temp_dir.path().join("layer.blob.meta");
         blob_metadata.save(&path).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), blob_metadata.bytes);
+        assert_eq!(std::fs::read(&path).unwrap(), *blob_metadata.bytes);
 
         let test_cases = vec![
-            BlobMetadata::from_bytes(blob_metadata.bytes.clone()).unwrap(),
+            BlobMetadata::from_bytes(blob_metadata.bytes.to_vec()).unwrap(),
             BlobMetadata::from_path(&path).unwrap(),
+            BlobMetadata::from_bytes(
+                unsafe { Mmap::map(&fs::File::open(&path).unwrap()) }.unwrap(),
+            )
+            .unwrap(),
         ];
 
         for loaded in test_cases {
-            assert_eq!(loaded.bytes, blob_metadata.bytes);
+            assert_eq!(*loaded.bytes, *blob_metadata.bytes);
             assert_eq!(loaded.header(), blob_metadata.header());
             assert_eq!(loaded.tables(), blob_metadata.tables());
             assert!(loaded.chunk_groups().eq(blob_metadata.chunk_groups()));
@@ -2474,8 +2522,28 @@ mod tests {
     }
 
     #[test]
+    fn new_upper_seals_the_incremental_flag_into_its_bytes() {
+        let (chunk_groups, chunk_lengths, chunk_group_digests) = entries(&chunks());
+        let upper = BlobMetadata::new_upper(
+            16,
+            1,
+            BlobMetadataCompressor::None,
+            Some(BlobMetadataDigester::Blake3),
+            chunk_groups,
+            chunk_lengths,
+            chunk_group_digests,
+        )
+        .unwrap();
+        assert!(upper.is_incremental());
+
+        let loaded = BlobMetadata::from_bytes(upper.bytes.to_vec()).unwrap();
+        assert!(loaded.is_incremental());
+        assert_eq!(loaded.header(), upper.header());
+    }
+
+    #[test]
     fn from_bytes_rejects_a_bad_magic_size_or_crc32() {
-        let bytes = blob_metadata().bytes;
+        let bytes = blob_metadata().bytes.to_vec();
         let mut bad_magic = bytes.clone();
         bad_magic[0] ^= 0xff;
         let mut bad_crc32 = bytes.clone();
@@ -2505,7 +2573,7 @@ mod tests {
 
     #[test]
     fn from_bytes_ignores_reserved_bytes_and_rejects_invalid_fields() {
-        let bytes = blob_metadata().bytes;
+        let bytes = blob_metadata().bytes.to_vec();
 
         let test_cases: Vec<(usize, Vec<u8>, std::result::Result<(), &str>)> = vec![
             (8, (1u32 << 31).to_le_bytes().to_vec(), Ok(())),
@@ -2664,7 +2732,7 @@ mod tests {
     #[test]
     fn digester_fails_on_an_unknown_algorithm_and_leaves_the_blob_undigested() {
         let blob_metadata = blob_metadata();
-        let mut bytes = blob_metadata.bytes.clone();
+        let mut bytes = blob_metadata.bytes.to_vec();
         bytes[408] = 9;
         let crc32 = BlobMetadataHeader::compute_crc32(&read_bytes_at(&bytes, 0), &bytes[24..]);
         write_u32_at(&mut bytes, 16, crc32);
@@ -2727,8 +2795,8 @@ mod tests {
         let path = temp_dir.path().join("unknown.blob.meta");
         with_unknown_table.save(&path).unwrap();
         assert_eq!(
-            BlobMetadata::from_path(&path).unwrap().bytes,
-            with_unknown_table.bytes
+            *BlobMetadata::from_path(&path).unwrap().bytes,
+            *with_unknown_table.bytes
         );
 
         let with_repeated_table = with_table(new_table(2, 0)).unwrap();
@@ -2755,7 +2823,7 @@ mod tests {
         let without_digest_table = from_tables(&tables[..3]).unwrap();
         assert_eq!(without_digest_table.digester().unwrap(), None);
 
-        let mut padded = blob_metadata.bytes.clone();
+        let mut padded = blob_metadata.bytes.to_vec();
         padded.resize(8192, 0);
         let crc32 = BlobMetadataHeader::compute_crc32(&read_bytes_at(&padded, 0), &padded[24..]);
         write_u32_at(&mut padded, 16, crc32);
@@ -2998,7 +3066,7 @@ mod tests {
         assert_eq!(blob_metadata.size(), 4096);
         assert_eq!(blob_metadata.tables().len(), 4);
 
-        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.clone()).unwrap();
+        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.to_vec()).unwrap();
         assert_eq!(
             loaded.digester().unwrap(),
             Some(BlobMetadataDigester::Blake3)
@@ -3032,7 +3100,7 @@ mod tests {
         .unwrap();
         assert_eq!(blob_metadata.bytes[41], 1);
 
-        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.clone()).unwrap();
+        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.to_vec()).unwrap();
         assert_eq!(loaded.compressor(), BlobMetadataCompressor::Zstd);
         assert_eq!(loaded.digester().unwrap(), None);
         assert_eq!(loaded.tables().len(), 3);
@@ -3063,7 +3131,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.clone()).unwrap();
+        let loaded = BlobMetadata::from_bytes(blob_metadata.bytes.to_vec()).unwrap();
         assert_eq!(
             loaded.chunk_group(0).unwrap().compressed_range(),
             4096..4106
@@ -3114,7 +3182,7 @@ mod tests {
         blob_metadata.save(&path).unwrap();
 
         let test_cases = vec![
-            BlobMetadata::from_bytes(blob_metadata.bytes.clone()).unwrap(),
+            BlobMetadata::from_bytes(blob_metadata.bytes.to_vec()).unwrap(),
             BlobMetadata::from_path(&path).unwrap(),
         ];
 
@@ -3177,7 +3245,7 @@ mod tests {
         ];
 
         for (offset, value, expected) in test_cases {
-            let mut bytes = blob_metadata.bytes.clone();
+            let mut bytes = blob_metadata.bytes.to_vec();
             write_u16_at(&mut bytes, offset, value);
             let crc32 = BlobMetadataHeader::compute_crc32(&read_bytes_at(&bytes, 0), &bytes[24..]);
             write_u32_at(&mut bytes, 16, crc32);

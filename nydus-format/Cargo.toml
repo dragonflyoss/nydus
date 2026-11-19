@@ -14,6 +14,7 @@ zstd = "0.13"
 crc32c = "0.6"
 hex = { workspace = true }
 libc = { workspace = true }
+memmap2 = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 zerocopy = { version = "0.8", features = ["derive"] }
