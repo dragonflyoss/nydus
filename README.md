@@ -125,7 +125,7 @@ Guide to running Nydus with fscache: [Nydus-fscache](./docs/nydus-fscache.md)
 
 ### Run Nydus with Dragonfly P2P system
 
-Nydus is deeply integrated with [Dragonfly](https://d7y.io/) P2P system, which can greatly reduce the network latency and the single point pressure of the registry server. Benchmarking results in the production environment demonstrate that using Dragonfly can reduce network latency by more than 80%, to understand the performance results and integration steps, please refer to the [nydus integration](https://d7y.io/docs/setup/integration/nydus).
+Nydus is deeply integrated with [Dragonfly](https://d7y.io/) P2P system, which can greatly reduce the network latency and the single point pressure of the registry server. Benchmarking results in the production environment demonstrate that using Dragonfly can reduce network latency by more than 80%, to understand the performance results and integration steps, please refer to the [nydus integration](https://d7y.io/docs/operations/integrations/container-runtime/nydus/).
 
 If you want to deploy Dragonfly and Nydus at the same time through Helm, please refer to the **[Quick Start](https://github.com/dragonflyoss/helm-charts/blob/main/INSTALL.md)**.
 
