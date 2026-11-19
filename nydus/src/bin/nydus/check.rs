@@ -10,6 +10,7 @@ use nydus_format::erofs::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tabled::{
     settings::{object::Rows, Alignment, Modify, Style},
@@ -208,8 +209,10 @@ fn print_json_report(kind: ImageKind, path: &Path, report: &CheckReport) -> Resu
         primary_image_bytes: report.primary_image_bytes,
         blobs,
     };
-    serde_json::to_writer_pretty(std::io::stdout(), &json)?;
-    crate::print_line("")
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, &json)?;
+    writeln!(stdout)?;
+    Ok(())
 }
 
 fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) -> Result<()> {
@@ -249,9 +252,11 @@ fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) -> Result<()
     // Create a table and print it.
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    crate::print_line("Image")?;
-    crate::print_line(&table)?;
-    crate::print_line("")
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "Image")?;
+    writeln!(stdout, "{table}")?;
+    writeln!(stdout)?;
+    Ok(())
 }
 
 fn print_superblock(sb: &ErofsSuperblock) -> Result<()> {
@@ -348,9 +353,11 @@ fn print_superblock(sb: &ErofsSuperblock) -> Result<()> {
     // Create a table and print it.
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    crate::print_line("Superblock")?;
-    crate::print_line(&table)?;
-    crate::print_line("")
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "Superblock")?;
+    writeln!(stdout, "{table}")?;
+    writeln!(stdout)?;
+    Ok(())
 }
 
 /// Print inodes whose inline tail crosses a metadata block. Only the first
@@ -396,19 +403,23 @@ fn print_inline_across_blocks(stats: &ImageStats) -> Result<()> {
     table
         .with(Style::blank())
         .with(Modify::new(Rows::first()).with(Alignment::left()));
-    crate::print_line(format_args!(
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
         "Inline data across blocks ({} inode(s), block size {})",
         stats.inline_overflows.len(),
         EROFS_BLOCK_SIZE
-    ))?;
-    crate::print_line(&table)?;
+    )?;
+    writeln!(stdout, "{table}")?;
     if stats.inline_overflows.len() > MAX_LISTED {
-        crate::print_line(format_args!(
+        writeln!(
+            stdout,
             "  ... {} more",
             stats.inline_overflows.len() - MAX_LISTED
-        ))?;
+        )?;
     }
-    crate::print_line("")
+    writeln!(stdout)?;
+    Ok(())
 }
 
 fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) -> Result<()> {
@@ -502,16 +513,20 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) -> Resu
     // Create a table and print it.
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    crate::print_line("Summary")?;
-    crate::print_line(&table)?;
-    crate::print_line("")
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "Summary")?;
+    writeln!(stdout, "{table}")?;
+    writeln!(stdout)?;
+    Ok(())
 }
 
 fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) -> Result<()> {
-    crate::print_line("Blobs")?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "Blobs")?;
     if blobs.is_empty() {
-        crate::print_line("  (no external blobs recorded in device table)")?;
-        return crate::print_line("");
+        writeln!(stdout, "  (no external blobs recorded in device table)")?;
+        writeln!(stdout)?;
+        return Ok(());
     }
 
     // Define the table struct for printing.
@@ -619,8 +634,8 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) -> Result<()> {
         // Create a table and print it.
         let mut table = Table::kv(vec![row]);
         table.with(Style::blank());
-        crate::print_line(&table)?;
-        crate::print_line("")?;
+        writeln!(stdout, "{table}")?;
+        writeln!(stdout)?;
     }
     Ok(())
 }

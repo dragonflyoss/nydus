@@ -94,7 +94,6 @@ impl Registry {
                         registry.http.max_retries,
                         None,
                         &registry.http.tls,
-                        config.prefetch.retry_interval,
                         None,
                     )?;
 
@@ -104,7 +103,6 @@ impl Registry {
                         registry.fallback.max_retries,
                         None,
                         &registry.http.tls,
-                        config.prefetch.retry_interval,
                         Some(RateLimit::new(
                             registry.fallback.rate_limit,
                             Duration::from_secs(1),
@@ -128,7 +126,6 @@ impl Registry {
                         registry.http.max_retries,
                         Some(proxy),
                         &registry.http.tls,
-                        config.prefetch.retry_interval,
                         None,
                     )?;
 
@@ -138,7 +135,6 @@ impl Registry {
                         registry.fallback.max_retries,
                         None,
                         &registry.http.tls,
-                        config.prefetch.retry_interval,
                         Some(RateLimit::new(
                             registry.fallback.rate_limit,
                             Duration::from_secs(1),
@@ -162,7 +158,6 @@ impl Registry {
                         registry.http.max_retries,
                         None,
                         &registry.http.tls,
-                        config.prefetch.retry_interval,
                         None,
                     )?;
 
@@ -185,6 +180,8 @@ impl Registry {
                     registry.registry_token.as_ref().map(RedactedString::expose),
                 )?,
                 redirects: RedirectCache::new(),
+                prefetch_retry_interval: config.prefetch.retry_interval
+                    ..=config.prefetch.retry_interval.saturating_mul(2),
                 auth_transport,
                 transport,
             }),
@@ -444,7 +441,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::{self, StreamExt};
-    use nydus_config::{BackendConfig, HttpConfig, PrefetchConfig};
+    use nydus_config::{BackendConfig, HttpConfig};
     use nydus_test_utils::blob::FullBlob;
     use nydus_test_utils::metadata::single_chunk_group;
     use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_RANGE, LOCATION, WWW_AUTHENTICATE};
@@ -458,16 +455,17 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+    use url::Url;
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
 
     #[async_trait]
     impl<T: Fetcher> Fetcher for Arc<T> {
-        async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
             (**self).get(url, headers).await
         }
 
-        async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+        async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
             (**self).prefetch(url, headers).await
         }
 
@@ -544,12 +542,12 @@ mod tests {
 
     #[async_trait]
     impl Fetcher for ScriptedTransport {
-        async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+        async fn get(&self, _url: &Url, headers: HeaderMap) -> io::Result<Response> {
             self.headers.lock().unwrap().push(headers);
             self.play()
         }
 
-        async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+        async fn prefetch(&self, _url: &Url, headers: HeaderMap) -> io::Result<Response> {
             self.headers.lock().unwrap().push(headers);
             self.play()
         }
@@ -609,11 +607,11 @@ mod tests {
 
     #[async_trait]
     impl Fetcher for AuthGate {
-        async fn get(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+        async fn get(&self, _url: &Url, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
         }
 
-        async fn prefetch(&self, _url: &str, headers: HeaderMap) -> io::Result<Response> {
+        async fn prefetch(&self, _url: &Url, headers: HeaderMap) -> io::Result<Response> {
             self.answer(headers).await
         }
 
@@ -751,6 +749,7 @@ mod tests {
                 repository: "library/ubuntu".to_string(),
                 authorizer: Authorizer::new(auth, registry_token).unwrap(),
                 redirects: RedirectCache::new(),
+                prefetch_retry_interval: Duration::from_millis(1)..=Duration::from_millis(2),
                 auth_transport: Transport::Direct {
                     fetcher: Box::new(
                         Http::new(
@@ -759,7 +758,6 @@ mod tests {
                             http.max_retries,
                             None,
                             &http.tls,
-                            PrefetchConfig::default().retry_interval,
                             None,
                         )
                         .unwrap(),
@@ -1529,7 +1527,7 @@ mod tests {
             let registry = scripted_registry(origin.addr, None, None, transport.clone());
             registry.client.redirects.insert(
                 &hex::encode(TEST_BLOB_ID),
-                "http://cdn.example.com/signed".to_string(),
+                "http://cdn.example.com/signed".parse().unwrap(),
             );
 
             let mut buf = vec![0u8; 4];
@@ -1668,7 +1666,10 @@ mod tests {
             ))
             .unwrap();
             let registry = configured_registry(&config, None);
-            assert_eq!(registry.client.blob_url("abc123"), expected);
+            assert_eq!(
+                registry.client.blob_url("abc123").unwrap().as_str(),
+                expected
+            );
         }
     }
 
@@ -2243,7 +2244,7 @@ backend:
         registry
             .client
             .redirects
-            .insert(&hex, "http://cdn.example.com/signed".to_string());
+            .insert(&hex, "http://cdn.example.com/signed".parse().unwrap());
 
         let mut buf = vec![0u8; body.len()];
         read(&registry, ReadKind::Ondemand, &mut buf).unwrap();
@@ -2256,18 +2257,18 @@ backend:
     #[test]
     fn rejected_cached_redirect_is_evicted_and_re_resolved() {
         let test_cases = vec![
-            (StatusCode::UNAUTHORIZED, true),
-            (StatusCode::FORBIDDEN, true),
-            (StatusCode::BAD_REQUEST, true),
-            (StatusCode::NOT_FOUND, true),
-            (StatusCode::GONE, true),
-            (StatusCode::REQUEST_TIMEOUT, false),
-            (StatusCode::RANGE_NOT_SATISFIABLE, false),
-            (StatusCode::TOO_MANY_REQUESTS, false),
-            (StatusCode::INTERNAL_SERVER_ERROR, false),
+            (StatusCode::UNAUTHORIZED, true, false),
+            (StatusCode::FORBIDDEN, true, false),
+            (StatusCode::BAD_REQUEST, true, false),
+            (StatusCode::NOT_FOUND, true, false),
+            (StatusCode::GONE, true, false),
+            (StatusCode::REQUEST_TIMEOUT, false, true),
+            (StatusCode::RANGE_NOT_SATISFIABLE, false, false),
+            (StatusCode::TOO_MANY_REQUESTS, false, true),
+            (StatusCode::INTERNAL_SERVER_ERROR, false, true),
         ];
 
-        for (status, evicted) in test_cases {
+        for (status, evicted, transient) in test_cases {
             for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
                 let body = b"fresh".to_vec();
                 let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
@@ -2275,39 +2276,43 @@ backend:
                 if evicted {
                     script.push(Scripted::Body(body.clone()));
                 }
+                if transient && matches!(kind, ReadKind::Prefetch) {
+                    script.push(Scripted::Status(status, HeaderMap::new()));
+                }
+                let calls = script.len() as u32;
                 let transport = ScriptedTransport::new(script);
                 let registry = scripted_registry(origin.addr, None, None, transport.clone());
                 let hex = hex::encode(TEST_BLOB_ID);
                 registry
                     .client
                     .redirects
-                    .insert(&hex, "http://cdn.example.com/expired".to_string());
+                    .insert(&hex, "http://cdn.example.com/expired".parse().unwrap());
 
                 let mut buf = vec![0u8; body.len()];
                 let result = read(&registry, kind, &mut buf);
 
                 assert_eq!(result.is_ok(), evicted);
-                assert_eq!(transport.calls(), if evicted { 2 } else { 1 });
+                assert_eq!(transport.calls(), calls);
                 assert_eq!(registry.client.redirects.get(&hex).is_none(), evicted);
             }
         }
     }
 
     #[test]
-    fn prefetch_resolves_a_redirect_once_more_when_the_link_expired() {
+    fn prefetch_resolves_the_redirect_again_when_the_read_is_sent_once_more() {
         let redirect = |link: &'static str| {
             let mut headers = HeaderMap::new();
             headers.insert(LOCATION, link.parse().unwrap());
             Scripted::Status(StatusCode::TEMPORARY_REDIRECT, headers)
         };
-        let expired = || Scripted::Status(StatusCode::FORBIDDEN, HeaderMap::new());
+        let status = |status: StatusCode| Scripted::Status(status, HeaderMap::new());
         let body = b"fresh".to_vec();
         let test_cases: Vec<(ReadKind, Vec<Scripted>, Option<&str>)> = vec![
             (
                 ReadKind::Prefetch,
                 vec![
-                    redirect("http://cdn.example.com/expired"),
-                    expired(),
+                    redirect("http://cdn.example.com/busy"),
+                    status(StatusCode::SERVICE_UNAVAILABLE),
                     redirect("http://cdn.example.com/fresh"),
                     Scripted::Body(body.clone()),
                 ],
@@ -2316,16 +2321,27 @@ backend:
             (
                 ReadKind::Prefetch,
                 vec![
-                    redirect("http://cdn.example.com/expired"),
-                    expired(),
-                    redirect("http://cdn.example.com/expired"),
-                    expired(),
+                    redirect("http://cdn.example.com/busy"),
+                    status(StatusCode::SERVICE_UNAVAILABLE),
+                    redirect("http://cdn.example.com/busy"),
+                    status(StatusCode::SERVICE_UNAVAILABLE),
+                ],
+                None,
+            ),
+            (
+                ReadKind::Prefetch,
+                vec![
+                    redirect("http://cdn.example.com/rejected"),
+                    status(StatusCode::FORBIDDEN),
                 ],
                 None,
             ),
             (
                 ReadKind::Ondemand,
-                vec![redirect("http://cdn.example.com/expired"), expired()],
+                vec![
+                    redirect("http://cdn.example.com/busy"),
+                    status(StatusCode::SERVICE_UNAVAILABLE),
+                ],
                 None,
             ),
         ];
@@ -2346,7 +2362,8 @@ backend:
                     .client
                     .redirects
                     .get(&hex::encode(TEST_BLOB_ID))
-                    .as_deref(),
+                    .as_ref()
+                    .map(Url::as_str),
                 link
             );
             if link.is_some() {

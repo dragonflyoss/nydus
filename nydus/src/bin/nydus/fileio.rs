@@ -4,11 +4,11 @@ use nydus::fileio::{image_path, mount_image_file, warm_bootstrap, FileioService,
 use nydus::signal;
 use nydus_config::Config;
 use nydus_core::flat::{FlatImage, BLOCK_SIZE};
-use nydus_telemetry::logging::{init_tracing, log_failure};
+use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use super::*;
 
@@ -132,8 +132,9 @@ impl FileioCommand {
             self.console,
         )?;
 
-        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        log_failure("fileio", result)
+        Config::load(&self.config)
+            .and_then(|config| self.run(signals, config))
+            .inspect_err(|err| error!("nydus fileio failed: {}", err.report()))
     }
 
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {

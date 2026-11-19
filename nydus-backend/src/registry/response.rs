@@ -163,12 +163,11 @@ impl Response {
 
     /// Returns the URL a redirect of the request to `url` points at, a relative
     /// `Location` resolved against `url`, refer to RFC 9110 Section 10.2.2.
-    pub(crate) fn location(&self, url: &str) -> io::Result<String> {
+    pub(crate) fn location(&self, url: &Url) -> io::Result<Url> {
         self.headers
             .get(LOCATION)
             .and_then(|value| value.to_str().ok())
-            .and_then(|location| Url::parse(url).ok()?.join(location).ok())
-            .map(String::from)
+            .and_then(|location| url.join(location).ok())
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -414,7 +413,9 @@ mod tests {
 
     #[test]
     fn location_resolves_a_relative_redirect_against_the_request_url() {
-        let url = "http://registry:5000/v2/library/ubuntu/blobs/sha256:00";
+        let url = "http://registry:5000/v2/library/ubuntu/blobs/sha256:00"
+            .parse()
+            .unwrap();
         let test_cases = vec![
             (
                 Some("https://cdn.example.com/signed?sig=s"),
@@ -447,7 +448,10 @@ mod tests {
                 body: stream::empty().boxed(),
                 fallback: Arc::default(),
             };
-            assert_eq!(response.location(url).ok().as_deref(), expected);
+            assert_eq!(
+                response.location(&url).ok().as_ref().map(Url::as_str),
+                expected
+            );
         }
     }
 

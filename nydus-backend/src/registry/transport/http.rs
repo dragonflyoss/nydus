@@ -1,28 +1,26 @@
 //! The direct HTTP transport to the origin registry.
 
 use std::io;
-use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
-use rand::Rng;
 use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
 use reqwest::{Certificate, Client};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
-use reqwest_retry::{policies::ExponentialBackoff, RetryError, RetryTransientMiddleware};
-use tracing::{debug, warn};
+use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+use tracing::debug;
+use url::{Position, Url};
 
 use nydus_config::{ProxyConfig, TlsConfig};
 
 use crate::Source;
 
-use crate::registry::redirect::without_query;
 use crate::registry::response::Response;
 
-use super::middleware::{CircuitBreaker, RateLimit};
+use super::middleware::{CircuitBreaker, RateLimit, RedactQuery};
 use super::Fetcher;
 
 /// The HTTP client of the origin registry.
@@ -31,21 +29,16 @@ use super::Fetcher;
 /// GET ──▶ origin ──▶ 2xx / 3xx / 4xx ────────────────────────────────▶ handed back as is
 ///           │ 429 / 5xx / 408 / transport failure
 ///           ├─ again, max_retries times, exponential backoff
-///           ├─ on-demand ─▶ error
-///           └─ prefetch ──┬─ 429 / 5xx / 408 ─▶ once more after the retry interval ─▶ error
-///                         └─ transport failure ───────────────────────────▶ error
+///           └─ then handed back as is, a transport failure as an error
 /// ```
 ///
 /// A proxy that fails to connect is never tried again at once, see
 /// [`CircuitBreaker`].
 #[derive(Clone)]
 pub(crate) struct Http {
-    /// The reqwest client behind the retry, rate limit and circuit breaker
-    /// middleware.
+    /// The reqwest client behind the retry, rate limit, circuit breaker and
+    /// query redaction middleware.
     client: ClientWithMiddleware,
-
-    /// The random wait before a prefetch read is sent once more.
-    prefetch_retry_interval: RangeInclusive<Duration>,
 
     /// The proxy the requests go through.
     proxy: Option<ProxyConfig>,
@@ -61,7 +54,6 @@ impl Http {
         max_retries: u32,
         proxy: Option<&ProxyConfig>,
         tls: &TlsConfig,
-        prefetch_retry_interval: Duration,
         rate_limit: Option<RateLimit>,
     ) -> io::Result<Self> {
         // Return redirects so the caller caches them, and keep rustls even when
@@ -113,15 +105,12 @@ impl Http {
         }
 
         Ok(Self {
-            client: client.build(),
-            prefetch_retry_interval: prefetch_retry_interval
-                ..=prefetch_retry_interval.saturating_mul(2),
+            client: client.with(RedactQuery).build(),
             proxy: proxy.cloned(),
         })
     }
 
-    /// Converts the reqwest answer to a `GET` into a response, a failure
-    /// naming the request URL without its query.
+    /// Converts the reqwest answer to a `GET` into a response.
     fn response(result: reqwest_middleware::Result<reqwest::Response>) -> io::Result<Response> {
         result
             .map(|response| Response {
@@ -130,25 +119,7 @@ impl Http {
                 body: response.bytes_stream().map_err(io::Error::other).boxed(),
                 fallback: Arc::default(),
             })
-            .map_err(|mut err| {
-                // The retry middleware wraps the failure it gives up on.
-                let request = match &mut err {
-                    reqwest_middleware::Error::Middleware(wrapped) => {
-                        match wrapped.downcast_mut() {
-                            Some(RetryError::WithRetries { err, .. } | RetryError::Error(err)) => {
-                                Some(err)
-                            }
-                            None => None,
-                        }
-                    }
-                    err => Some(err),
-                };
-                if let Some(url) = request.and_then(|err| err.url_mut()) {
-                    url.set_query(None);
-                }
-
-                io::Error::other(err)
-            })
+            .map_err(io::Error::other)
     }
 }
 
@@ -156,11 +127,12 @@ impl Http {
 #[async_trait]
 impl Fetcher for Http {
     /// Sends the `GET` of an on-demand read, the body left streaming.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+    async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let now = Instant::now();
-        let result = Self::response(self.client.get(url).headers(headers).send().await);
+        let result = Self::response(self.client.get(url.clone()).headers(headers).send().await);
 
-        let url = without_query(url);
+        // Keep the query, which signs a redirect URL, out of the log.
+        let url = &url[..Position::AfterPath];
         match &result {
             Ok(response) => debug!(
                 "GET {url} (ondemand) from the origin returned {} in {:?}",
@@ -176,38 +148,24 @@ impl Fetcher for Http {
     }
 
     /// Sends the `GET` of a prefetch read, the body left streaming.
-    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
-        let mut retried = false;
-        loop {
-            let now = Instant::now();
-            let result = Self::response(self.client.get(url).headers(headers.clone()).send().await);
+    async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
+        let now = Instant::now();
+        let result = Self::response(self.client.get(url.clone()).headers(headers).send().await);
 
-            let url = without_query(url);
-            match &result {
-                Ok(response) => debug!(
-                    "GET {url} (prefetch) from the origin returned {} in {:?}",
-                    response.status,
-                    now.elapsed()
-                ),
-                Err(err) => debug!(
-                    "GET {url} (prefetch) from the origin failed in {:?}: {err}",
-                    now.elapsed()
-                ),
-            }
-
-            // Serve a definitive answer, or the second transient one.
-            let response = result?;
-            if !response.is_transient() || retried {
-                return Ok(response);
-            }
-
-            // Retry once after a random interval in the configured window.
-            let err = response.into_io_error().await;
-            let delay = rand::rng().random_range(self.prefetch_retry_interval.clone());
-            warn!("origin request failed, retrying in {delay:?}: {err}");
-            tokio::time::sleep(delay).await;
-            retried = true;
+        // Keep the query, which signs a redirect URL, out of the log.
+        let url = &url[..Position::AfterPath];
+        match &result {
+            Ok(response) => debug!(
+                "GET {url} (prefetch) from the origin returned {} in {:?}",
+                response.status,
+                now.elapsed()
+            ),
+            Err(err) => debug!(
+                "GET {url} (prefetch) from the origin failed in {:?}: {err}",
+                now.elapsed()
+            ),
         }
+        result
     }
 
     /// Returns the `source` label of the reads, `http_proxy` through a proxy.
@@ -234,58 +192,31 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
 
     #[tokio::test]
-    async fn prefetch_fails_at_once_on_a_transport_failure() {
+    async fn prefetch_keeps_the_query_out_of_the_error_of_a_transport_failure() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/blob", listener.local_addr().unwrap());
         drop(listener);
-        let retry_interval = Duration::from_secs(60 * 60);
         let http = Http::new(
             Duration::from_secs(5),
             Duration::from_secs(5),
             0,
             None,
             &TlsConfig::default(),
-            retry_interval,
             None,
         )
         .unwrap();
 
-        let now = Instant::now();
         let message = http
-            .prefetch(&format!("{url}?sig=secret"), HeaderMap::new())
+            .prefetch(
+                &format!("{url}?sig=secret").parse().unwrap(),
+                HeaderMap::new(),
+            )
             .await
             .err()
             .unwrap()
             .to_string();
-        assert!(now.elapsed() < retry_interval);
-        assert!(message.contains(&url), "{message}");
-        assert!(!message.contains("secret"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn response_drops_the_query_of_a_request_given_up_after_retries() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/blob", listener.local_addr().unwrap());
-        drop(listener);
-        let err = Client::new()
-            .get(format!("{url}?sig=secret"))
-            .send()
-            .await
-            .unwrap_err();
-
-        let err = Http::response(Err(reqwest_middleware::Error::Middleware(
-            RetryError::WithRetries {
-                retries: 1,
-                err: err.into(),
-            }
-            .into(),
-        )))
-        .err()
-        .unwrap();
-
-        let chain = format!("{err:?}");
-        assert!(chain.contains(&url), "{chain}");
-        assert!(!chain.contains("secret"), "{chain}");
+        assert!(message.contains(&url));
+        assert!(!message.contains("secret"));
     }
 
     #[cfg(feature = "dragonfly")]
@@ -298,7 +229,6 @@ mod tests {
             3,
             None,
             &tls,
-            Duration::from_secs(1),
             None,
         )
         .is_ok());
@@ -308,7 +238,6 @@ mod tests {
             3,
             None,
             &tls,
-            Duration::from_secs(1),
             Some(RateLimit::new(10, Duration::from_secs(1))),
         )
         .is_ok());
@@ -371,7 +300,7 @@ mod tests {
             (true, None, true),
         ];
 
-        let url = start_https_server(cert).await;
+        let url = start_https_server(cert).await.parse().unwrap();
         for (skip_verify, ca_cert, expected) in test_cases {
             let http = Http::new(
                 Duration::from_secs(5),
@@ -382,7 +311,6 @@ mod tests {
                     skip_verify,
                     ca_cert,
                 },
-                Duration::from_secs(1),
                 None,
             )
             .unwrap();

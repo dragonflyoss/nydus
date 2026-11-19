@@ -86,7 +86,7 @@ func TestBearerRefresh(t *testing.T) {
 	image, proxy, addr := newRegistrySuite(t)
 	proxy.enableBearerAuth("expiring-token")
 
-	proxy.tokenResponse(30, 0, nil, 0)
+	proxy.tokenResponse(20, 0, nil, 0)
 	m := image.mount(t, image.config(addr))
 	m.readWindows(t, image, 0)
 
@@ -115,7 +115,7 @@ func TestBearerPrefetchRefresh(t *testing.T) {
 	t.Parallel()
 	image, proxy, addr := newRegistrySuite(t)
 	proxy.enableBearerAuth("prefetch-expiring-token")
-	proxy.tokenResponse(30, 0, nil, 0)
+	proxy.tokenResponse(20, 0, nil, 0)
 
 	proxy.faults.Set(registry.Fault{Times: 1, Delay: 12 * time.Second, Match: func(r *http.Request) bool {
 		return registry.IsBlobGet(r) && !strings.HasPrefix(r.Header.Get("Range"), "bytes=-")

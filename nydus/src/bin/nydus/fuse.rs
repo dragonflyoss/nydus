@@ -11,12 +11,12 @@ use nydus_config::{
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
-use nydus_telemetry::logging::{init_tracing, log_failure};
+use nydus_telemetry::logging::init_tracing;
 use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use super::{default_log_dir, default_parallelism, NAME};
 
@@ -171,7 +171,8 @@ impl FuseCommand {
             self.console,
         )?;
 
-        log_failure("fuse", self.serve(shutdown, api_socket))
+        self.serve(shutdown, api_socket)
+            .inspect_err(|err| error!("nydus fuse failed: {}", err.report()))
     }
 
     /// Mounts the image and serves it until `shutdown` is set.

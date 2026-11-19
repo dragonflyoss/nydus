@@ -4,7 +4,7 @@ use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifySer
 use nydus::mount::unmount;
 use nydus::signal;
 use nydus_config::Config;
-use nydus_telemetry::logging::{init_tracing, log_failure};
+use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -136,8 +136,9 @@ impl FanotifyCommand {
         )?;
 
         // Load the storage config and run the fanotify service until shutdown.
-        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        log_failure("fanotify", result)
+        Config::load(&self.config)
+            .and_then(|config| self.run(signals, config))
+            .inspect_err(|err| error!("nydus fanotify failed: {}", err.report()))
     }
 
     /// Runs the fanotify service: builds the core, spawns the event loop,

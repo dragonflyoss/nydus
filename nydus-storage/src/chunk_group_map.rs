@@ -149,6 +149,39 @@ pub struct ChunkGroupMap {
 }
 
 impl ChunkGroupMap {
+    /// Reserves the blocks of the first `len` bytes of `file` without changing its
+    /// size. The ready bits are stored through a shared mapping, and a store that
+    /// has to allocate its block on a full disk kills the process with `SIGBUS`
+    /// instead of returning an error. A filesystem that cannot reserve keeps the
+    /// file sparse.
+    fn reserve_blocks(file: &File, len: u64) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        loop {
+            // SAFETY: fallocate takes no pointers.
+            let rc = unsafe {
+                libc::fallocate(
+                    file.as_raw_fd(),
+                    libc::FALLOC_FL_KEEP_SIZE,
+                    0,
+                    len as libc::off_t,
+                )
+            };
+            if rc == 0 {
+                break;
+            }
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EOPNOTSUPP | libc::ENOSYS) => break,
+                _ => return Err(err),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (file, len);
+
+        Ok(())
+    }
+
     pub fn open(path: &Path, chunk_group_count: usize) -> io::Result<Self> {
         let bytes_len = chunk_group_count.div_ceil(8);
         let expected_len = (CHUNK_GROUP_MAP_HEADER_SIZE + bytes_len) as u64;
@@ -166,7 +199,7 @@ impl ChunkGroupMap {
             // sequence: reserve the blocks, size the file, then write the
             // identical header bytes. A reservation that fails leaves the
             // file empty, so the next open creates it again.
-            reserve_blocks(&file, expected_len)?;
+            Self::reserve_blocks(&file, expected_len)?;
             file.set_len(expected_len)?;
             file.write_all_at(&header_bytes(chunk_group_count), 0)?;
         } else if file_len < expected_len {
@@ -457,39 +490,6 @@ impl ChunkGroupMap {
     }
 }
 
-/// Reserves the blocks of the first `len` bytes of `file` without changing its
-/// size. The ready bits are stored through a shared mapping, and a store that
-/// has to allocate its block on a full disk kills the process with `SIGBUS`
-/// instead of returning an error. A filesystem that cannot reserve keeps the
-/// file sparse.
-fn reserve_blocks(file: &File, len: u64) -> io::Result<()> {
-    #[cfg(target_os = "linux")]
-    loop {
-        // SAFETY: fallocate takes no pointers.
-        let rc = unsafe {
-            libc::fallocate(
-                file.as_raw_fd(),
-                libc::FALLOC_FL_KEEP_SIZE,
-                0,
-                len as libc::off_t,
-            )
-        };
-        if rc == 0 {
-            break;
-        }
-        let err = io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::EINTR) => continue,
-            Some(libc::EOPNOTSUPP | libc::ENOSYS) => break,
-            _ => return Err(err),
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (file, len);
-
-    Ok(())
-}
-
 fn header_bytes(chunk_group_count: usize) -> [u8; CHUNK_GROUP_MAP_HEADER_SIZE] {
     let mut header = [0u8; CHUNK_GROUP_MAP_HEADER_SIZE];
     header[..8].copy_from_slice(&CHUNK_GROUP_MAP_MAGIC);
@@ -544,7 +544,7 @@ mod tests {
 
         // Only a filesystem that reserves blocks can be held to it.
         let probe = File::create(dir.path().join("probe")).unwrap();
-        reserve_blocks(&probe, expected).unwrap();
+        ChunkGroupMap::reserve_blocks(&probe, expected).unwrap();
         if probe.metadata().unwrap().blocks() * 512 >= expected {
             assert!(meta.blocks() * 512 >= expected);
         }

@@ -10,7 +10,7 @@ use nydus_format::erofs::{ZErofsCompressor, EROFS_BLOB_ID_SIZE};
 use nydus_telemetry::logging::init_command_tracing;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::BufWriter;
+use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use tabled::{settings::Style, Table, Tabled};
@@ -696,7 +696,8 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) -> Result<()> {
 
     let mut table = Table::kv(vec![row]);
     table.with(Style::blank());
-    crate::print_line(&table)
+    writeln!(io::stdout(), "{table}")?;
+    Ok(())
 }
 
 #[cfg(test)]

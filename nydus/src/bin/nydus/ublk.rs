@@ -5,10 +5,11 @@ use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
 use nydus_config::Config;
-use nydus_telemetry::logging::{init_tracing, log_failure};
+use nydus_telemetry::logging::init_tracing;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{error, info, warn, Level};
 
 use super::*;
 
@@ -136,8 +137,9 @@ impl UblkCommand {
         )?;
 
         // Load the storage config and run the ublk service until shutdown.
-        let result = Config::load(&self.config).and_then(|config| self.run(signals, config));
-        log_failure("ublk", result)
+        Config::load(&self.config)
+            .and_then(|config| self.run(signals, config))
+            .inspect_err(|err| error!("nydus ublk failed: {}", err.report()))
     }
 
     /// Runs the ublk service: builds the core, attaches the device, prints
@@ -160,9 +162,9 @@ impl UblkCommand {
         let metrics = core.core().metrics().clone();
         let ondemand_recorder = core.core().ondemand_recorder().clone();
         let service = UblkService::new(core, &options)?;
-        if let Err(err) = crate::print_line(service.dev_path()) {
+        if let Err(err) = writeln!(io::stdout(), "{}", service.dev_path()) {
             service.delete();
-            return Err(err);
+            return Err(err.into());
         }
 
         // Non-fatal like the fuse service: the device keeps serving without metrics.

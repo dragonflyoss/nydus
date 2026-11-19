@@ -1,5 +1,5 @@
-//! The reqwest middleware of the HTTP client: the rate limit and the circuit
-//! breaker.
+//! The reqwest middleware of the HTTP client: the rate limit, the circuit
+//! breaker and the query redaction.
 
 use std::io;
 use std::sync::Mutex;
@@ -168,6 +168,30 @@ impl Middleware for CircuitBreaker {
     }
 }
 
+/// The redaction of the query, which signs a redirect URL, from the error of
+/// a failed request, inside every other middleware.
+pub(crate) struct RedactQuery;
+
+/// Implements the query redaction as a reqwest middleware.
+#[async_trait]
+impl Middleware for RedactQuery {
+    /// Runs the request, dropping the query from the URL its error names.
+    async fn handle(
+        &self,
+        req: Request,
+        extensions: &mut Extensions,
+        next: Next<'_>,
+    ) -> reqwest_middleware::Result<reqwest::Response> {
+        next.run(req, extensions).await.map_err(|mut err| {
+            if let Some(url) = err.url_mut() {
+                url.set_query(None);
+            }
+
+            err
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +261,35 @@ mod tests {
         assert!(client.get(&url).send().await.unwrap().status().is_success());
         assert!(client.get(&url).send().await.unwrap().status().is_success());
         assert_eq!(server.join().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn redact_query_drops_the_query_from_the_url_an_error_names() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/blob", listener.local_addr().unwrap());
+        drop(listener);
+        let test_cases = vec![(0, false), (1, false), (0, true)];
+
+        for (max_retries, proxied) in test_cases {
+            let mut client =
+                ClientBuilder::new(Client::new()).with(RetryTransientMiddleware::new_with_policy(
+                    ExponentialBackoff::builder()
+                        .retry_bounds(Duration::from_millis(1), Duration::from_millis(1))
+                        .build_with_max_retries(max_retries),
+                ));
+            if proxied {
+                client = client.with(CircuitBreaker::new(&url));
+            }
+            let client = client.with(RedactQuery).build();
+
+            let err = client
+                .get(format!("{url}?sig=secret"))
+                .send()
+                .await
+                .unwrap_err();
+            let chain = format!("{err:?}");
+            assert!(chain.contains(&url));
+            assert!(!chain.contains("secret"));
+        }
     }
 }

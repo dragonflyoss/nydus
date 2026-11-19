@@ -22,9 +22,9 @@ use nydus_telemetry::metrics::WriteKind;
 use super::chunk_group_lock::ChunkGroupLocks;
 use super::remote::copy_group_chunks;
 use super::{
-    cache_write_failure, cached_chunk_group_is_intact, is_cache_write_failure,
-    plan_prefetch_batches, validate_decoded_chunk_group, write_failure_reason, BlobCache,
-    CacheOptions, CacheWriteFailure, ChunkGroupBuffers, ChunkGroupReader,
+    cached_chunk_group_is_intact, plan_prefetch_batches, validate_decoded_chunk_group,
+    write_failure_reason, BlobCache, CacheOptions, CacheWriteFailure, ChunkGroupBuffers,
+    ChunkGroupReader,
 };
 
 #[derive(Clone)]
@@ -34,7 +34,7 @@ enum FlightResult {
         kind: io::ErrorKind,
         message: Arc<str>,
         /// Whether the cache file refused the write, see
-        /// [`is_cache_write_failure`].
+        /// [`CacheWriteFailure::is`].
         cache_write: bool,
     },
 }
@@ -66,7 +66,7 @@ impl Flight {
             Err(err) => FlightResult::Failure {
                 kind: err.kind(),
                 message: Arc::from(err.to_string()),
-                cache_write: is_cache_write_failure(err),
+                cache_write: CacheWriteFailure::is(err),
             },
         };
         *guard = Some(result);
@@ -690,14 +690,20 @@ impl LocalBlobCache {
         cache_file: &File,
     ) -> io::Result<()> {
         self.ensure_data_file_linked(cache_file)?;
-        let mut batch = ScatterBatch::new(cache_file);
-        for (offset, bytes) in group
+        let chunks = group
             .chunks(&self.blob_metadata, payload)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
-        {
-            batch.push(offset, bytes).map_err(cache_write_failure)?;
-        }
-        batch.flush().map_err(cache_write_failure)?;
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let mut batch = ScatterBatch::new(cache_file);
+        chunks
+            .into_iter()
+            .try_for_each(|(offset, bytes)| batch.push(offset, bytes))
+            .and_then(|()| batch.flush())
+            .map_err(|err| {
+                io::Error::new(
+                    err.kind(),
+                    CacheWriteFailure(format!("failed to write the cache file: {err}")),
+                )
+            })?;
         self.ensure_data_file_linked(cache_file)?;
         self.chunk_group_map.set_ready(group.index() as usize)
     }
@@ -875,7 +881,7 @@ impl BlobCache for LocalBlobCache {
             Ok(()) => cache_file.as_ref().read_exact_at(dst, offset),
             // The cache file takes no more data, a full disk for one. The
             // read does not need the file: serve it from the backend.
-            Err(err) if is_cache_write_failure(&err) => {
+            Err(err) if CacheWriteFailure::is(&err) => {
                 if !self.cache_write_failed.swap(true, Ordering::Relaxed) {
                     warn!(
                         "serving reads of blob {} from the backend, uncached: {err}",

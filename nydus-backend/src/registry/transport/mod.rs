@@ -16,6 +16,7 @@ use futures::{stream, StreamExt};
 use reqwest::header::{HeaderMap, RANGE};
 use reqwest::StatusCode;
 use tracing::warn;
+use url::Url;
 
 use crate::Source;
 
@@ -38,11 +39,10 @@ pub(crate) use self::middleware::RateLimit;
 #[async_trait]
 pub(crate) trait Fetcher: Send + Sync {
     /// Sends the `GET` of an on-demand read, which a FUSE reader waits on.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+    async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response>;
 
-    /// Sends the `GET` of a prefetch read, once more after the retry interval
-    /// on a `429`, `5xx` or `408`.
-    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response>;
+    /// Sends the `GET` of a prefetch read.
+    async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response>;
 
     /// Returns the `source` label of the reads the fetcher serves.
     fn source(&self) -> Source;
@@ -101,7 +101,7 @@ impl Transport {
 impl Fetcher for Transport {
     /// Sends the `GET` through the fetcher, then through the origin client
     /// when the fetcher fails it.
-    async fn get(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+    async fn get(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         let fetcher = match self {
             Self::Direct { fetcher } => return fetcher.get(url, headers).await,
             Self::Fallback { fetcher, .. } => fetcher,
@@ -154,7 +154,7 @@ impl Fetcher for Transport {
     }
 
     /// Sends the `GET` through the fetcher, a prefetch read never falls back.
-    async fn prefetch(&self, url: &str, headers: HeaderMap) -> io::Result<Response> {
+    async fn prefetch(&self, url: &Url, headers: HeaderMap) -> io::Result<Response> {
         match self {
             Self::Direct { fetcher } | Self::Fallback { fetcher, .. } => {
                 fetcher.prefetch(url, headers).await

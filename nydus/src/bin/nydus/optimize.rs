@@ -11,6 +11,7 @@ use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
 use nydus_telemetry::metrics::Metrics;
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
@@ -245,7 +246,8 @@ impl OptimizeCommand {
         // Create a table and print it.
         let mut table = Table::kv(vec![row]);
         table.with(Style::blank());
-        crate::print_line(&table)
+        writeln!(io::stdout(), "{table}")?;
+        Ok(())
     }
 }
 
