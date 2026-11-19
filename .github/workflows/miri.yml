@@ -40,8 +40,14 @@ jobs:
       run: bash misc/install-protoc.sh
     - name: Unit Test with Miri
       run: |
+        # Two bugs made this step unable to fail: `tee` swallowed miri's exit status, and
+        # `grep 'Undefined Behavior'` succeeds when it *finds* UB, so a run reporting UB passed.
+        set -o pipefail
         CARGO_HOME=${HOME}/.cargo
         CARGO_BIN=$(which cargo)
         RUSTUP_BIN=$(which rustup)
         sudo -E RUSTUP=${RUSTUP_BIN} make miri-ut-nextest 2>&1 | tee miri-ut.log
-        grep -C 2 'Undefined Behavior' miri-ut.log
+        if grep -q 'error: Undefined Behavior' miri-ut.log; then
+          echo "::error::Miri reported undefined behavior; see the log above."
+          exit 1
+        fi
