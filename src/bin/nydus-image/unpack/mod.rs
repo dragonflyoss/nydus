@@ -3,12 +3,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::env;
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::rc::Rc;
 use std::str;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
@@ -16,13 +19,15 @@ use nydus_rafs::{
     metadata::{RafsInodeExt, RafsSuper},
     RafsIterator,
 };
-use nydus_storage::backend::BlobBackend;
-use nydus_storage::device::BlobInfo;
+use nydus_storage::backend::{BlobBackend, BlobReader};
+use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::meta::BlobCompressionContextInfo;
+use nydus_utils::crypt;
 use tar::{Builder, Header};
 
 use self::pax::{
-    OCIBlockBuilder, OCICharBuilder, OCIDirBuilder, OCIFifoBuilder, OCILinkBuilder, OCIRegBuilder,
-    OCISocketBuilder, OCISymlinkBuilder, PAXExtensionSectionBuilder, PAXLinkBuilder,
+    BlobSources, OCIBlockBuilder, OCICharBuilder, OCIDirBuilder, OCIFifoBuilder, OCILinkBuilder,
+    OCIRegBuilder, OCISocketBuilder, OCISymlinkBuilder, PAXExtensionSectionBuilder, PAXLinkBuilder,
     PAXSpecialSectionBuilder,
 };
 
@@ -180,6 +185,8 @@ impl OCITarBuilderFactory {
     ) -> Result<OCIRegBuilder> {
         let mut readers = HashMap::new();
         let mut compressors = HashMap::new();
+        let mut ciphers = HashMap::new();
+        let mut metas = HashMap::new();
         for blob in blobs {
             let blob_backend = blob_backend
                 .as_deref()
@@ -188,6 +195,15 @@ impl OCITarBuilderFactory {
                 .get_reader(blob.blob_id().as_str())
                 .map_err(|err| anyhow!("fail to get reader, error {:?}", err))?;
 
+            if blob.has_feature(BlobFeatures::BATCH) {
+                metas.insert(blob.blob_index(), Self::load_blob_meta(&blob, &reader)?);
+            }
+            if blob.cipher() != crypt::Algorithm::None {
+                ciphers.insert(
+                    blob.blob_index(),
+                    (blob.cipher_object(), blob.cipher_context()),
+                );
+            }
             let compressor = blob.compressor();
             readers.insert(blob.blob_index(), reader);
             compressors.insert(blob.blob_index(), compressor);
@@ -195,9 +211,43 @@ impl OCITarBuilderFactory {
 
         Ok(OCIRegBuilder::new(
             Rc::new(PAXExtensionSectionBuilder::new()),
-            readers,
-            compressors,
+            BlobSources::new(readers, compressors, ciphers, metas),
         ))
+    }
+
+    /// Load the blob meta, which is required to locate batch chunks in the blob.
+    fn load_blob_meta(
+        blob: &BlobInfo,
+        reader: &Arc<dyn BlobReader>,
+    ) -> Result<Arc<BlobCompressionContextInfo>> {
+        // The blob meta is downloaded into a local cache file and then mapped into memory, so
+        // the file can be removed right after loading.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir = env::temp_dir().join(format!(
+            "nydus-unpack-{}-{}-{}",
+            process::id(),
+            nanos,
+            blob.blob_index()
+        ));
+        fs::create_dir(&dir)
+            .with_context(|| format!("fail to create temporary directory {:?}", dir))?;
+        // Don't build the path from the blob id, which comes from the image.
+        let blob_path = dir.join("blob");
+        let meta = BlobCompressionContextInfo::new(
+            &blob_path.display().to_string(),
+            blob,
+            Some(reader),
+            false,
+        );
+        if let Err(err) = fs::remove_dir_all(&dir) {
+            warn!("fail to remove temporary directory {:?}: {}", dir, err);
+        }
+
+        let meta = meta.with_context(|| format!("fail to load blob meta of {}", blob.blob_id()))?;
+        Ok(Arc::new(meta))
     }
 }
 

@@ -1,6 +1,8 @@
 use nix::unistd::{Gid, Group, Uid, User};
 use std::ops::Deref;
 use std::{
+    borrow::Cow,
+    cell::RefCell,
     collections::HashMap,
     ffi::OsStr,
     io::{self, Cursor, Error, ErrorKind, Read},
@@ -19,9 +21,12 @@ use nydus_rafs::metadata::RafsInodeExt;
 use nydus_storage::{
     backend::BlobReader,
     device::BlobChunkInfo,
+    meta::BlobCompressionContextInfo,
     utils::{alloc_buf, AlignedBuf},
+    RAFS_MAX_CHUNK_SIZE,
 };
 use nydus_utils::compress::{self, Algorithm};
+use nydus_utils::crypt::{self, Cipher, CipherContext};
 use tar::{EntryType, Header};
 
 use super::{SectionBuilder, TarSection};
@@ -171,20 +176,14 @@ impl SectionBuilder for OCIDirBuilder {
 
 pub struct OCIRegBuilder {
     ext_builder: Rc<PAXExtensionSectionBuilder>,
-    readers: HashMap<u32, Arc<dyn BlobReader>>,
-    compressors: HashMap<u32, Algorithm>,
+    sources: Rc<BlobSources>,
 }
 
 impl OCIRegBuilder {
-    pub fn new(
-        ext_builder: Rc<PAXExtensionSectionBuilder>,
-        readers: HashMap<u32, Arc<dyn BlobReader>>,
-        compressors: HashMap<u32, Algorithm>,
-    ) -> Self {
+    pub fn new(ext_builder: Rc<PAXExtensionSectionBuilder>, sources: BlobSources) -> Self {
         OCIRegBuilder {
             ext_builder,
-            readers,
-            compressors,
+            sources: Rc::new(sources),
         }
     }
 
@@ -193,14 +192,7 @@ impl OCIRegBuilder {
             .map(|i| inode.get_chunk_info(i).unwrap())
             .collect();
 
-        let mut compressors = HashMap::new();
-        compressors.clone_from(&self.compressors);
-
-        let mut readers = HashMap::new();
-        readers.clone_from(&self.readers);
-        let reader = ChunkReader::new(compressors, readers, chunks);
-
-        Box::new(reader)
+        Box::new(ChunkReader::new(self.sources.clone(), chunks, inode.size()))
     }
 }
 
@@ -702,60 +694,241 @@ impl Util {
     }
 }
 
-struct ChunkReader {
-    compressors: HashMap<u32, Algorithm>,
-    readers: HashMap<u32, Arc<dyn BlobReader>>,
+/// Cipher object and context to decrypt the data of an encrypted blob.
+pub type BlobCipher = (Arc<Cipher>, Option<CipherContext>);
 
-    chunks: IntoIter<Arc<dyn BlobChunkInfo>>,
-    chunk: Cursor<AlignedBuf>,
+/// Blob data sources shared by all regular files of the image being unpacked.
+pub struct BlobSources {
+    readers: HashMap<u32, Arc<dyn BlobReader>>,
+    compressors: HashMap<u32, Algorithm>,
+    /// Ciphers of encrypted blobs.
+    ciphers: HashMap<u32, BlobCipher>,
+    /// Blob meta of blobs with batch chunks, needed to locate a chunk inside its batch.
+    metas: HashMap<u32, Arc<BlobCompressionContextInfo>>,
+    /// The last decompressed batch as `(blob_index, batch_index, data)`. Small files sharing a
+    /// batch are unpacked one after another, so caching a single batch is enough.
+    batch: RefCell<Option<(u32, u32, Rc<AlignedBuf>)>>,
 }
 
-impl ChunkReader {
-    fn new(
-        compressors: HashMap<u32, Algorithm>,
+impl BlobSources {
+    pub fn new(
         readers: HashMap<u32, Arc<dyn BlobReader>>,
-        chunks: Vec<Arc<dyn BlobChunkInfo>>,
+        compressors: HashMap<u32, Algorithm>,
+        ciphers: HashMap<u32, BlobCipher>,
+        metas: HashMap<u32, Arc<BlobCompressionContextInfo>>,
     ) -> Self {
         Self {
-            compressors,
             readers,
-            chunks: chunks.into_iter(),
-            chunk: Cursor::new(AlignedBuf::default()),
+            compressors,
+            ciphers,
+            metas,
+            batch: RefCell::new(None),
         }
     }
 
-    fn load_chunk(&mut self, chunk: &dyn BlobChunkInfo) -> Result<()> {
-        let mut buf = alloc_buf(chunk.compressed_size() as usize);
-
+    fn read_blob(&self, blob_index: u32, offset: u64, size: usize) -> Result<AlignedBuf> {
         let reader = self
             .readers
-            .get(&chunk.blob_index())
-            .expect("No valid reader")
-            .clone();
-        reader
-            .read(buf.as_mut_slice(), chunk.compressed_offset())
-            .map_err(|err| {
-                error!("fail to read chunk, error: {:?}", err);
-                anyhow!("fail to read chunk, error: {:?}", err)
-            })?;
-
-        if !chunk.is_compressed() {
-            self.chunk = Cursor::new(buf);
-            return Ok(());
+            .get(&blob_index)
+            .ok_or_else(|| anyhow!("no reader for blob index {}", blob_index))?;
+        // The size comes from the image, so check it before allocating the buffer.
+        if size as u64 > RAFS_MAX_CHUNK_SIZE {
+            bail!(
+                "invalid data size {:#x} at offset {:#x} of blob index {}",
+                size,
+                offset,
+                blob_index
+            );
         }
+        let mut buf = alloc_buf(size);
+        let read = reader
+            .read(buf.as_mut_slice(), offset)
+            .map_err(|err| anyhow!("fail to read chunk, error: {:?}", err))?;
+        if read != size {
+            bail!(
+                "short read from blob index {}: expect {} bytes at offset {:#x}, got {}",
+                blob_index,
+                size,
+                offset,
+                read
+            );
+        }
+        Ok(buf)
+    }
 
+    fn decrypt<'a>(
+        &self,
+        blob_index: u32,
+        src: &'a [u8],
+        encrypted: bool,
+    ) -> Result<Cow<'a, [u8]>> {
+        if !encrypted {
+            return Ok(Cow::Borrowed(src));
+        }
+        let (object, context) = self
+            .ciphers
+            .get(&blob_index)
+            .ok_or_else(|| anyhow!("no cipher for encrypted blob index {}", blob_index))?;
+        crypt::decrypt_with_context(src, object, context, true).with_context(|| "fail to decrypt")
+    }
+
+    /// Turn data read from the blob into `size` bytes of plain data.
+    fn decode(
+        &self,
+        blob_index: u32,
+        src: &[u8],
+        size: usize,
+        compressed: bool,
+    ) -> Result<AlignedBuf> {
         let compressor = *self
             .compressors
-            .get(&chunk.blob_index())
-            .expect("No valid compressor");
+            .get(&blob_index)
+            .ok_or_else(|| anyhow!("no compressor for blob index {}", blob_index))?;
+        let mut data = alloc_buf(size);
+        let decoded = if compressed && compressor != Algorithm::None {
+            compress::decompress(src, data.as_mut_slice(), compressor)
+                .with_context(|| "fail to decompress")?
+        } else if src.len() == size {
+            data.copy_from_slice(src);
+            size
+        } else {
+            src.len()
+        };
+        // The decompressor may produce less data than expected without reporting an error.
+        if decoded != size {
+            bail!(
+                "data size mismatch in blob index {}: expect {} bytes, got {}",
+                blob_index,
+                size,
+                decoded
+            );
+        }
+        Ok(data)
+    }
 
-        let mut data = alloc_buf(chunk.uncompressed_size() as usize);
-        compress::decompress(buf.as_mut_slice(), data.as_mut_slice(), compressor)
-            .with_context(|| "fail to decompress")?;
+    fn load_chunk(&self, chunk: &dyn BlobChunkInfo) -> Result<AlignedBuf> {
+        if self.is_batch_chunk(chunk) {
+            return self.load_batch_chunk(chunk);
+        }
 
-        self.chunk = Cursor::new(data);
+        let blob_index = chunk.blob_index();
+        let size = chunk.uncompressed_size() as usize;
+        let buf = self.read_blob(
+            blob_index,
+            chunk.compressed_offset(),
+            chunk.compressed_size() as usize,
+        )?;
+        if !chunk.is_compressed() && !chunk.is_encrypted() && buf.len() == size {
+            return Ok(buf);
+        }
+        let raw = self.decrypt(blob_index, &buf, chunk.is_encrypted())?;
+        self.decode(blob_index, &raw, size, chunk.is_compressed())
+    }
 
-        Ok(())
+    /// The batch information is only recorded in the blob meta, not in the bootstrap.
+    fn is_batch_chunk(&self, chunk: &dyn BlobChunkInfo) -> bool {
+        chunk.is_batch()
+            || self.metas.get(&chunk.blob_index()).is_some_and(|meta| {
+                (chunk.id() as usize) < meta.get_chunk_count() && meta.is_batch_chunk(chunk.id())
+            })
+    }
+
+    /// Batch chunks have no compressed data of their own: several small chunks are compressed
+    /// together as one batch, so decompress the whole batch and slice the chunk out of it, the
+    /// same way nydusd does.
+    fn load_batch_chunk(&self, chunk: &dyn BlobChunkInfo) -> Result<AlignedBuf> {
+        let blob_index = chunk.blob_index();
+        let meta = self
+            .metas
+            .get(&blob_index)
+            .ok_or_else(|| anyhow!("no blob meta for batch chunks of blob index {}", blob_index))?;
+        // The blob meta doesn't check the chunk id itself.
+        if chunk.id() as usize >= meta.get_chunk_count() {
+            bail!(
+                "invalid chunk id {} of blob index {}: the blob has {} chunks",
+                chunk.id(),
+                blob_index,
+                meta.get_chunk_count()
+            );
+        }
+        let batch_index = meta.get_batch_index(chunk.id())?;
+        // Only the blob meta records where the batch starts in the blob.
+        let c_offset = meta.get_chunk_info(chunk.id() as usize).compressed_offset();
+        let batch = self.load_batch(meta, blob_index, batch_index, c_offset)?;
+
+        let offset = meta.get_uncompressed_offset_in_batch_buf(chunk.id())? as usize;
+        let end = offset + chunk.uncompressed_size() as usize;
+        if end > batch.len() {
+            bail!(
+                "chunk {} exceeds batch {} of blob index {}: end {}, batch size {}",
+                chunk.id(),
+                batch_index,
+                blob_index,
+                end,
+                batch.len()
+            );
+        }
+        let mut buf = alloc_buf(end - offset);
+        buf.copy_from_slice(&batch[offset..end]);
+        Ok(buf)
+    }
+
+    fn load_batch(
+        &self,
+        meta: &BlobCompressionContextInfo,
+        blob_index: u32,
+        batch_index: u32,
+        c_offset: u64,
+    ) -> Result<Rc<AlignedBuf>> {
+        if let Some((b, i, data)) = self.batch.borrow().as_ref() {
+            if *b == blob_index && *i == batch_index {
+                return Ok(data.clone());
+            }
+        }
+
+        let ctx = meta.get_batch_context(batch_index)?;
+        let c_size = ctx.compressed_size() as usize;
+        let d_size = ctx.uncompressed_batch_size() as usize;
+        if d_size as u64 > RAFS_MAX_CHUNK_SIZE {
+            bail!(
+                "invalid batch {} of blob index {}: uncompressed size {:#x}",
+                batch_index,
+                blob_index,
+                d_size
+            );
+        }
+        let buf = self.read_blob(blob_index, c_offset, c_size)?;
+        // All data of an encrypted blob is encrypted.
+        let raw = self.decrypt(blob_index, &buf, self.ciphers.contains_key(&blob_index))?;
+        // Same as nydusd: a batch is stored as is if compression doesn't shrink it.
+        let data = self.decode(blob_index, &raw, d_size, raw.len() != d_size)?;
+
+        let data = Rc::new(data);
+        *self.batch.borrow_mut() = Some((blob_index, batch_index, data.clone()));
+        Ok(data)
+    }
+}
+
+struct ChunkReader {
+    sources: Rc<BlobSources>,
+
+    chunks: IntoIter<Arc<dyn BlobChunkInfo>>,
+    chunk: Cursor<AlignedBuf>,
+
+    /// File size recorded in the tar header, which the file data must match exactly.
+    size: u64,
+    read: u64,
+}
+
+impl ChunkReader {
+    fn new(sources: Rc<BlobSources>, chunks: Vec<Arc<dyn BlobChunkInfo>>, size: u64) -> Self {
+        Self {
+            sources,
+            chunks: chunks.into_iter(),
+            chunk: Cursor::new(AlignedBuf::default()),
+            size,
+            read: 0,
+        }
     }
 
     fn is_chunk_empty(&self) -> bool {
@@ -771,12 +944,15 @@ impl Read for ChunkReader {
             if self.is_chunk_empty() {
                 match self.chunks.next() {
                     None => break,
-                    Some(chunk) => self.load_chunk(chunk.as_ref()).map_err(|err| {
-                        Error::new(
-                            ErrorKind::InvalidData,
-                            format!("fail to load chunk, error: {}", err),
-                        )
-                    })?,
+                    Some(chunk) => {
+                        let data = self.sources.load_chunk(chunk.as_ref()).map_err(|err| {
+                            Error::new(
+                                ErrorKind::InvalidData,
+                                format!("fail to load chunk, error: {}", err),
+                            )
+                        })?;
+                        self.chunk = Cursor::new(data);
+                    }
                 }
             }
 
@@ -784,6 +960,19 @@ impl Read for ChunkReader {
             if size == buf.len() {
                 break;
             }
+        }
+
+        // A size mismatch would silently corrupt the tar stream, since the entry header already
+        // records the file size.
+        self.read += size as u64;
+        if self.read > self.size || (size < buf.len() && self.read != self.size) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "file data size mismatch: expect {} bytes, got {}",
+                    self.size, self.read
+                ),
+            ));
         }
 
         Ok(size)
