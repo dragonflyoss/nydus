@@ -5,9 +5,7 @@
  */
 
 // Package metrics holds the snapshotter's Prometheus collectors and serves
-// them with the health endpoints, refer to
-// https://prometheus.io/docs/practices/naming/ and
-// https://kubernetes.io/docs/reference/using-api/health-checks/.
+// them, refer to https://prometheus.io/docs/practices/naming/.
 package metrics
 
 import (

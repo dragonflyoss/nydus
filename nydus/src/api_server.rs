@@ -191,8 +191,8 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
-    /// Starts an endpoint without control upgrades, `backend` answering
-    /// [`BACKEND_AUTH_BASIC_PATH`] and [`BACKEND_AUTH_BEARER_PATH`] when given.
+    /// Starts an endpoint without control upgrades, `backend` answering the
+    /// `/api/v1/backend/auth` routes when given.
     /// FUSE uses its ownership-aware
     /// listener instead of this pathname takeover policy.
     pub fn start(

@@ -1264,8 +1264,7 @@ Fields under `backend.config`:
 	of a docker config.json. It answers a registry challenge: sent as `Basic`
 	to the registry, or to its token service to fetch a bearer token, which
 	the daemon renews on its own. Omit for anonymous / token-only registries.
-	A value that is not base64 of `username:password` is refused at start, as
-	the `PUT` that replaces it refuses one.
+	A value that is not base64 of `username:password` is refused at start.
 - `registry_token` (optional): bearer token issued for the registry, as the
 	`registrytoken` of a docker config.json, sent as `Bearer` before any
 	challenge. The daemon cannot renew it: once the registry answers `401` it
@@ -1406,8 +1405,10 @@ Fields under `backend.config`:
 
 When `nydus fuse`, `nydus fileio`, or `nydus ublk` is started with
 `--apiserver unix:///path/to/api.sock`, a small HTTP server is bound to that
-Unix socket and serves the Prometheus text exposition at `GET /metrics` and
-the recorded chunk access order at `GET /trace`. For `nydus fuse` the same
+Unix socket and serves the Prometheus text exposition at `GET /metrics`, the
+recorded chunk access order at `GET /trace`, the daemon's description at
+`GET /api/v1/daemon` and the credential routes under `/api/v1/backend/auth`,
+all described below. For `nydus fuse` the same
 listener also serves the [control upgrade](upgrade.md#optional-unified-api-endpoint)
 at `GET /fuse/handoff` and the socket is `0600`, so monitoring may need the
 daemon's user; metrics may briefly reconnect during hot upgrade. Any other path
@@ -1462,11 +1463,12 @@ restart:
 
 | Route | Body | Replaces |
 | --- | --- | --- |
-| `PUT /api/v1/backend/auth/basic` | `{"username": "<username>", "password": "<password>"}` | The basic credentials, which the config's `auth` carries as base64. Bearer tokens fetched with the old ones are dropped; a `registry_token` is kept |
+| `PUT /api/v1/backend/auth/basic` | `{"username": "<username>", "password": "<password>"}` | The basic credentials, which the config's `auth` carries as base64. Bearer tokens fetched with the old ones are dropped; a `registry_token` is kept, and the same credentials change nothing |
 | `PUT /api/v1/backend/auth/bearer` | `{"token": "<bearer token>"}` | The bearer token, the config's `registry_token`: the requests that follow are sent with it. The basic credentials are kept |
 
 Either answers `204`, or a `{"message": "..."}` body with `400` for a
-malformed body, a `username` holding a colon or an empty `token`, `403` when the peer's UID differs from the
+malformed body, a `username` holding a colon or a `token` that is empty or
+that a header cannot carry, `403` when the peer's UID differs from the
 daemon's, `404` without a registry backend, `405` with `Allow: PUT` for any
 other method, `408` when the body takes over 5 seconds, `413` for a body over
 64 KiB, and `500` when the backend fails otherwise. The credential is never

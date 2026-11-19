@@ -33,7 +33,7 @@ IMAGE_FLAGS="--platform linux/amd64,linux/arm64 --push"`.
    restarts the service when its binary, units or `config.yaml` changed, and
    keeps `/run/nydus-snapshotter/kubernetes/{token,ca.crt,kubeconfig}` in
    sync for `auth.kube_secret`. `deploy/nydus-snapshotter/` holds the default
-   `config.yaml` and `nydusd.template.yaml`.
+   `config.yaml`.
 2. Merge `deploy/containerd/config-v1.6.toml` into a
    `/etc/containerd/config.toml` of `version = 2`, or `config-v2.toml` into one
    of `version = 3`, and restart containerd. The file's version decides, not
@@ -45,9 +45,8 @@ IMAGE_FLAGS="--platform linux/amd64,linux/arm64 --push"`.
 
 The installer copies ConfigMap changes to the host every sync interval
 without restarting the snapshotter, which reloads `cgroup` and
-`nydusd.dragonfly` itself; other keys apply when the installer Pods restart.
-An invalid `config.yaml`, nydusd template or `hosts.toml` is never copied to
-the host. Removing the DaemonSet leaves the snapshotter running; uninstalling is manual:
+`nydusd.config` itself; other keys apply when the installer Pods restart. An
+invalid `config.yaml` or `hosts.toml` is never copied to the host. Removing the DaemonSet leaves the snapshotter running; uninstalling is manual:
 `systemctl disable --now nydus-snapshotter.socket nydus-snapshotter.service`,
 then `systemctl stop system-nydusd.slice` once no container runs on a nydus
 image, which also stops the daemons left, and removing the paths listed in the

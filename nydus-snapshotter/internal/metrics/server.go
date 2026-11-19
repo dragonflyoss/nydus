@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"time"
@@ -28,7 +27,7 @@ const (
 	shutdownTimeout = 10 * time.Second
 )
 
-// Server serves /metrics, /livez and /readyz.
+// Server serves /metrics.
 type Server struct {
 	// server is the HTTP server.
 	server *http.Server
@@ -38,10 +37,8 @@ type Server struct {
 }
 
 // NewServer returns a server listening on addr. /metrics serves the
-// snapshotter's own metrics and those the daemons gatherer returns, /readyz
-// answers with ready, and /livez only proves the process serves HTTP, so it
-// never depends on the API server.
-func NewServer(addr string, ready func() error, daemons prometheus.Gatherer) (*Server, error) {
+// snapshotter's own metrics and those the daemons gatherer returns.
+func NewServer(addr string, daemons prometheus.Gatherer) (*Server, error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen metrics %s: %w", addr, err)
@@ -54,19 +51,6 @@ func NewServer(addr string, ready func() error, daemons prometheus.Gatherer) (*S
 		ErrorLog:      log.L,
 		ErrorHandling: promhttp.ContinueOnError,
 	}))
-	// A failed write means the client went away; nothing is left to do.
-	ok := func(w http.ResponseWriter) { _, _ = io.WriteString(w, "ok\n") }
-	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
-		ok(w)
-	})
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if err := ready(); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-
-		ok(w)
-	})
 
 	return &Server{
 		server: &http.Server{

@@ -26,15 +26,48 @@ import (
 
 func TestRenderOptions_render(t *testing.T) {
 	tests := []struct {
-		name     string
-		template string
-		opts     *renderOptions
-		expect   func(t *testing.T, rendered map[string]any, err error)
+		name   string
+		opts   *renderOptions
+		expect func(t *testing.T, rendered map[string]any, err error)
 	}{
 		{
-			name:     "fill registry, tls, dragonfly and prefetch",
-			template: mockTemplate,
+			name: "render every section",
 			opts: &renderOptions{
+				nydusd: config.NydusdDaemonConfig{
+					RuntimeDir: "/run/nydus",
+					Backend: config.NydusdBackendConfig{
+						Config: config.NydusdRegistryConfig{
+							HTTP: config.NydusdHTTPConfig{
+								RequestTimeout:     config.Duration(2 * time.Minute),
+								RequestReadTimeout: config.Duration(10 * time.Second),
+								MaxRetries:         5,
+								Proxy:              config.NydusdProxyConfig{Addr: "http://127.0.0.1:65001"},
+							},
+							Dragonfly: config.NydusdDragonflyConfig{
+								SchedulerEndpoint:  "http://scheduler:8002",
+								RequestTimeout:     config.Duration(time.Minute),
+								RequestReadTimeout: config.Duration(5 * time.Second),
+								MaxRetries:         1,
+							},
+							Fallback: config.NydusdFallbackConfig{
+								RequestTimeout:     config.Duration(45 * time.Second),
+								RequestReadTimeout: config.Duration(4 * time.Second),
+								RateLimit:          2,
+							},
+						},
+					},
+					Storage: config.NydusdStorageConfig{
+						Dir:                 "/ignored",
+						SkipVerifyChecksums: true,
+						FetchSize:           4 << 20,
+					},
+					Prefetch: config.NydusdPrefetchConfig{
+						ConcurrentBlobCount: 4,
+						RequestTimeout:      config.Duration(2 * time.Hour),
+						RetryInterval:       config.Duration(3 * time.Hour),
+						Scope:               "auto",
+					},
+				},
 				cacheDir:      "/var/lib/nydus-snapshotter/cache",
 				addr:          "https://registry.example.com",
 				repository:    "team/app",
@@ -42,22 +75,12 @@ func TestRenderOptions_render(t *testing.T) {
 				skipVerify:    true,
 				caCert:        "/etc/nydus-snapshotter/certs.d/registry.example.com/ca.crt",
 				prefetchScope: "none",
-				dragonfly: config.NydusdDragonflyConfig{
-					SchedulerEndpoint: "http://scheduler:8002",
-					RequestTimeout:    config.Duration(5 * time.Second),
-					MaxRetries:        1,
-					FallbackRateLimit: 1,
-				},
 			},
 			expect: func(t *testing.T, rendered map[string]any, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Equal(map[string]any{
-					"storage": map[string]any{"dir": "/var/lib/nydus-snapshotter/cache"},
-					"prefetch": map[string]any{
-						"concurrent_blob_count": 4,
-						"scope":                 "none",
-					},
+					"runtime_dir": "/run/nydus",
 					"backend": map[string]any{
 						"type": "registry",
 						"config": map[string]any{
@@ -65,44 +88,69 @@ func TestRenderOptions_render(t *testing.T) {
 							"repository": "team/app",
 							"auth":       mockCredential,
 							"http": map[string]any{
-								"request_timeout": "5s",
+								"request_timeout":      "2m0s",
+								"request_read_timeout": "10s",
+								"max_retries":          5,
+								"proxy":                map[string]any{"addr": "http://127.0.0.1:65001"},
 								"tls": map[string]any{
 									"skip_verify": true,
 									"ca_cert":     "/etc/nydus-snapshotter/certs.d/registry.example.com/ca.crt",
 								},
 							},
 							"dragonfly": map[string]any{
-								"scheduler_endpoint":  "http://scheduler:8002",
-								"request_timeout":     "5s",
-								"max_retries":         1,
-								"fallback_rate_limit": 1,
+								"scheduler_endpoint":   "http://scheduler:8002",
+								"request_timeout":      "1m0s",
+								"request_read_timeout": "5s",
+								"max_retries":          1,
+							},
+							"fallback": map[string]any{
+								"request_timeout":      "45s",
+								"request_read_timeout": "4s",
+								"max_retries":          0,
+								"rate_limit":           2,
 							},
 						},
+					},
+					"storage": map[string]any{
+						"dir":                   "/var/lib/nydus-snapshotter/cache",
+						"skip_verify_checksums": true,
+						"fetch_size":            4 << 20,
+					},
+					"prefetch": map[string]any{
+						"concurrent_blob_count": 4,
+						"request_timeout":       "2h0m0s",
+						"retry_interval":        "3h0m0s",
+						"scope":                 "none",
 					},
 				}, rendered)
 			},
 		},
 		{
-			name:     "anonymous access drops a template credential",
-			template: "backend:\n  config:\n    auth: c2VjcmV0\n",
-			opts:     &renderOptions{addr: "https://registry.example.com", repository: "team/app", prefetchScope: "auto"},
+			name: "leave out a credential, proxy, tls and dragonfly that are not set",
+			opts: &renderOptions{nydusd: config.New().Nydusd.Config, addr: "https://registry.example.com", repository: "team/app", prefetchScope: "auto"},
 			expect: func(t *testing.T, rendered map[string]any, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				registry := rendered["backend"].(map[string]any)["config"].(map[string]any)
 				assert.NotContains(registry, "auth")
 				assert.NotContains(registry, "dragonfly")
-				assert.NotContains(registry, "http")
+				assert.NotContains(registry["http"], "proxy")
+				assert.NotContains(registry["http"], "tls")
 			},
 		},
 		{
-			name:     "render zero dragonfly retries",
-			template: mockTemplate,
+			name: "render zero dragonfly retries",
 			opts: &renderOptions{
-				dragonfly: config.NydusdDragonflyConfig{
-					SchedulerEndpoint: "http://scheduler:8002",
-					RequestTimeout:    config.Duration(5 * time.Second),
-					FallbackRateLimit: 1,
+				nydusd: config.NydusdDaemonConfig{
+					Backend: config.NydusdBackendConfig{
+						Config: config.NydusdRegistryConfig{
+							Dragonfly: config.NydusdDragonflyConfig{
+								SchedulerEndpoint:  "http://scheduler:8002",
+								RequestTimeout:     config.Duration(time.Minute),
+								RequestReadTimeout: config.Duration(5 * time.Second),
+							},
+						},
+					},
 				},
 			},
 			expect: func(t *testing.T, rendered map[string]any, err error) {
@@ -112,155 +160,16 @@ func TestRenderOptions_render(t *testing.T) {
 				assert.Equal(0, dragonfly["max_retries"])
 			},
 		},
-		{
-			name:     "template section is not a mapping",
-			template: "backend: registry\n",
-			opts:     &renderOptions{},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "backend is string, want a mapping")
-			},
-		},
-		{
-			name:     "fill sections the template leaves empty",
-			template: "storage:\nprefetch:\nbackend:\n",
-			opts:     &renderOptions{cacheDir: "/cache", addr: "https://registry.example.com", repository: "team/app", prefetchScope: "all"},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal("/cache", rendered["storage"].(map[string]any)["dir"])
-				assert.Equal("all", rendered["prefetch"].(map[string]any)["scope"])
-				assert.Equal("team/app", rendered["backend"].(map[string]any)["config"].(map[string]any)["repository"])
-			},
-		},
-		{
-			name:     "template that is no yaml",
-			template: "backend: [\n",
-			opts:     &renderOptions{},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "decode nydusd template")
-			},
-		},
-		{
-			name:     "storage is not a mapping",
-			template: "storage: /cache\n",
-			opts:     &renderOptions{},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "storage is string, want a mapping")
-			},
-		},
-		{
-			name:     "prefetch is not a mapping",
-			template: "prefetch: true\n",
-			opts:     &renderOptions{},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "prefetch is bool, want a mapping")
-			},
-		},
-		{
-			name:     "backend config is not a mapping",
-			template: "backend:\n  config: [registry]\n",
-			opts:     &renderOptions{},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "config is []interface {}, want a mapping")
-			},
-		},
-		{
-			name:     "http is not a mapping",
-			template: "backend:\n  config:\n    http: 5s\n",
-			opts:     &renderOptions{skipVerify: true},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "http is string, want a mapping")
-			},
-		},
-		{
-			name:     "tls is not a mapping",
-			template: "backend:\n  config:\n    http:\n      tls: 1\n",
-			opts:     &renderOptions{caCert: "/etc/ca.crt"},
-			expect: func(t *testing.T, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "tls is int, want a mapping")
-			},
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			data, err := tc.opts.render([]byte(tc.template))
+			data, err := tc.opts.render()
 			rendered := map[string]any{}
 			if err == nil {
 				assert.NoError(t, yaml.Unmarshal(data, &rendered))
 			}
 			tc.expect(t, rendered, err)
-		})
-	}
-}
-
-func TestDocument_child(t *testing.T) {
-	tests := []struct {
-		name   string
-		doc    document
-		expect func(t *testing.T, doc, child document, err error)
-	}{
-		{
-			name: "create an absent mapping",
-			doc:  document{},
-			expect: func(t *testing.T, doc, child document, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				child["key"] = true
-				assert.Equal(document{"a": document{"key": true}}, doc)
-			},
-		},
-		{
-			name: "create a mapping left empty",
-			doc:  document{"a": nil},
-			expect: func(t *testing.T, doc, child document, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				child["key"] = true
-				assert.Equal(document{"a": document{"key": true}}, doc)
-			},
-		},
-		{
-			name: "keep a document",
-			doc:  document{"a": document{"kept": true}},
-			expect: func(t *testing.T, doc, child document, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal(document{"kept": true}, child)
-			},
-		},
-		{
-			name: "keep a plain mapping",
-			doc:  document{"a": map[string]any{"kept": true}},
-			expect: func(t *testing.T, doc, child document, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				child["key"] = true
-				assert.Equal(document{"a": document{"kept": true, "key": true}}, doc)
-			},
-		},
-		{
-			name: "value that is no mapping",
-			doc:  document{"a": "value"},
-			expect: func(t *testing.T, doc, child document, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "nydusd template: a is string, want a mapping")
-				assert.Nil(child)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			child, err := tc.doc.child("a")
-			tc.expect(t, tc.doc, child, err)
 		})
 	}
 }
@@ -301,18 +210,6 @@ func TestFileSystem_renderConfig(t *testing.T) {
 			},
 		},
 		{
-			name: "template that cannot be read",
-			mock: func(m *authmocks.MockKeychainMockRecorder) {},
-			prepare: func(t *testing.T, cfg *config.Config, hostDir string, d *Daemon) {
-				assert.NoError(t, os.Remove(cfg.Nydusd.Template))
-			},
-			expect: func(t *testing.T, d *Daemon, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "read nydusd template")
-				assert.NoFileExists(d.ConfigPath)
-			},
-		},
-		{
 			name: "registry host config that is invalid",
 			mock: func(m *authmocks.MockKeychainMockRecorder) {},
 			prepare: func(t *testing.T, cfg *config.Config, hostDir string, d *Daemon) {
@@ -345,17 +242,6 @@ func TestFileSystem_renderConfig(t *testing.T) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "read ca ")
 				assert.ErrorIs(err, os.ErrNotExist)
-				assert.NoFileExists(d.ConfigPath)
-			},
-		},
-		{
-			name: "template section that is no mapping",
-			prepare: func(t *testing.T, cfg *config.Config, hostDir string, d *Daemon) {
-				assert.NoError(t, os.WriteFile(cfg.Nydusd.Template, []byte("backend: registry\n"), 0o644))
-			},
-			expect: func(t *testing.T, d *Daemon, rendered map[string]any, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "backend is string, want a mapping")
 				assert.NoFileExists(d.ConfigPath)
 			},
 		},

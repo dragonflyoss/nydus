@@ -13,11 +13,10 @@ import (
 	context "context"
 	reflect "reflect"
 
-	io_prometheus_client "github.com/prometheus/client_model/go"
-	gomock "go.uber.org/mock/gomock"
-
 	config "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	fs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
+	io_prometheus_client "github.com/prometheus/client_model/go"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockFileSystem is a mock of FileSystem interface.

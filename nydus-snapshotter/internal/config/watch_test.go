@@ -42,7 +42,7 @@ func TestWatcher_Run(t *testing.T) {
 		},
 		{
 			name:   "ignore a rewrite of the running config",
-			update: "version: 1\n\n",
+			update: "log:\n  level: info\n",
 			expect: func(t *testing.T, reloaded []*Config) {
 				assert := assert.New(t)
 				assert.Empty(reloaded)

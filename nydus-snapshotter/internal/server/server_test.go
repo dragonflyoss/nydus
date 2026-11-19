@@ -7,6 +7,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -20,6 +21,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	authmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth/mocks"
@@ -46,36 +49,43 @@ func TestNew(t *testing.T) {
 
 				served := make(chan error, 1)
 				go func() { served <- s.Serve() }()
-				conn, err := grpc.NewClient("unix://"+cfg.Address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+				conn, err := grpc.NewClient("unix://"+cfg.GRPC.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 				assert.NoError(err)
 				defer conn.Close()
 
-				_, err = snapshotsapi.NewSnapshotsClient(conn).Stat(t.Context(), &snapshotsapi.StatSnapshotRequest{Key: "missing"}, grpc.WaitForReady(true))
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				_, err = snapshotsapi.NewSnapshotsClient(conn).Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key: "missing"}, grpc.WaitForReady(true))
 				assert.Equal(codes.NotFound, status.Code(err))
-				assert.NoError(s.ready())
+				assert.Eventually(func() bool {
+					resp, err := grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+					return err == nil && resp.GetStatus() == grpc_health_v1.HealthCheckResponse_SERVING
+				}, 10*time.Second, 10*time.Millisecond)
 
 				s.Stop()
 				assert.NoError(<-served)
-				assert.ErrorContains(s.ready(), "grpc is not serving")
-				_, err = os.Stat(cfg.Address)
+				resp, err := s.health.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+				assert.NoError(err)
+				assert.Equal(grpc_health_v1.HealthCheckResponse_NOT_SERVING, resp.GetStatus())
+				_, err = os.Stat(cfg.GRPC.Addr)
 				assert.ErrorIs(err, os.ErrNotExist)
 			},
 		},
 		{
 			name: "root that cannot be created",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.WriteFile(cfg.Root, nil, 0o644))
+				assert.NoError(t, os.WriteFile(cfg.RootDir, nil, 0o644))
 			},
 			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "create "+cfg.Root)
+				assert.ErrorContains(err, "create "+cfg.RootDir)
 				assert.Nil(s)
 			},
 		},
 		{
 			name: "store that cannot be opened",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.MkdirAll(filepath.Join(cfg.Root, "nydusd.db"), 0o755))
+				assert.NoError(t, os.MkdirAll(filepath.Join(cfg.RootDir, "nydusd.db"), 0o755))
 			},
 			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
 				assert := assert.New(t)
@@ -97,8 +107,8 @@ func TestNew(t *testing.T) {
 		{
 			name: "snapshotter that cannot be built",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.MkdirAll(cfg.Root, 0o700))
-				assert.NoError(t, os.WriteFile(filepath.Join(cfg.Root, "snapshots"), nil, 0o644))
+				assert.NoError(t, os.MkdirAll(cfg.RootDir, 0o700))
+				assert.NoError(t, os.WriteFile(filepath.Join(cfg.RootDir, "snapshots"), nil, 0o644))
 			},
 			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
 				assert := assert.New(t)
@@ -112,7 +122,7 @@ func TestNew(t *testing.T) {
 				listener, err := net.Listen("tcp", "127.0.0.1:0")
 				assert.NoError(t, err)
 				t.Cleanup(func() { assert.NoError(t, listener.Close()) })
-				cfg.Metrics.Address = listener.Addr().String()
+				cfg.Metrics.Addr = listener.Addr().String()
 			},
 			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
 				assert := assert.New(t)
@@ -123,8 +133,8 @@ func TestNew(t *testing.T) {
 		{
 			name: "socket that another process serves",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.MkdirAll(filepath.Dir(cfg.Address), 0o700))
-				listener, err := net.Listen("unix", cfg.Address)
+				assert.NoError(t, os.MkdirAll(filepath.Dir(cfg.GRPC.Addr), 0o700))
+				listener, err := net.Listen("unix", cfg.GRPC.Addr)
 				assert.NoError(t, err)
 				t.Cleanup(func() { assert.NoError(t, listener.Close()) })
 			},
@@ -132,7 +142,7 @@ func TestNew(t *testing.T) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "is served by another process")
 				assert.Nil(s)
-				reopened, err := store.New(filepath.Join(cfg.Root, "nydusd.db"), time.Second)
+				reopened, err := store.New(filepath.Join(cfg.RootDir, "nydusd.db"), time.Second)
 				assert.NoError(err)
 				assert.NoError(reopened.Close())
 			},
@@ -143,7 +153,7 @@ func TestNew(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testutil.NewConfig(t)
 			tc.prepare(t, cfg)
-			s, err := New(t.Context(), cfg, filepath.Join(cfg.Root, "config.yaml"))
+			s, err := New(t.Context(), cfg, filepath.Join(cfg.RootDir, "config.yaml"))
 			tc.expect(t, cfg, s, err)
 		})
 	}
@@ -223,51 +233,46 @@ func TestServer_listen(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.New()
-			cfg.Address = filepath.Join(t.TempDir(), "run", "s.sock")
-			tc.prepare(t, cfg.Address)
+			cfg.GRPC.Addr = filepath.Join(t.TempDir(), "run", "s.sock")
+			tc.prepare(t, cfg.GRPC.Addr)
 
 			s := &Server{cfg: cfg}
 			listener, err := s.listen(t.Context())
-			tc.expect(t, cfg.Address, listener, err)
+			tc.expect(t, cfg.GRPC.Addr, listener, err)
 		})
 	}
 }
 
-func TestServer_ready(t *testing.T) {
+func TestServer_reportServing(t *testing.T) {
 	tests := []struct {
-		name    string
-		serving bool
-		mock    func(m *authmocks.MockKeychainMockRecorder)
-		expect  func(t *testing.T, err error)
+		name   string
+		mock   func(m *authmocks.MockKeychainMockRecorder, cancel context.CancelFunc)
+		expect func(t *testing.T, status grpc_health_v1.HealthCheckResponse_ServingStatus)
 	}{
 		{
-			name:    "ready",
-			serving: true,
-			mock: func(m *authmocks.MockKeychainMockRecorder) {
-				m.Synced().Return(true).Times(1)
+			name: "serving once the credentials are synced",
+			mock: func(m *authmocks.MockKeychainMockRecorder, cancel context.CancelFunc) {
+				gomock.InOrder(
+					m.Synced().Return(false).Times(1),
+					m.Synced().Return(true).Times(1),
+				)
 			},
-			expect: func(t *testing.T, err error) {
+			expect: func(t *testing.T, status grpc_health_v1.HealthCheckResponse_ServingStatus) {
 				assert := assert.New(t)
-				assert.NoError(err)
+				assert.Equal(grpc_health_v1.HealthCheckResponse_SERVING, status)
 			},
 		},
 		{
-			name: "grpc not serving",
-			mock: func(m *authmocks.MockKeychainMockRecorder) {},
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "grpc is not serving")
+			name: "not serving when stopped before the credentials are synced",
+			mock: func(m *authmocks.MockKeychainMockRecorder, cancel context.CancelFunc) {
+				m.Synced().DoAndReturn(func() bool {
+					cancel()
+					return false
+				}).Times(1)
 			},
-		},
-		{
-			name:    "credentials not synced",
-			serving: true,
-			mock: func(m *authmocks.MockKeychainMockRecorder) {
-				m.Synced().Return(false).Times(1)
-			},
-			expect: func(t *testing.T, err error) {
+			expect: func(t *testing.T, status grpc_health_v1.HealthCheckResponse_ServingStatus) {
 				assert := assert.New(t)
-				assert.EqualError(err, "registry credentials are not synced")
+				assert.Equal(grpc_health_v1.HealthCheckResponse_NOT_SERVING, status)
 			},
 		},
 	}
@@ -277,11 +282,16 @@ func TestServer_ready(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
 			keychain := authmocks.NewMockKeychain(ctl)
-			tc.mock(keychain.EXPECT())
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			tc.mock(keychain.EXPECT(), cancel)
 
-			s := &Server{keychain: keychain}
-			s.serving.Store(tc.serving)
-			tc.expect(t, s.ready())
+			s := &Server{keychain: keychain, health: health.NewServer()}
+			s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+			s.reportServing(ctx)
+			resp, err := s.health.Check(t.Context(), &grpc_health_v1.HealthCheckRequest{})
+			assert.NoError(t, err)
+			tc.expect(t, resp.GetStatus())
 		})
 	}
 }

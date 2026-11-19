@@ -9,6 +9,7 @@ package systemd
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -707,12 +708,14 @@ func (u *socketActivated) starts(t *testing.T) int {
 
 func newSocketActivated(t *testing.T) *socketActivated {
 	t.Helper()
-	name := "nydus-test-activated-" + strconv.Itoa(os.Getpid())
+	sleep, err := exec.LookPath("sleep")
+	assert.NoError(t, err)
+	name := "nydus-test-activated-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30))
 	units := &socketActivated{socket: name + ".socket", service: name + ".service", startsFile: "/run/" + name + ".starts"}
 	files := map[string]string{
 		units.socket: "[Socket]\nListenStream=/run/" + name + ".sock\nRemoveOnStop=yes\n",
 		units.service: "[Unit]\nRequires=" + units.socket + "\nAfter=" + units.socket + "\n\n[Service]\nType=exec\n" +
-			"ExecStartPre=/bin/sh -c 'echo >> " + units.startsFile + "; sleep 0.5'\nExecStart=/bin/sleep 300\n",
+			"ExecStartPre=/bin/sh -c 'echo >> " + units.startsFile + "; sleep 0.5'\nExecStart=" + sleep + " 300\n",
 	}
 
 	reload := func() { assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run()) }
@@ -743,7 +746,7 @@ func newTestUnit(t *testing.T) *Unit {
 	assert.NoError(t, err)
 
 	unit := &Unit{
-		Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + ".service",
+		Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
 		Description: "nydus-snapshotter unit test",
 		Slice:       "nydustest" + strconv.Itoa(os.Getpid()) + "units.slice",
 		ExecStart:   []string{sleep, "300"},

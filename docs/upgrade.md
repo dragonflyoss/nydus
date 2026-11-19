@@ -158,7 +158,7 @@ before adoption.
 ## Optional unified API endpoint
 
 With `--apiserver`, FUSE publishes one `0600` Unix socket for `/metrics`, `/trace`,
-`/api/v1/backend/auth/basic`, `/api/v1/backend/auth/bearer`, and control. No API listener is created without the
+`/api/v1/daemon`, `/api/v1/backend/auth/basic`, `/api/v1/backend/auth/bearer`, and control. No API listener is created without the
 option. Control starts with:
 
 ```http

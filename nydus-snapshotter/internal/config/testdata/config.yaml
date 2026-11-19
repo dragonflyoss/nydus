@@ -1,10 +1,11 @@
-version: 1
-root: /var/lib/nydus-snapshotter
-address: /run/nydus-snapshotter/nydus-snapshotter.sock
+root_dir: /var/lib/nydus-snapshotter
+runtime_dir: /run/nydus-snapshotter
+grpc:
+  addr: /run/nydus-snapshotter/nydus-snapshotter.sock
 log:
   level: debug
 metrics:
-  address: 127.0.0.1:4010
+  addr: 127.0.0.1:4010
 registry:
   config_path: /etc/nydus-snapshotter/certs.d
 auth:
@@ -17,18 +18,40 @@ auth:
 nydusd:
   driver: fuse
   binary: /opt/nydus-snapshotter/bin/current/nydus
-  template: /etc/nydus-snapshotter/nydusd.template.yaml
   log_dir: /var/log/nydus-snapshotter/nydusd
   log_level: debug
   log_max_files: 3
   mount_timeout: 20s
   watchdog_timeout: 1m
-  prefetch_scope: ondemand
-  dragonfly:
-    scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
-    request_timeout: 5s
-    max_retries: 1
-    fallback_rate_limit: 1
+  config:
+    runtime_dir: /run/nydus-other
+    backend:
+      config:
+        http:
+          request_timeout: 2m
+          request_read_timeout: 10s
+          max_retries: 5
+          proxy:
+            addr: http://127.0.0.1:65001
+        dragonfly:
+          scheduler_endpoint: http://dragonfly-scheduler.dragonfly-system.svc:8002
+          request_timeout: 30s
+          request_read_timeout: 5s
+          max_retries: 1
+        fallback:
+          request_timeout: 45s
+          request_read_timeout: 4s
+          max_retries: 2
+          rate_limit: 2
+    storage:
+      dir: /data/nydus-cache
+      skip_verify_checksums: true
+      fetch_size: 4194304
+    prefetch:
+      concurrent_blob_count: 4
+      request_timeout: 2h
+      retry_interval: 3h
+      scope: ondemand
 cgroup:
   slice: system-nydusd.slice
   memory_max: 8GiB

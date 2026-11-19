@@ -27,11 +27,15 @@ var (
 
 	mockHostsTOML = "server = \"https://registry.example.com\"\n"
 
+	mockMirrorHostsTOML = "server = \"https://mirror.example.com\"\n"
+
 	mockToken = "token"
 
 	mockCA = "ca"
 
-	mockKubeSecretConfig = "version: 1\nauth:\n  kube_secret:\n    enable: true\n"
+	mockKubeSecretConfig = "auth:\n  kube_secret:\n    enable: true\n"
+
+	mockInvalidConfig = "log:\n  level: loud\n"
 
 	mockServiceRestart = serviceUnit + "\n"
 )
@@ -119,13 +123,13 @@ func TestInstaller_Run(t *testing.T) {
 					m.RestartUnit(gomock.Any(), socketUnit).Return(nil).Times(1),
 					m.StartUnit(gomock.Any(), serviceUnit).Do(func(context.Context, string) {
 						writeFiles(t, cfg.TokenDir, map[string]string{"token": "rotated"})
-						writeFiles(t, cfg.PayloadDir, map[string]string{"config/nydusd.template.yaml": "backend: {}\n"})
+						writeFiles(t, cfg.PayloadDir, map[string]string{"config/certs.d/registry.example.com/hosts.toml": mockMirrorHostsTOML})
 						go func() {
 							defer cancel()
 							assert.Eventually(t, func() bool {
 								token, tokenErr := os.ReadFile(hostPath(t, cfg, "/run/nydus-snapshotter/kubernetes/token"))
-								template, templateErr := os.ReadFile(hostPath(t, cfg, config.DefaultNydusdTemplate))
-								return tokenErr == nil && templateErr == nil && string(token) == "rotated" && string(template) == "backend: {}\n"
+								hosts, hostsErr := os.ReadFile(hostPath(t, cfg, config.DefaultRegistryConfigPath+"/registry.example.com/hosts.toml"))
+								return tokenErr == nil && hostsErr == nil && string(token) == "rotated" && string(hosts) == mockMirrorHostsTOML
 							}, 5*time.Second, 10*time.Millisecond)
 						}()
 					}).Return(nil).Times(1),
@@ -135,7 +139,7 @@ func TestInstaller_Run(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assertFile(t, hostPath(t, cfg, "/run/nydus-snapshotter/kubernetes/token"), "rotated", 0o600)
-				assertFile(t, hostPath(t, cfg, config.DefaultNydusdTemplate), "backend: {}\n", 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultRegistryConfigPath+"/registry.example.com/hosts.toml"), mockMirrorHostsTOML, 0o644)
 				assert.NoFileExists(hostPath(t, cfg, restartPending))
 			},
 		},
@@ -174,7 +178,7 @@ func TestInstaller_Run(t *testing.T) {
 					m.EnableUnitFiles(gomock.Any(), []string{socketUnit, serviceUnit}).Return(nil).Times(1),
 					m.RestartUnit(gomock.Any(), socketUnit).Return(nil).Times(1),
 					m.StartUnit(gomock.Any(), serviceUnit).Do(func(context.Context, string) {
-						writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "version: 2\n"})
+						writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": mockInvalidConfig})
 						assert.NoError(t, os.Remove(filepath.Join(cfg.TokenDir, "token")))
 						go func() {
 							defer cancel()
@@ -194,7 +198,7 @@ func TestInstaller_Run(t *testing.T) {
 		},
 		{
 			name:    "credentials that cannot be synced",
-			payload: map[string]string{"config/config.yaml": "version: 2\n"},
+			payload: map[string]string{"config/config.yaml": mockInvalidConfig},
 			mock: func(t *testing.T, cfg *Config, m *mocks.MockManagerMockRecorder, cancel context.CancelFunc) {
 				m.Ping(gomock.Any()).Return(nil).Times(1)
 			},
@@ -248,7 +252,6 @@ func TestInstaller_install(t *testing.T) {
 				assertFile(t, hostPath(t, cfg, snapshotterBinary), readFile(t, cfg.payload("bin/nydus-snapshotter")), 0o755)
 				assertFile(t, hostPath(t, cfg, "/opt/nydus-snapshotter/bin/"+mockVersion+"/nydus"), readFile(t, cfg.payload("bin/nydus")), 0o755)
 				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.yaml"), 0o644)
-				assertFile(t, hostPath(t, cfg, config.DefaultNydusdTemplate), readFile(t, "../../deploy/nydus-snapshotter/nydusd.template.yaml"), 0o644)
 				assertFile(t, hostPath(t, cfg, "/etc/systemd/system/"+socketUnit), readFile(t, "../../deploy/systemd/"+socketUnit), 0o644)
 				assertFile(t, hostPath(t, cfg, "/etc/systemd/system/"+serviceUnit), readFile(t, "../../deploy/systemd/"+serviceUnit), 0o644)
 				assertFile(t, hostPath(t, cfg, config.DefaultRegistryConfigPath+"/registry.example.com/hosts.toml"), mockHostsTOML, 0o644)
@@ -282,7 +285,7 @@ func TestInstaller_install(t *testing.T) {
 			name: "restart the service when the config changes",
 			prepare: func(t *testing.T, cfg *Config) {
 				install(t, cfg)
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "version: 1\nlog:\n  level: \"debug\"\n"})
+				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "log:\n  level: \"debug\"\n"})
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {
 				gomock.InOrder(
@@ -294,7 +297,7 @@ func TestInstaller_install(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assertFile(t, hostPath(t, cfg, config.DefaultPath), "version: 1\nlog:\n  level: \"debug\"\n", 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultPath), "log:\n  level: \"debug\"\n", 0o644)
 			},
 		},
 		{
@@ -395,25 +398,6 @@ func TestInstaller_install(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-			},
-		},
-		{
-			name: "keep the snapshotter running when the template changes",
-			prepare: func(t *testing.T, cfg *Config) {
-				install(t, cfg)
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/nydusd.template.yaml": "backend: {}\n"})
-			},
-			mock: func(m *mocks.MockManagerMockRecorder) {
-				gomock.InOrder(
-					m.EnableUnitFiles(gomock.Any(), []string{socketUnit, serviceUnit}).Return(nil).Times(1),
-					m.StartUnit(gomock.Any(), socketUnit).Return(nil).Times(1),
-					m.StartUnit(gomock.Any(), serviceUnit).Return(nil).Times(1),
-				)
-			},
-			expect: func(t *testing.T, cfg *Config, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assertFile(t, hostPath(t, cfg, config.DefaultNydusdTemplate), "backend: {}\n", 0o644)
 			},
 		},
 		{
@@ -534,26 +518,14 @@ func TestInstaller_install(t *testing.T) {
 		{
 			name: "invalid config",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "version: 2\n"})
+				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": mockInvalidConfig})
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "unsupported config version 2")
+				assert.ErrorContains(err, "invalid log.level")
 				assert.NoFileExists(hostPath(t, cfg, snapshotterBinary))
 				assert.NoFileExists(hostPath(t, cfg, restartPending))
-			},
-		},
-		{
-			name: "config naming a nydusd template the installer does not write",
-			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "nydusd:\n  template: /etc/other/nydusd.template.yaml\n"})
-			},
-			mock: func(m *mocks.MockManagerMockRecorder) {},
-			expect: func(t *testing.T, cfg *Config, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "nydusd.template must be "+config.DefaultNydusdTemplate)
-				assert.NoFileExists(hostPath(t, cfg, snapshotterBinary))
 			},
 		},
 		{
@@ -614,18 +586,6 @@ func TestInstaller_install(t *testing.T) {
 				assert := assert.New(t)
 				assert.ErrorIs(err, os.ErrNotExist)
 				assert.NoFileExists(hostPath(t, cfg, restartPending))
-			},
-		},
-		{
-			name: "invalid nydusd template",
-			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.PayloadDir, map[string]string{"config/nydusd.template.yaml": "backend: [\n"})
-			},
-			mock: func(m *mocks.MockManagerMockRecorder) {},
-			expect: func(t *testing.T, cfg *Config, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "payload nydusd template")
-				assert.NoFileExists(hostPath(t, cfg, snapshotterBinary))
 			},
 		},
 		{
@@ -712,18 +672,6 @@ func TestInstaller_install(t *testing.T) {
 			},
 		},
 		{
-			name: "missing nydusd template",
-			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.Remove(cfg.payload("config/nydusd.template.yaml")))
-			},
-			mock: func(m *mocks.MockManagerMockRecorder) {},
-			expect: func(t *testing.T, cfg *Config, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "read payload nydusd template")
-				assert.NoFileExists(hostPath(t, cfg, snapshotterBinary))
-			},
-		},
-		{
 			name: "payload without certs.d",
 			prepare: func(t *testing.T, cfg *Config) {
 				assert.NoError(t, os.RemoveAll(cfg.payload("config/certs.d")))
@@ -791,7 +739,6 @@ func newConfig(t *testing.T) *Config {
 		"systemd/" + socketUnit:                          readFile(t, "../../deploy/systemd/"+socketUnit),
 		"systemd/" + serviceUnit:                         readFile(t, "../../deploy/systemd/"+serviceUnit),
 		"config/config.yaml":                             readFile(t, "../../deploy/nydus-snapshotter/config.yaml"),
-		"config/nydusd.template.yaml":                    readFile(t, "../../deploy/nydus-snapshotter/nydusd.template.yaml"),
 		"config/certs.d/registry.example.com/hosts.toml": mockHostsTOML,
 	})
 	writeFiles(t, cfg.TokenDir, map[string]string{

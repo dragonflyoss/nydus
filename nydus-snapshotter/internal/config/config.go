@@ -11,10 +11,12 @@ package config
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,9 +31,6 @@ import (
 )
 
 const (
-	// Version is the config schema version this binary understands.
-	Version = 1
-
 	// maxSocketPath is the length limit of a unix socket path (sun_path).
 	maxSocketPath = 107
 
@@ -68,22 +67,21 @@ var sliceRegexp = regexp.MustCompile(`^[0-9A-Za-z:_\\-][0-9A-Za-z:_.\\-]*\.slice
 
 // Config is the snapshotter config.
 type Config struct {
-	// Version is the schema version, refer to containerd's config version.
-	Version int `yaml:"version"`
+	// RootDir is the directory of persistent data: snapshots, the cache and
+	// instances.
+	RootDir string `yaml:"root_dir"`
 
-	// Root is the root directory of snapshots, the cache and instances.
-	Root string `yaml:"root"`
+	// RuntimeDir is the directory of transient data on tmpfs: daemon API
+	// sockets and rendered configs, named as nydus-config names its own.
+	RuntimeDir string `yaml:"runtime_dir"`
 
-	// Address is the gRPC socket path containerd connects to.
-	Address string `yaml:"address"`
-
-	// RunDir holds daemon API sockets and rendered configs on tmpfs.
-	RunDir string `yaml:"run_dir"`
+	// GRPC is the gRPC server config.
+	GRPC GRPCConfig `yaml:"grpc"`
 
 	// Log is the logging config.
 	Log LogConfig `yaml:"log"`
 
-	// Metrics is the metrics and health server config.
+	// Metrics is the metrics server config.
 	Metrics MetricsConfig `yaml:"metrics"`
 
 	// Registry is the registry host config.
@@ -102,6 +100,13 @@ type Config struct {
 	GC GCConfig `yaml:"gc"`
 }
 
+// GRPCConfig is the gRPC server config, a section of its own as in
+// containerd's and BuildKit's configs.
+type GRPCConfig struct {
+	// Addr is the unix socket path containerd connects to.
+	Addr string `yaml:"addr"`
+}
+
 // LogConfig is the logging config.
 type LogConfig struct {
 	// Level is the log level, one logrus parses: trace, debug, info, warn or
@@ -109,11 +114,10 @@ type LogConfig struct {
 	Level string `yaml:"level"`
 }
 
-// MetricsConfig is the metrics and health server config.
+// MetricsConfig is the metrics server config.
 type MetricsConfig struct {
-	// Address is the listen address of /metrics, /livez and /readyz, empty to
-	// disable.
-	Address string `yaml:"address"`
+	// Addr is the listen address of /metrics, empty to disable.
+	Addr string `yaml:"addr"`
 }
 
 // RegistryConfig is the registry host config.
@@ -159,9 +163,6 @@ type NydusdConfig struct {
 	// so an upgrade never changes a running unit.
 	Binary string `yaml:"binary"`
 
-	// Template is the nydus-config YAML shared by all daemons.
-	Template string `yaml:"template"`
-
 	// LogDir is the parent of per-daemon log dirs.
 	LogDir string `yaml:"log_dir"`
 
@@ -179,12 +180,102 @@ type NydusdConfig struct {
 	// sends before it takes the daemon for hung and kills it, 0 to disable.
 	WatchdogTimeout Duration `yaml:"watchdog_timeout"`
 
-	// PrefetchScope is the default prefetch scope, overridden per image by
-	// the nydus-prefetch label.
-	PrefetchScope string `yaml:"prefetch_scope"`
+	// Config is the config of each daemon.
+	Config NydusdDaemonConfig `yaml:"config"`
+}
+
+// NydusdDaemonConfig is what the daemons' configs share. It mirrors
+// nydus-config key for key; the rest of a daemon's config comes from its
+// image and certs.d.
+type NydusdDaemonConfig struct {
+	// RuntimeDir is the runtime directory the daemons share.
+	RuntimeDir string `yaml:"runtime_dir"`
+
+	// Backend mirrors nydus-config's backend section.
+	Backend NydusdBackendConfig `yaml:"backend"`
+
+	// Storage mirrors nydus-config's storage section.
+	Storage NydusdStorageConfig `yaml:"storage"`
+
+	// Prefetch mirrors nydus-config's prefetch section.
+	Prefetch NydusdPrefetchConfig `yaml:"prefetch"`
+}
+
+// NydusdStorageConfig mirrors nydus-config's storage section.
+type NydusdStorageConfig struct {
+	// Dir is the blob cache directory the daemons share, empty for
+	// <root_dir>/cache.
+	Dir string `yaml:"dir"`
+
+	// SkipVerifyChecksums skips the crc32c check of decoded chunk groups.
+	SkipVerifyChecksums bool `yaml:"skip_verify_checksums"`
+
+	// FetchSize is the compressed bytes one on-demand read covers, 0 for the
+	// missed chunk group alone.
+	FetchSize uint64 `yaml:"fetch_size"`
+}
+
+// NydusdPrefetchConfig mirrors nydus-config's prefetch section.
+type NydusdPrefetchConfig struct {
+	// ConcurrentBlobCount is the number of blobs prefetched at once.
+	ConcurrentBlobCount int `yaml:"concurrent_blob_count"`
+
+	// RequestTimeout is the timeout of prefetching one whole blob.
+	RequestTimeout Duration `yaml:"request_timeout"`
+
+	// RetryInterval is the wait before a failed prefetch read is sent once
+	// more, drawn between it and twice it.
+	RetryInterval Duration `yaml:"retry_interval"`
+
+	// Scope is the default prefetch scope, overridden per image by the
+	// nydus-prefetch label.
+	Scope string `yaml:"scope"`
+}
+
+// NydusdBackendConfig mirrors nydus-config's backend section, whose type is
+// always registry.
+type NydusdBackendConfig struct {
+	// Config is the registry backend config.
+	Config NydusdRegistryConfig `yaml:"config"`
+}
+
+// NydusdRegistryConfig mirrors the keys of nydus-config's backend.config
+// that all daemons share; addr, repository, auth and http.tls come from the
+// image and certs.d.
+type NydusdRegistryConfig struct {
+	// HTTP is merged into backend.config.http.
+	HTTP NydusdHTTPConfig `yaml:"http"`
 
 	// Dragonfly is copied into backend.config.dragonfly when set.
 	Dragonfly NydusdDragonflyConfig `yaml:"dragonfly"`
+
+	// Fallback is merged into backend.config.fallback.
+	Fallback NydusdFallbackConfig `yaml:"fallback"`
+}
+
+// NydusdHTTPConfig is the HTTP client config of a daemon's requests to the
+// origin registry, which mirrors nydus-config's backend.config.http.
+type NydusdHTTPConfig struct {
+	// RequestTimeout is the timeout of a request, its body included.
+	RequestTimeout Duration `yaml:"request_timeout"`
+
+	// RequestReadTimeout is the longest wait for the connection, the
+	// response and each part of its body.
+	RequestReadTimeout Duration `yaml:"request_read_timeout"`
+
+	// MaxRetries is the retry count of a request; 0 is rendered, so it never
+	// falls back to nydus's default.
+	MaxRetries int `yaml:"max_retries"`
+
+	// Proxy is the HTTP forward proxy of the requests.
+	Proxy NydusdProxyConfig `yaml:"proxy"`
+}
+
+// NydusdProxyConfig mirrors nydus-config's backend.config.http.proxy.
+type NydusdProxyConfig struct {
+	// Addr is the proxy address with its scheme, empty to connect to the
+	// origin.
+	Addr string `yaml:"addr"`
 }
 
 // NydusdDragonflyConfig is the Dragonfly config of a daemon, which mirrors
@@ -193,15 +284,36 @@ type NydusdDragonflyConfig struct {
 	// SchedulerEndpoint is the Dragonfly scheduler address, empty to disable.
 	SchedulerEndpoint string `yaml:"scheduler_endpoint"`
 
-	// RequestTimeout is the timeout of each request through seed peers.
+	// RequestTimeout is the timeout of each attempt of a request through
+	// seed peers, its body included.
 	RequestTimeout Duration `yaml:"request_timeout"`
+
+	// RequestReadTimeout is the longest an on-demand read waits for a seed
+	// peer before it goes to the origin.
+	RequestReadTimeout Duration `yaml:"request_read_timeout"`
 
 	// MaxRetries is the retry count of an on-demand read; 0 is rendered, so
 	// it never falls back to nydus's default.
 	MaxRetries int `yaml:"max_retries"`
+}
 
-	// FallbackRateLimit is the origin fallback rate in requests per second.
-	FallbackRateLimit int `yaml:"fallback_rate_limit"`
+// NydusdFallbackConfig is the origin fallback config of a daemon: the client
+// an on-demand read falls back to when Dragonfly or the proxy cannot serve
+// it. It mirrors nydus-config's backend.config.fallback.
+type NydusdFallbackConfig struct {
+	// RequestTimeout is the timeout of a request, its body included.
+	RequestTimeout Duration `yaml:"request_timeout"`
+
+	// RequestReadTimeout is the longest wait for the connection, the
+	// response and each part of its body.
+	RequestReadTimeout Duration `yaml:"request_read_timeout"`
+
+	// MaxRetries is the retry count of a request; 0 is rendered, so it never
+	// falls back to nydus's default.
+	MaxRetries int `yaml:"max_retries"`
+
+	// RateLimit is the rate of the origin requests in requests per second.
+	RateLimit int `yaml:"rate_limit"`
 }
 
 // CgroupConfig is the daemon resource config.
@@ -297,10 +409,6 @@ func Parse(data []byte) (*Config, error) {
 // CRI config, refer to
 // https://github.com/containerd/containerd/blob/main/internal/cri/config/config.go.
 func (c *Config) Validate() error {
-	if c.Version != Version {
-		return fmt.Errorf("unsupported config version %d, want %d", c.Version, Version)
-	}
-
 	if err := c.validatePaths(); err != nil {
 		return err
 	}
@@ -309,9 +417,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid log.level: %w", err)
 	}
 
-	if c.Metrics.Address != "" {
-		if _, _, err := net.SplitHostPort(c.Metrics.Address); err != nil {
-			return fmt.Errorf("invalid metrics.address: %w", err)
+	if c.Metrics.Addr != "" {
+		if _, _, err := net.SplitHostPort(c.Metrics.Addr); err != nil {
+			return fmt.Errorf("invalid metrics.addr: %w", err)
 		}
 	}
 
@@ -337,14 +445,15 @@ func (c *Config) validatePaths() error {
 		name, path string
 		optional   bool
 	}{
-		{name: "root", path: c.Root},
-		{name: "address", path: c.Address},
-		{name: "run_dir", path: c.RunDir},
+		{name: "root_dir", path: c.RootDir},
+		{name: "runtime_dir", path: c.RuntimeDir},
+		{name: "grpc.addr", path: c.GRPC.Addr},
 		{name: "auth.docker_config.path", path: c.Auth.DockerConfig.Path, optional: true},
 		{name: "auth.kube_secret.kubeconfig", path: c.Auth.KubeSecret.Kubeconfig, optional: true},
 		{name: "nydusd.binary", path: c.Nydusd.Binary},
-		{name: "nydusd.template", path: c.Nydusd.Template},
 		{name: "nydusd.log_dir", path: c.Nydusd.LogDir},
+		{name: "nydusd.config.runtime_dir", path: c.Nydusd.Config.RuntimeDir},
+		{name: "nydusd.config.storage.dir", path: c.Nydusd.Config.Storage.Dir, optional: true},
 	} {
 		if p.optional && p.path == "" {
 			continue
@@ -361,12 +470,12 @@ func (c *Config) validatePaths() error {
 		}
 	}
 
-	if len(c.Address) > maxSocketPath {
-		return fmt.Errorf("address %q is %d bytes long, over the %d byte limit", c.Address, len(c.Address), maxSocketPath)
+	if len(c.GRPC.Addr) > maxSocketPath {
+		return fmt.Errorf("grpc.addr %q is %d bytes long, over the %d byte limit", c.GRPC.Addr, len(c.GRPC.Addr), maxSocketPath)
 	}
 
 	if socket := c.APISocket(strings.Repeat("0", daemonIDLength)); len(socket) > maxSocketPath {
-		return fmt.Errorf("run_dir %q makes the daemon API socket %d bytes long, over the %d byte limit", c.RunDir, len(socket), maxSocketPath)
+		return fmt.Errorf("runtime_dir %q makes the daemon API socket %d bytes long, over the %d byte limit", c.RuntimeDir, len(socket), maxSocketPath)
 	}
 
 	return nil
@@ -394,11 +503,69 @@ func (n *NydusdConfig) validate() error {
 		return fmt.Errorf("nydusd.watchdog_timeout must be 0 or at least %s", minWatchdogTimeout)
 	}
 
-	if !slices.Contains(PrefetchScopes, n.PrefetchScope) {
-		return fmt.Errorf("invalid nydusd.prefetch_scope %q, want one of %s", n.PrefetchScope, strings.Join(PrefetchScopes, ", "))
+	if err := n.Config.Backend.Config.validate(); err != nil {
+		return err
 	}
 
-	return n.Dragonfly.validate()
+	return n.Config.Prefetch.validate()
+}
+
+// validate checks the prefetch config.
+func (p *NydusdPrefetchConfig) validate() error {
+	if p.ConcurrentBlobCount < 1 {
+		return errors.New("nydusd.config.prefetch.concurrent_blob_count must be at least 1")
+	}
+
+	if p.RequestTimeout <= 0 {
+		return errors.New("nydusd.config.prefetch.request_timeout must be positive")
+	}
+
+	if p.RetryInterval < 0 {
+		return errors.New("nydusd.config.prefetch.retry_interval must not be negative")
+	}
+
+	if !slices.Contains(PrefetchScopes, p.Scope) {
+		return fmt.Errorf("invalid nydusd.config.prefetch.scope %q, want one of %s", p.Scope, strings.Join(PrefetchScopes, ", "))
+	}
+
+	return nil
+}
+
+// validate checks the registry backend config.
+func (r *NydusdRegistryConfig) validate() error {
+	for _, c := range []struct {
+		name                               string
+		requestTimeout, requestReadTimeout Duration
+		maxRetries                         int
+	}{
+		{name: "http", requestTimeout: r.HTTP.RequestTimeout, requestReadTimeout: r.HTTP.RequestReadTimeout, maxRetries: r.HTTP.MaxRetries},
+		{name: "fallback", requestTimeout: r.Fallback.RequestTimeout, requestReadTimeout: r.Fallback.RequestReadTimeout, maxRetries: r.Fallback.MaxRetries},
+	} {
+		if c.requestTimeout <= 0 {
+			return fmt.Errorf("nydusd.config.backend.config.%s.request_timeout must be positive", c.name)
+		}
+
+		if c.requestReadTimeout <= 0 {
+			return fmt.Errorf("nydusd.config.backend.config.%s.request_read_timeout must be positive", c.name)
+		}
+
+		if c.maxRetries < 0 {
+			return fmt.Errorf("nydusd.config.backend.config.%s.max_retries must not be negative", c.name)
+		}
+	}
+
+	if r.Fallback.RateLimit < 1 {
+		return errors.New("nydusd.config.backend.config.fallback.rate_limit must be at least 1")
+	}
+
+	// The address may carry the proxy's credentials, so it is never echoed.
+	if addr := r.HTTP.Proxy.Addr; addr != "" {
+		if u, err := url.Parse(addr); err != nil || u.Scheme == "" || u.Host == "" {
+			return errors.New("nydusd.config.backend.config.http.proxy.addr must be a URL with a scheme and a host")
+		}
+	}
+
+	return r.Dragonfly.validate()
 }
 
 // validate checks the Dragonfly config, which counts only with a scheduler
@@ -409,15 +576,15 @@ func (d *NydusdDragonflyConfig) validate() error {
 	}
 
 	if d.RequestTimeout <= 0 {
-		return errors.New("nydusd.dragonfly.request_timeout must be positive")
+		return errors.New("nydusd.config.backend.config.dragonfly.request_timeout must be positive")
+	}
+
+	if d.RequestReadTimeout <= 0 {
+		return errors.New("nydusd.config.backend.config.dragonfly.request_read_timeout must be positive")
 	}
 
 	if d.MaxRetries < 0 || d.MaxRetries > maxDragonflyRetries {
-		return fmt.Errorf("nydusd.dragonfly.max_retries must be within [0, %d]", maxDragonflyRetries)
-	}
-
-	if d.FallbackRateLimit < 1 {
-		return errors.New("nydusd.dragonfly.fallback_rate_limit must be at least 1")
+		return fmt.Errorf("nydusd.config.backend.config.dragonfly.max_retries must be within [0, %d]", maxDragonflyRetries)
 	}
 
 	return nil
@@ -441,45 +608,49 @@ func (g *GCConfig) validate() error {
 }
 
 // Merge returns the running config with the settings of next that apply
-// without a restart: the cgroup limits and the dragonfly section. It reports
-// whether next changes anything else, which applies on the next restart; a
-// new cgroup slice would hide the running daemons, so it is one of those.
+// without a restart: the cgroup limits and nydusd.config, which a daemon
+// reads when it starts. It reports whether next changes anything else, which
+// applies on the next restart; a new cgroup slice, runtime directory or cache
+// directory would hide the running daemons' own, so they are among those.
 func (c *Config) Merge(next *Config) (*Config, bool) {
 	merged := *c
 	merged.Cgroup = next.Cgroup
 	merged.Cgroup.Slice = c.Cgroup.Slice
-	merged.Nydusd.Dragonfly = next.Nydusd.Dragonfly
+	merged.Nydusd.Config = next.Nydusd.Config
+	merged.Nydusd.Config.RuntimeDir = c.Nydusd.Config.RuntimeDir
+	merged.Nydusd.Config.Storage.Dir = c.Nydusd.Config.Storage.Dir
 
 	return &merged, !reflect.DeepEqual(&merged, next)
 }
 
-// RuntimesDir returns the tmpfs parent of the daemons' runtime directories
-// and API sockets.
-func (c *Config) RuntimesDir() string {
-	return filepath.Join(c.RunDir, "nydusd")
+// DaemonRuntimesDir returns the tmpfs parent of the daemons' runtime
+// directories and API sockets.
+func (c *Config) DaemonRuntimesDir() string {
+	return filepath.Join(c.RuntimeDir, "nydusd")
 }
 
-// InstancesDir returns the persistent parent of the daemons' directories.
-func (c *Config) InstancesDir() string {
-	return filepath.Join(c.Root, "nydusd")
+// DaemonInstancesDir returns the persistent parent of the daemons'
+// directories.
+func (c *Config) DaemonInstancesDir() string {
+	return filepath.Join(c.RootDir, "nydusd")
 }
 
 // APISocket returns the API socket of a daemon.
 func (c *Config) APISocket(id string) string {
-	return filepath.Join(c.RuntimesDir(), id+".sock")
+	return filepath.Join(c.DaemonRuntimesDir(), id+".sock")
 }
 
-// RuntimeDir returns the tmpfs directory of a daemon.
-func (c *Config) RuntimeDir(id string) string {
-	return filepath.Join(c.RuntimesDir(), id)
+// DaemonRuntimeDir returns the tmpfs directory of a daemon.
+func (c *Config) DaemonRuntimeDir(id string) string {
+	return filepath.Join(c.DaemonRuntimesDir(), id)
 }
 
-// InstanceDir returns the persistent directory of a daemon.
-func (c *Config) InstanceDir(id string) string {
-	return filepath.Join(c.InstancesDir(), id)
+// DaemonInstanceDir returns the persistent directory of a daemon.
+func (c *Config) DaemonInstanceDir(id string) string {
+	return filepath.Join(c.DaemonInstancesDir(), id)
 }
 
 // CacheDir returns the shared blob cache directory.
 func (c *Config) CacheDir() string {
-	return filepath.Join(c.Root, "cache")
+	return cmp.Or(c.Nydusd.Config.Storage.Dir, filepath.Join(c.RootDir, "cache"))
 }

@@ -630,7 +630,7 @@ func TestGC_Run(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				cfg := config.New()
-				cfg.Root = t.TempDir()
+				cfg.RootDir = t.TempDir()
 				cfg.GC = mockGCConfig
 				assert.NoError(t, os.Mkdir(cfg.CacheDir(), 0o700))
 				blob := filepath.Join(cfg.CacheDir(), "a.blob.data")
@@ -754,7 +754,10 @@ func newTestGC(dir string, s store.Store, usage diskUsage) *gc {
 func newTestStore(t *testing.T) store.Store {
 	t.Helper()
 	s, err := store.New(filepath.Join(t.TempDir(), "nydusd.db"), store.DefaultOpenTimeout)
-	assert.NoError(t, err)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
 	t.Cleanup(func() { s.Close() })
 	return s
 }

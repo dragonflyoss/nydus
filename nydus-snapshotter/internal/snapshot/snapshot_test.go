@@ -20,9 +20,9 @@ import (
 	"github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/sys/unix"
 
 	nydusfs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 var (
@@ -295,8 +295,7 @@ func TestSnapshotter_Cleanup(t *testing.T) {
 				assert.NoError(err)
 				_, err = sn.Prepare(ctx, "removed", "")
 				assert.NoError(err)
-				assert.NoError(unix.Mount("tmpfs", mounts[0].Source, "tmpfs", 0, ""))
-				defer func() { assert.NoError(unix.Unmount(mounts[0].Source, unix.MNT_DETACH)) }()
+				testutil.MountTmpfs(t, mounts[0].Source, "")
 				assert.NoError(sn.Remove(ctx, "busy"))
 				assert.NoError(sn.Remove(ctx, "removed"))
 

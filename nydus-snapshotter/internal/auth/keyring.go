@@ -20,7 +20,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"maps"
-	"net"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -44,8 +43,9 @@ type credential struct {
 }
 
 // basic returns the base64 username:password of the credential, "" when it
-// holds no username or a token: a daemon cannot present a token, and the
-// username:password docker stores beside one is a placeholder.
+// holds no username or a token: only basic credentials are rendered and
+// pushed, and the username:password docker stores beside a token is a
+// placeholder.
 func (c *credential) basic() string {
 	if c.IdentityToken != "" || c.RegistryToken != "" {
 		return ""
@@ -212,11 +212,7 @@ func (k registryKey) split() ([]string, string, string, error) {
 		return nil, "", "", err
 	}
 
-	host, port, err := net.SplitHostPort(parsed.Host)
-	if err != nil {
-		// The host has no port.
-		host, port = parsed.Host, ""
-	}
-
-	return strings.Split(host, "."), port, parsed.Path, nil
+	// Hostname drops the brackets of an IPv6 literal, which a glob would read
+	// as a character class.
+	return strings.Split(parsed.Hostname(), "."), parsed.Port(), parsed.Path, nil
 }

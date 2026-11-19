@@ -98,7 +98,7 @@ func TestRootOptions_run(t *testing.T) {
 			expect: func(t *testing.T, cfg *config.Config, cancel context.CancelFunc, done <-chan error) {
 				assert := assert.New(t)
 				assert.Eventually(func() bool {
-					conn, err := net.Dial("unix", cfg.Address)
+					conn, err := net.Dial("unix", cfg.GRPC.Addr)
 					if err == nil {
 						conn.Close()
 					}
@@ -112,11 +112,11 @@ func TestRootOptions_run(t *testing.T) {
 		{
 			name: "server that cannot be built",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.WriteFile(cfg.Root, nil, 0o644))
+				assert.NoError(t, os.WriteFile(cfg.RootDir, nil, 0o644))
 			},
 			expect: func(t *testing.T, cfg *config.Config, cancel context.CancelFunc, done <-chan error) {
 				assert := assert.New(t)
-				assert.ErrorContains(<-done, "create "+cfg.Root)
+				assert.ErrorContains(<-done, "create "+cfg.RootDir)
 			},
 		},
 	}
@@ -172,10 +172,10 @@ func TestRootOptions_loadConfig(t *testing.T) {
 		},
 		{
 			name: "invalid config at the default path",
-			data: "version: 2\n",
+			data: "log:\n  level: loud\n",
 			expect: func(t *testing.T, cfg *config.Config, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "unsupported config version 2")
+				assert.ErrorContains(err, "invalid log.level")
 				assert.Nil(cfg)
 			},
 		},

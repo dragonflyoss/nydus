@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,10 +25,7 @@ func TestKubeSecretRotation(t *testing.T) {
 	c.applySecret(t, auth.host, "nydus", "first")
 	n := newNode(t, withKubeSecret(c.kubeconfig, c.selector))
 	n.user, n.password = "nydus", "first"
-	if !assert.Eventually(t, func() bool {
-		status, _, err := n.get("/readyz")
-		return err == nil && status == http.StatusOK
-	}, startTimeout, 100*time.Millisecond) {
+	if !assert.Eventually(t, n.serving, startTimeout, 100*time.Millisecond) {
 		t.FailNow()
 	}
 

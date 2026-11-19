@@ -33,11 +33,18 @@ func TestLoad(t *testing.T) {
 				assert.True(cfg.Auth.KubeSecret.Enable)
 				assert.Equal("app=cr-credential", cfg.Auth.KubeSecret.LabelSelector)
 				assert.Equal(Duration(20*time.Second), cfg.Nydusd.MountTimeout)
-				assert.Equal("ondemand", cfg.Nydusd.PrefetchScope)
+				assert.Equal("/run/nydus-other", cfg.Nydusd.Config.RuntimeDir)
+				assert.Equal(NydusdStorageConfig{Dir: "/data/nydus-cache", SkipVerifyChecksums: true, FetchSize: 4 << 20}, cfg.Nydusd.Config.Storage)
+				assert.Equal("/data/nydus-cache", cfg.CacheDir())
+				assert.Equal(NydusdPrefetchConfig{ConcurrentBlobCount: 4, RequestTimeout: Duration(2 * time.Hour), RetryInterval: Duration(3 * time.Hour), Scope: "ondemand"}, cfg.Nydusd.Config.Prefetch)
 				assert.Equal("debug", cfg.Nydusd.LogLevel)
 				assert.Equal(3, cfg.Nydusd.LogMaxFiles)
 				assert.Equal(Duration(time.Minute), cfg.Nydusd.WatchdogTimeout)
-				assert.Equal("http://dragonfly-scheduler.dragonfly-system.svc:8002", cfg.Nydusd.Dragonfly.SchedulerEndpoint)
+				assert.Equal("http://dragonfly-scheduler.dragonfly-system.svc:8002", cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint)
+				assert.Equal(Duration(30*time.Second), cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestTimeout)
+				assert.Equal(Duration(5*time.Second), cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestReadTimeout)
+				assert.Equal(NydusdHTTPConfig{RequestTimeout: Duration(2 * time.Minute), RequestReadTimeout: Duration(10 * time.Second), MaxRetries: 5, Proxy: NydusdProxyConfig{Addr: "http://127.0.0.1:65001"}}, cfg.Nydusd.Config.Backend.Config.HTTP)
+				assert.Equal(NydusdFallbackConfig{RequestTimeout: Duration(45 * time.Second), RequestReadTimeout: Duration(4 * time.Second), MaxRetries: 2, RateLimit: 2}, cfg.Nydusd.Config.Backend.Config.Fallback)
 				assert.Equal(Size(8<<30), cfg.Cgroup.MemoryMax)
 				assert.Equal(CPUQuota(400), cfg.Cgroup.CPUQuota)
 				assert.Equal(uint64(4_000_000), cfg.Cgroup.CPUQuota.PerSecUSec())
@@ -81,14 +88,16 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "set keys keep the defaults of the others",
-			data: "nydusd:\n  dragonfly:\n    scheduler_endpoint: \"http://scheduler:8002\"\n",
+			data: "nydusd:\n  config:\n    backend:\n      config:\n        dragonfly:\n          scheduler_endpoint: \"http://scheduler:8002\"\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal(mockSchedulerEndpoint, cfg.Nydusd.Dragonfly.SchedulerEndpoint)
-				assert.Equal(DefaultNydusdDragonflyRequestTimeout, cfg.Nydusd.Dragonfly.RequestTimeout)
-				assert.Equal(DefaultNydusdDragonflyMaxRetries, cfg.Nydusd.Dragonfly.MaxRetries)
-				assert.Equal(DefaultNydusdDragonflyFallbackRateLimit, cfg.Nydusd.Dragonfly.FallbackRateLimit)
+				assert.Equal(mockSchedulerEndpoint, cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint)
+				assert.Equal(DefaultNydusdDragonflyRequestTimeout, cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestTimeout)
+				assert.Equal(DefaultNydusdDragonflyMaxRetries, cfg.Nydusd.Config.Backend.Config.Dragonfly.MaxRetries)
+				assert.Equal(DefaultNydusdDragonflyRequestReadTimeout, cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestReadTimeout)
+				assert.Equal(New().Nydusd.Config.Backend.Config.HTTP, cfg.Nydusd.Config.Backend.Config.HTTP)
+				assert.Equal(New().Nydusd.Config.Backend.Config.Fallback, cfg.Nydusd.Config.Backend.Config.Fallback)
 			},
 		},
 		{
@@ -111,7 +120,7 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "second document",
-			data: "version: 1\n---\nroot: /var/lib/other\n",
+			data: "log:\n  level: info\n---\nroot_dir: /var/lib/other\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "more than one YAML document")
@@ -119,10 +128,10 @@ func TestParse(t *testing.T) {
 		},
 		{
 			name: "config that does not validate",
-			data: "version: 2\n",
+			data: "log:\n  level: loud\n",
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "unsupported config version 2")
+				assert.ErrorContains(err, "invalid log.level")
 				assert.Nil(cfg)
 			},
 		},
@@ -151,19 +160,11 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:   "unsupported version",
-			mutate: func(cfg *Config) { cfg.Version = 2 },
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "unsupported config version 2")
-			},
-		},
-		{
 			name:   "relative root",
-			mutate: func(cfg *Config) { cfg.Root = "var/lib" },
+			mutate: func(cfg *Config) { cfg.RootDir = "var/lib" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "root must be an absolute path")
+				assert.ErrorContains(err, "root_dir must be an absolute path")
 			},
 		},
 		{
@@ -191,19 +192,19 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:   "address over sun_path",
-			mutate: func(cfg *Config) { cfg.Address = "/run/" + strings.Repeat("x", 110) + ".sock" },
+			name:   "grpc socket over sun_path",
+			mutate: func(cfg *Config) { cfg.GRPC.Addr = "/run/" + strings.Repeat("x", 110) + ".sock" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "address")
+				assert.ErrorContains(err, "grpc.addr ")
 			},
 		},
 		{
 			name:   "daemon api socket over sun_path",
-			mutate: func(cfg *Config) { cfg.RunDir = "/run/" + strings.Repeat("x", 40) },
+			mutate: func(cfg *Config) { cfg.RuntimeDir = "/run/" + strings.Repeat("x", 40) },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "run_dir")
+				assert.ErrorContains(err, "runtime_dir ")
 			},
 		},
 		{
@@ -216,15 +217,15 @@ func TestConfig_Validate(t *testing.T) {
 		},
 		{
 			name:   "invalid metrics address",
-			mutate: func(cfg *Config) { cfg.Metrics.Address = "not-an-address" },
+			mutate: func(cfg *Config) { cfg.Metrics.Addr = "not-an-address" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid metrics.address")
+				assert.ErrorContains(err, "invalid metrics.addr")
 			},
 		},
 		{
 			name:   "metrics disabled",
-			mutate: func(cfg *Config) { cfg.Metrics.Address = "" },
+			mutate: func(cfg *Config) { cfg.Metrics.Addr = "" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -288,15 +289,71 @@ func TestConfig_Validate(t *testing.T) {
 		},
 		{
 			name:   "invalid prefetch scope",
-			mutate: func(cfg *Config) { cfg.Nydusd.PrefetchScope = "some" },
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Prefetch.Scope = "some" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid nydusd.prefetch_scope")
+				assert.ErrorContains(err, "invalid nydusd.config.prefetch.scope")
+			},
+		},
+		{
+			name:   "prefetch blob count below one",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Prefetch.ConcurrentBlobCount = 0 },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.prefetch.concurrent_blob_count must be at least 1")
+			},
+		},
+		{
+			name:   "prefetch request timeout that is not positive",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Prefetch.RequestTimeout = 0 },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.prefetch.request_timeout must be positive")
+			},
+		},
+		{
+			name:   "prefetch retry interval that is negative",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Prefetch.RetryInterval = Duration(-time.Second) },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.prefetch.retry_interval must not be negative")
+			},
+		},
+		{
+			name:   "nydusd runtime dir that is relative",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.RuntimeDir = "run/nydus" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.runtime_dir must be an absolute path")
+			},
+		},
+		{
+			name:   "storage dir that is relative",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Storage.Dir = "cache" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.storage.dir must be an absolute path")
+			},
+		},
+		{
+			name:   "proxy address with a scheme and a host",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Backend.Config.HTTP.Proxy.Addr = "http://127.0.0.1:65001" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+			},
+		},
+		{
+			name:   "proxy address without a scheme is not echoed",
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Backend.Config.HTTP.Proxy.Addr = "user:p@127.0.0.1:65001" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "nydusd.config.backend.config.http.proxy.addr must be a URL with a scheme and a host")
 			},
 		},
 		{
 			name:   "dragonfly without a scheduler is not checked",
-			mutate: func(cfg *Config) { cfg.Nydusd.Dragonfly = NydusdDragonflyConfig{} },
+			mutate: func(cfg *Config) { cfg.Nydusd.Config.Backend.Config.Dragonfly = NydusdDragonflyConfig{} },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -305,31 +362,81 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "dragonfly request timeout that is not positive",
 			mutate: func(cfg *Config) {
-				cfg.Nydusd.Dragonfly.SchedulerEndpoint, cfg.Nydusd.Dragonfly.RequestTimeout = mockSchedulerEndpoint, 0
+				cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint, cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestTimeout = mockSchedulerEndpoint, 0
 			},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "nydusd.dragonfly.request_timeout must be positive")
+				assert.ErrorContains(err, "nydusd.config.backend.config.dragonfly.request_timeout must be positive")
 			},
 		},
 		{
 			name: "dragonfly retries over the limit",
 			mutate: func(cfg *Config) {
-				cfg.Nydusd.Dragonfly.SchedulerEndpoint, cfg.Nydusd.Dragonfly.MaxRetries = mockSchedulerEndpoint, 4
+				cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint, cfg.Nydusd.Config.Backend.Config.Dragonfly.MaxRetries = mockSchedulerEndpoint, 4
 			},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "nydusd.dragonfly.max_retries must be within [0, 3]")
+				assert.ErrorContains(err, "nydusd.config.backend.config.dragonfly.max_retries must be within [0, 3]")
 			},
 		},
 		{
-			name: "dragonfly fallback rate limit under one",
+			name: "dragonfly request read timeout that is not positive",
 			mutate: func(cfg *Config) {
-				cfg.Nydusd.Dragonfly.SchedulerEndpoint, cfg.Nydusd.Dragonfly.FallbackRateLimit = mockSchedulerEndpoint, 0
+				cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint, cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestReadTimeout = mockSchedulerEndpoint, 0
 			},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "nydusd.dragonfly.fallback_rate_limit must be at least 1")
+				assert.ErrorContains(err, "nydusd.config.backend.config.dragonfly.request_read_timeout must be positive")
+			},
+		},
+		{
+			name: "fallback rate limit below one",
+			mutate: func(cfg *Config) {
+				cfg.Nydusd.Config.Backend.Config.Fallback.RateLimit = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.backend.config.fallback.rate_limit must be at least 1")
+			},
+		},
+		{
+			name: "http request timeout that is not positive",
+			mutate: func(cfg *Config) {
+				cfg.Nydusd.Config.Backend.Config.HTTP.RequestTimeout = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.backend.config.http.request_timeout must be positive")
+			},
+		},
+		{
+			name: "http request read timeout that is not positive",
+			mutate: func(cfg *Config) {
+				cfg.Nydusd.Config.Backend.Config.HTTP.RequestReadTimeout = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.backend.config.http.request_read_timeout must be positive")
+			},
+		},
+		{
+			name: "negative http retries",
+			mutate: func(cfg *Config) {
+				cfg.Nydusd.Config.Backend.Config.HTTP.MaxRetries = -1
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.backend.config.http.max_retries must not be negative")
+			},
+		},
+		{
+			name: "fallback request timeout that is not positive",
+			mutate: func(cfg *Config) {
+				cfg.Nydusd.Config.Backend.Config.Fallback.RequestTimeout = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "nydusd.config.backend.config.fallback.request_timeout must be positive")
 			},
 		},
 		{
@@ -413,8 +520,8 @@ func TestConfig_Paths(t *testing.T) {
 				id := strings.Repeat("a", 64)
 				assert.Equal("/run/nydus-snapshotter/nydusd/"+id+".sock", cfg.APISocket(id))
 				assert.Len(cfg.APISocket(id), 99)
-				assert.Equal("/run/nydus-snapshotter/nydusd/"+id, cfg.RuntimeDir(id))
-				assert.Equal("/var/lib/nydus-snapshotter/nydusd/"+id, cfg.InstanceDir(id))
+				assert.Equal("/run/nydus-snapshotter/nydusd/"+id, cfg.DaemonRuntimeDir(id))
+				assert.Equal("/var/lib/nydus-snapshotter/nydusd/"+id, cfg.DaemonInstanceDir(id))
 				assert.Equal("/var/lib/nydus-snapshotter/cache", cfg.CacheDir())
 			},
 		},
@@ -434,16 +541,35 @@ func TestConfig_Merge(t *testing.T) {
 		expect func(t *testing.T, running, merged *Config, restartOnly bool)
 	}{
 		{
-			name: "apply cgroup limits and dragonfly",
+			name: "apply cgroup limits and the daemon config",
 			update: func(next *Config) {
 				next.Cgroup.MemoryMax = 4 << 30
-				next.Nydusd.Dragonfly.SchedulerEndpoint = "http://scheduler:8002"
+				next.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint = "http://scheduler:8002"
+				next.Nydusd.Config.Backend.Config.Fallback.RateLimit = 5
+				next.Nydusd.Config.Storage.FetchSize = 4 << 20
+				next.Nydusd.Config.Prefetch.ConcurrentBlobCount = 4
 			},
 			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
 				assert := assert.New(t)
 				assert.False(restartOnly)
 				assert.Equal(Size(4<<30), merged.Cgroup.MemoryMax)
-				assert.Equal("http://scheduler:8002", merged.Nydusd.Dragonfly.SchedulerEndpoint)
+				assert.Equal("http://scheduler:8002", merged.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint)
+				assert.Equal(5, merged.Nydusd.Config.Backend.Config.Fallback.RateLimit)
+				assert.Equal(uint64(4<<20), merged.Nydusd.Config.Storage.FetchSize)
+				assert.Equal(4, merged.Nydusd.Config.Prefetch.ConcurrentBlobCount)
+			},
+		},
+		{
+			name: "keep the directories of the running daemons",
+			update: func(next *Config) {
+				next.Nydusd.Config.Storage.Dir = "/data/nydus-cache"
+				next.Nydusd.Config.RuntimeDir = "/run/nydus-other"
+			},
+			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
+				assert := assert.New(t)
+				assert.True(restartOnly)
+				assert.Equal(running.CacheDir(), merged.CacheDir())
+				assert.Equal(running.Nydusd.Config.RuntimeDir, merged.Nydusd.Config.RuntimeDir)
 			},
 		},
 		{
@@ -460,13 +586,13 @@ func TestConfig_Merge(t *testing.T) {
 		{
 			name: "defer settings that need a restart",
 			update: func(next *Config) {
-				next.Root = "/var/lib/other"
+				next.RootDir = "/var/lib/other"
 				next.Log.Level = "debug"
 			},
 			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
 				assert := assert.New(t)
 				assert.True(restartOnly)
-				assert.Equal(running.Root, merged.Root)
+				assert.Equal(running.RootDir, merged.RootDir)
 				assert.Equal(running.Log.Level, merged.Log.Level)
 			},
 		},

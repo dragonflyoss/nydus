@@ -20,7 +20,6 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/opencontainers/go-digest"
-	"gopkg.in/yaml.v3"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
@@ -38,9 +37,6 @@ const (
 
 	// payloadConfigFile is the snapshotter config in the payload.
 	payloadConfigFile = "config/config.yaml"
-
-	// payloadTemplateFile is the nydusd config template in the payload.
-	payloadTemplateFile = "config/nydusd.template.yaml"
 
 	// payloadCertsDir is the certs.d directory in the payload.
 	payloadCertsDir = "config/certs.d"
@@ -189,27 +185,14 @@ func (i *Installer) syncConfig(ctx context.Context) error {
 
 // configFiles returns the config files of the payload, validated before
 // anything touches the host so a broken ConfigMap leaves the running
-// snapshotter alone: config.yaml, the nydusd template and certs.d when
-// present.
+// snapshotter alone: config.yaml and certs.d when present.
 func (i *Installer) configFiles() ([]file, error) {
 	cfg, data, err := i.payloadConfig()
 	if err != nil {
 		return nil, err
 	}
 
-	template, err := os.ReadFile(i.cfg.payload(payloadTemplateFile))
-	if err != nil {
-		return nil, fmt.Errorf("read payload nydusd template: %w", err)
-	}
-
-	if err := yaml.Unmarshal(template, &map[string]any{}); err != nil {
-		return nil, fmt.Errorf("decode payload nydusd template: %w", err)
-	}
-
-	files := []file{
-		{path: config.DefaultPath, perm: 0o644, data: data},
-		{path: config.DefaultNydusdTemplate, perm: 0o644, data: template},
-	}
+	files := []file{{path: config.DefaultPath, perm: 0o644, data: data}}
 
 	certs, err := i.certsFiles()
 	if err != nil {
@@ -280,7 +263,6 @@ func (i *Installer) payloadConfig() (*config.Config, []byte, error) {
 	// would reach the node and never work.
 	paths := []struct{ name, path, want string }{
 		{name: "nydusd.binary", path: cfg.Nydusd.Binary, want: config.DefaultNydusdBinary},
-		{name: "nydusd.template", path: cfg.Nydusd.Template, want: config.DefaultNydusdTemplate},
 	}
 	if cfg.Auth.KubeSecret.Enable {
 		paths = append(paths, struct{ name, path, want string }{name: "auth.kube_secret.kubeconfig", path: cfg.Auth.KubeSecret.Kubeconfig, want: config.DefaultAuthKubeconfig})
@@ -334,9 +316,8 @@ func (i *Installer) installFiles(ctx context.Context, files []file) error {
 }
 
 // unitsToRestart returns the units changed files need restarted: the socket
-// for its unit file, the service for what it reads only at start. The nydusd
-// template, certs.d and nydus binaries are read per daemon start and need
-// none.
+// for its unit file, the service for what it reads only at start. certs.d
+// and nydus binaries are read per daemon start and need none.
 func (i *Installer) unitsToRestart(changed []file) []string {
 	var units []string
 	for _, f := range changed {

@@ -119,7 +119,8 @@ test-snapshotter:
 .PHONY: test-snapshotter
 
 # Needs a systemd host and NYDUS_E2E_CONTAINERD; runc comes from NYDUS_E2E_RUNC or PATH.
-# The kube secret test also needs kubectl and NYDUS_E2E_KUBECONFIG.
+# The kube secret test also needs kubectl and NYDUS_E2E_KUBECONFIG, the
+# installer tests docker and NYDUS_E2E_NODE_IMAGE.
 e2e-snapshotter: FEATURES = $(E2E_FEATURES)
 e2e-snapshotter: build-ci build-nydusify build-snapshotter
 	$(MAKE) e2e-run PKG=./snapshotter/...

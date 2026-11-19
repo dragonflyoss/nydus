@@ -124,9 +124,9 @@ func New(cfg *Config, manager systemd.Manager) *Installer {
 // changed, then keeps the credentials and the config in sync until ctx is
 // done. A host whose systemd cannot be used is left untouched. A synced
 // config is not followed by a restart: the snapshotter reloads cgroup and
-// nydusd.dragonfly itself and reads the template and certs.d per daemon
-// start; other keys apply on its next restart. It never stops daemons, edits
-// containerd's config or uninstalls.
+// nydusd.config itself and reads certs.d per daemon start; other keys apply
+// on its next restart. It never stops daemons, edits containerd's config or
+// uninstalls.
 func (i *Installer) Run(ctx context.Context) error {
 	// Check the host's systemd before anything is written to the host, as
 	// kubeadm runs its preflight checks before its first change, refer to

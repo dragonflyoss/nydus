@@ -24,7 +24,7 @@ const (
 	restartPending    = "/run/nydus-snapshotter/restart-pending"
 	serviceUnit       = "nydus-snapshotter.service"
 	socketUnit        = "nydus-snapshotter.socket"
-	readyz            = "http://127.0.0.1:4010/readyz"
+	metricsURL        = "http://127.0.0.1:4010/metrics"
 	installed         = "installed, keeping the config and the credentials in sync"
 	bootTimeout       = time.Minute
 	installTimeout    = time.Minute
@@ -77,9 +77,7 @@ func newInstallNode(t *testing.T) *installNode {
 		n.write(t, payloadDir+"/systemd/"+unit, shipped(t, "systemd", unit), 0o644)
 	}
 
-	for _, file := range []string{"config.yaml", "nydusd.template.yaml"} {
-		n.write(t, payloadDir+"/config/"+file, shipped(t, "nydus-snapshotter", file), 0o644)
-	}
+	n.write(t, payloadDir+"/config/config.yaml", shipped(t, "nydus-snapshotter", "config.yaml"), 0o644)
 
 	return n
 }
@@ -170,7 +168,7 @@ func (n *installNode) assertServing(t *testing.T) {
 		assert.Equal(t, "enabled", n.property(t, unit, "UnitFileState"))
 	}
 
-	assert.Equal(t, "ok", n.exec(t, "curl", "--fail", "--silent", readyz))
+	assert.Contains(t, n.exec(t, "curl", "--fail", "--silent", metricsURL), "nydus_snapshotter_running_daemons")
 }
 
 func (n *installNode) starts() int {
@@ -213,7 +211,7 @@ func TestInstallUpgrade(t *testing.T) {
 	installer := n.install(t)
 	service, socket := n.property(t, serviceUnit, "InvocationID"), n.property(t, socketUnit, "InvocationID")
 
-	config := "version: 1\nlog:\n  level: debug\n"
+	config := "log:\n  level: debug\n"
 	n.write(t, payloadDir+"/config/config.yaml", config, 0o644)
 	assert.Eventually(t, func() bool {
 		synced, _ := n.tryExec("cat", hostConfig)
@@ -257,7 +255,7 @@ func TestInstallUpgrade(t *testing.T) {
 func TestInstallKubeSecret(t *testing.T) {
 	t.Parallel()
 	n := newInstallNode(t)
-	n.write(t, payloadDir+"/config/config.yaml", "version: 1\nauth:\n  kube_secret:\n    enable: true\n", 0o644)
+	n.write(t, payloadDir+"/config/config.yaml", "auth:\n  kube_secret:\n    enable: true\n", 0o644)
 	n.write(t, tokenDir+"/token", "issued", 0o600)
 	n.write(t, tokenDir+"/ca.crt", "ca", 0o644)
 	n.install(t, "KUBERNETES_SERVICE_HOST=10.96.0.1", "KUBERNETES_SERVICE_PORT=443")

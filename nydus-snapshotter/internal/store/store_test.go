@@ -76,7 +76,9 @@ func TestStore_Instances(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := New(filepath.Join(t.TempDir(), "nydusd.db"), DefaultOpenTimeout)
-			assert.NoError(t, err)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
 			defer s.Close()
 			tc.expect(t, s)
 		})
@@ -135,7 +137,9 @@ func TestStore_Blobs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := New(filepath.Join(t.TempDir(), "nydusd.db"), DefaultOpenTimeout)
-			assert.NoError(t, err)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
 			defer s.Close()
 			tc.expect(t, s)
 		})
@@ -149,11 +153,25 @@ func TestNew(t *testing.T) {
 		expect  func(t *testing.T, s Store, err error)
 	}{
 		{
-			name:    "reopen store",
-			prepare: func(t *testing.T, path string) {},
+			name: "reopen store",
+			prepare: func(t *testing.T, path string) {
+				s, err := New(path, DefaultOpenTimeout)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+
+				assert.NoError(t, s.PutInstance(mockInstance))
+				assert.NoError(t, s.Close())
+			},
 			expect: func(t *testing.T, s Store, err error) {
 				assert := assert.New(t)
+				if !assert.NoError(err) {
+					return
+				}
+
+				instance, err := s.GetInstance(mockInstance.ChainID)
 				assert.NoError(err)
+				assert.Equal(mockInstance, instance)
 				assert.NoError(s.Close())
 			},
 		},
@@ -265,7 +283,9 @@ func TestStore_decode(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := New(filepath.Join(t.TempDir(), "nydusd.db"), DefaultOpenTimeout)
-			assert.NoError(t, err)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
 			defer s.Close()
 			assert.NoError(t, s.(*store).db.Update(func(tx *bolt.Tx) error {
 				return tx.Bucket(bucketKeyV1).Bucket(tc.bucket).Put([]byte(mockInstance.ChainID), []byte("{"))

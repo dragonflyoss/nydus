@@ -1,17 +1,20 @@
-# Config schema version.
-version: 1
-# Root of snapshots, the blob cache and daemon instances.
-root: /var/lib/nydus-snapshotter
-# gRPC socket containerd connects to.
-address: /run/nydus-snapshotter/nydus-snapshotter.sock
+# Persistent data: snapshots, the blob cache and daemon instances.
+root_dir: /var/lib/nydus-snapshotter
+# Transient data on tmpfs: daemon API sockets and rendered configs, which
+# carry credentials.
+runtime_dir: /run/nydus-snapshotter
+
+grpc:
+  # Unix socket containerd connects to, which also answers gRPC health checks.
+  addr: /run/nydus-snapshotter/nydus-snapshotter.sock
 
 log:
   # One of trace, debug, info, warn or error.
   level: info
 
 metrics:
-  # Address of /metrics, /livez and /readyz, empty to disable.
-  address: 127.0.0.1:4010
+  # Address of /metrics, empty to disable.
+  addr: 127.0.0.1:4010
 
 registry:
   # containerd certs.d directory of <host>/hosts.toml and docker-style certificates.
@@ -30,7 +33,6 @@ auth:
 nydusd:
   driver: fuse
   binary: /opt/nydus-snapshotter/bin/current/nydus
-  template: /etc/nydus-snapshotter/nydusd.template.yaml
   log_dir: /var/log/nydus-snapshotter/nydusd
   # Log level of a daemon, one of trace, debug, info, warn or error.
   log_level: info
@@ -39,14 +41,59 @@ nydusd:
   mount_timeout: 10s
   # systemd kills a daemon that sent no keep-alive for this long, 0 to disable.
   watchdog_timeout: 3m
-  # One of none, ondemand, all or auto.
-  prefetch_scope: auto
-  # Copied into backend.config.dragonfly of each daemon when scheduler_endpoint is set.
-  dragonfly:
-    scheduler_endpoint: ''
-    request_timeout: 5s
-    max_retries: 1
-    fallback_rate_limit: 1
+  # Config of each daemon, named and laid out as nydus-config. The backend type
+  # is always registry; addr, repository and auth come from the image, and
+  # http.tls from certs.d.
+  config:
+    # Runtime directory the daemons share: Dragonfly seed peers and FUSE hot
+    # upgrade state.
+    runtime_dir: /run/nydus
+    backend:
+      config:
+        # Requests to the origin registry.
+        http:
+          # A whole request, its body included.
+          request_timeout: 1m
+          # The longest wait for the connection, the response and each part of
+          # its body.
+          request_read_timeout: 5s
+          max_retries: 3
+          proxy:
+            # HTTP forward proxy of every registry request, with its scheme,
+            # empty to connect to the origin. Not used with dragonfly.
+            addr: ''
+        # Requests through Dragonfly seed peers, set when scheduler_endpoint is
+        # not empty.
+        dragonfly:
+          scheduler_endpoint: ''
+          request_timeout: 1m
+          request_read_timeout: 5s
+          max_retries: 1
+        # The client an on-demand read falls back to when Dragonfly or the
+        # proxy cannot serve it.
+        fallback:
+          request_timeout: 1m
+          request_read_timeout: 5s
+          max_retries: 0
+          # Origin requests per second, at least 1.
+          rate_limit: 1
+    storage:
+      # Blob cache directory the daemons share, empty for <root_dir>/cache.
+      dir: ''
+      # Skip the crc32c check of decoded chunk groups.
+      skip_verify_checksums: false
+      # Compressed bytes one on-demand read covers, 0 for the missed chunk
+      # group alone.
+      fetch_size: 2097152
+    prefetch:
+      # Blobs prefetched at once.
+      concurrent_blob_count: 10
+      # Prefetching one whole blob.
+      request_timeout: 1h
+      # A failed prefetch read is sent once more after this long to twice it.
+      retry_interval: 6h
+      # One of none, ondemand, all or auto.
+      scope: auto
 
 cgroup:
   # Slice the daemons run in, which holds their total budget below.
@@ -62,6 +109,7 @@ cgroup:
 gc:
   interval: 15m
   policy:
+    # An unused blob's cache is evicted this long after a daemon last used it.
     blob_ttl: 720h
     # Capacity the disk thresholds apply to, 0 for the whole filesystem.
     disk_threshold: '0'

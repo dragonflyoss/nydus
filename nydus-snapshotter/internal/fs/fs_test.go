@@ -87,18 +87,6 @@ var (
 	mockBlobID = strings.Repeat("aa", 32)
 
 	mockOtherBlobID = strings.Repeat("bb", 32)
-
-	mockTemplate = `
-storage:
-  dir: /ignored
-prefetch:
-  concurrent_blob_count: 4
-backend:
-  type: registry
-  config:
-    http:
-      request_timeout: 5s
-`
 )
 
 type mockRecorders struct {
@@ -133,7 +121,7 @@ func TestNew(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.False(f.(*fileSystem).limitsDeferred.Load())
-				for _, dir := range []string{cfg.CacheDir(), cfg.InstancesDir(), cfg.RuntimesDir(), cfg.Nydusd.LogDir} {
+				for _, dir := range []string{cfg.CacheDir(), cfg.DaemonInstancesDir(), cfg.DaemonRuntimesDir(), cfg.Nydusd.LogDir} {
 					info, err := os.Stat(dir)
 					assert.NoError(err)
 					assert.Equal(os.ModeDir|0o700, info.Mode())
@@ -196,7 +184,7 @@ func TestNew(t *testing.T) {
 		{
 			name: "dir that cannot be created",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.WriteFile(cfg.Root, nil, 0o644))
+				assert.NoError(t, os.WriteFile(cfg.RootDir, nil, 0o644))
 			},
 			mock: func(m *systemdmocks.MockManagerMockRecorder) {},
 			expect: func(t *testing.T, cfg *config.Config, f FileSystem, err error) {
@@ -216,8 +204,8 @@ func TestNew(t *testing.T) {
 
 			root := t.TempDir()
 			cfg := config.New()
-			cfg.Root = filepath.Join(root, "lib")
-			cfg.RunDir = filepath.Join(root, "run")
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
 			cfg.Nydusd.LogDir = filepath.Join(root, "log")
 			tc.prepare(t, cfg)
 
@@ -259,7 +247,7 @@ func TestFileSystem_Mount(t *testing.T) {
 				starts, failures := testutil.ToFloat64(metrics.DaemonStartsTotal), testutil.ToFloat64(metrics.DaemonStartFailuresTotal)
 				mountpoint, err := f.Mount(t.Context(), image)
 				assert.NoError(err)
-				assert.Equal(filepath.Join(cfg.InstanceDir(id), "mnt"), mountpoint)
+				assert.Equal(filepath.Join(cfg.DaemonInstanceDir(id), "mnt"), mountpoint)
 				assert.Equal(starts+1, testutil.ToFloat64(metrics.DaemonStartsTotal))
 				assert.Equal(failures, testutil.ToFloat64(metrics.DaemonStartFailuresTotal))
 
@@ -272,12 +260,12 @@ func TestFileSystem_Mount(t *testing.T) {
 				assert.FileExists(instance.Bootstrap)
 				assert.FileExists(filepath.Join(cfg.CacheDir(), mockBlobID+cache.BlobMetaSuffix))
 
-				rendered, err := os.ReadFile(filepath.Join(cfg.RuntimeDir(id), "config.yaml"))
+				rendered, err := os.ReadFile(filepath.Join(cfg.DaemonRuntimeDir(id), "config.yaml"))
 				assert.NoError(err)
 				assert.Contains(string(rendered), "auth: dXNlcjpwYXNz")
 				assert.Contains(string(rendered), "repository: team/app")
 				assert.Contains(string(rendered), "scope: all")
-				info, err := os.Stat(filepath.Join(cfg.RuntimeDir(id), "config.yaml"))
+				info, err := os.Stat(filepath.Join(cfg.DaemonRuntimeDir(id), "config.yaml"))
 				assert.NoError(err)
 				assert.Equal(os.FileMode(0o600), info.Mode().Perm())
 
@@ -677,7 +665,7 @@ func TestFileSystem_Mount(t *testing.T) {
 				assert.NoError(os.WriteFile(cfg.Nydusd.LogDir, nil, 0o644))
 				_, err := f.Mount(t.Context(), image)
 				assert.ErrorContains(err, "create "+cfg.Nydusd.LogDir)
-				assert.NoDirExists(cfg.InstanceDir(mockID))
+				assert.NoDirExists(cfg.DaemonInstanceDir(mockID))
 			},
 		},
 		{
@@ -707,20 +695,6 @@ func TestFileSystem_Mount(t *testing.T) {
 			},
 		},
 		{
-			name: "nydusd template that cannot be read",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
-			},
-			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
-				assert := assert.New(t)
-				assert.NoError(os.Remove(f.cfg.Load().Nydusd.Template))
-				_, err := f.Mount(t.Context(), image)
-				assert.ErrorContains(err, "read nydusd template")
-				_, err = f.store.GetInstance(mockChainID)
-				assert.ErrorIs(err, errdefs.ErrNotFound)
-			},
-		},
-		{
 			name: "credential that cannot be resolved",
 			mock: func(m mockRecorders, mounted *atomic.Bool) {
 				expectFailedStart(m)
@@ -730,7 +704,7 @@ func TestFileSystem_Mount(t *testing.T) {
 				assert := assert.New(t)
 				_, err := f.Mount(t.Context(), image)
 				assert.ErrorContains(err, "resolve credential of")
-				assert.NoFileExists(filepath.Join(f.cfg.Load().RuntimeDir(mockID), "config.yaml"))
+				assert.NoFileExists(filepath.Join(f.cfg.Load().DaemonRuntimeDir(mockID), "config.yaml"))
 			},
 		},
 		{
@@ -745,7 +719,7 @@ func TestFileSystem_Mount(t *testing.T) {
 				assert.NoError(os.Remove(cfg.Nydusd.Binary))
 				_, err := f.Mount(t.Context(), image)
 				assert.ErrorContains(err, "resolve nydus binary")
-				assert.NoDirExists(cfg.RuntimeDir(mockID))
+				assert.NoDirExists(cfg.DaemonRuntimeDir(mockID))
 			},
 		},
 		{
@@ -1692,15 +1666,13 @@ func newTestFileSystem(t *testing.T, manager systemd.Manager, keychain *authmock
 	t.Helper()
 	root := t.TempDir()
 	cfg := config.New()
-	cfg.Root = filepath.Join(root, "lib")
-	cfg.RunDir = filepath.Join(root, "run")
+	cfg.RootDir = filepath.Join(root, "lib")
+	cfg.RuntimeDir = filepath.Join(root, "run")
 	cfg.Registry.ConfigPath = ""
-	cfg.Nydusd.Template = filepath.Join(root, "nydusd.template.yaml")
 	cfg.Nydusd.Binary = filepath.Join(root, "nydus")
 	cfg.Nydusd.LogDir = filepath.Join(root, "log")
 	cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
 	cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
-	assert.NoError(t, os.WriteFile(cfg.Nydusd.Template, []byte(mockTemplate), 0o644))
 	assert.NoError(t, os.WriteFile(cfg.Nydusd.Binary, nil, 0o755))
 	assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
 

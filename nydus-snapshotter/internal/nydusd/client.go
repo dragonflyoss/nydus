@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/containerd/errdefs"
 	dto "github.com/prometheus/client_model/go"
@@ -162,7 +163,12 @@ func (c *client) UpdateAuth(ctx context.Context, auth string) error {
 		return fmt.Errorf("decode auth: %w: %w", err, errdefs.ErrInvalidArgument)
 	}
 
-	username, password, _ := strings.Cut(string(decoded), ":")
+	// JSON carries UTF-8 only, and basic credentials always hold a colon.
+	username, password, ok := strings.Cut(string(decoded), ":")
+	if !ok || !utf8.Valid(decoded) {
+		return fmt.Errorf("auth is not base64 of a UTF-8 username:password: %w", errdefs.ErrInvalidArgument)
+	}
+
 	body, err := json.Marshal(struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -217,7 +223,7 @@ func (c *client) do(ctx context.Context, method, path string, body []byte, want 
 	switch resp.StatusCode {
 	case http.StatusNotFound:
 		return fmt.Errorf("%w: %w", err, errdefs.ErrNotImplemented)
-	case http.StatusBadRequest:
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge:
 		return fmt.Errorf("%w: %w", err, errdefs.ErrInvalidArgument)
 	case http.StatusForbidden:
 		return fmt.Errorf("%w: %w", err, errdefs.ErrPermissionDenied)

@@ -163,7 +163,7 @@ func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s sto
 		return nil, err
 	}
 
-	for _, dir := range []string{cfg.CacheDir(), cfg.InstancesDir(), cfg.RuntimesDir(), cfg.Nydusd.LogDir} {
+	for _, dir := range []string{cfg.CacheDir(), cfg.DaemonInstancesDir(), cfg.DaemonRuntimesDir(), cfg.Nydusd.LogDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}

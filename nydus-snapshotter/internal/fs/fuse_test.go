@@ -7,6 +7,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -238,7 +239,12 @@ func newTestDaemon(t *testing.T, fstype string, mounts int) *Daemon {
 			options := fmt.Sprintf("fd=%d,rootmode=40000,user_id=0,group_id=0", fuse.Fd())
 			assert.NoError(t, unix.Mount("nydus-test", mountpoint, "fuse.nydus-test", 0, options))
 		default:
-			assert.NoError(t, unix.Mount("tmpfs", mountpoint, "tmpfs", 0, ""))
+			err := unix.Mount("tmpfs", mountpoint, "tmpfs", 0, "")
+			if errors.Is(err, unix.EPERM) {
+				t.Skip("mounts with CAP_SYS_ADMIN")
+			}
+
+			assert.NoError(t, err)
 		}
 	}
 

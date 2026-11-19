@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/api/types/runc/options"
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -26,8 +27,9 @@ const busybox = "/bin/busybox"
 
 type container struct {
 	containerd.Container
-	task containerd.Task
-	ctx  context.Context
+	task  containerd.Task
+	tasks tasks.TasksClient
+	ctx   context.Context
 }
 
 func (n *node) start(t *testing.T, img containerd.Image) *container {
@@ -72,7 +74,7 @@ func (n *node) tryStart(img containerd.Image, userNamespace ...specs.LinuxIDMapp
 		return nil, err
 	}
 
-	c := &container{Container: ctr, ctx: n.ctx}
+	c := &container{Container: ctr, tasks: n.client.TaskService(), ctx: n.ctx}
 	if c.task, err = ctr.NewTask(ctx, cio.NullIO); err != nil {
 		return nil, err
 	}
@@ -169,7 +171,8 @@ func (c *container) exec(args ...string) (string, error) {
 	process := *spec.Process
 	process.Args = args
 	var stdout, stderr bytes.Buffer
-	p, err := c.task.Exec(ctx, fmt.Sprintf("exec%08x", rand.Uint32()), &process, cio.NewCreator(cio.WithStreams(nil, &stdout, &stderr)))
+	id := fmt.Sprintf("exec%08x", rand.Uint32())
+	p, err := c.task.Exec(ctx, id, &process, cio.NewCreator(cio.WithStreams(nil, &stdout, &stderr)))
 	if err != nil {
 		return "", err
 	}
@@ -192,7 +195,15 @@ func (c *container) exec(args ...string) (string, error) {
 		return "", fmt.Errorf("%v: %w", args, ctx.Err())
 	}
 
-	if _, err := p.Delete(ctx); err != nil {
+	// p.Delete cancels the copy of the output before it waits for it, which
+	// loses what the copy has not read yet. Deleting the exec makes the shim
+	// close its end, so the copy runs to the end of the output.
+	if _, err := c.tasks.DeleteProcess(ctx, &tasks.DeleteProcessRequest{ContainerID: c.ID(), ExecID: id}); err != nil {
+		return "", err
+	}
+
+	p.IO().Wait()
+	if err := p.IO().Close(); err != nil {
 		return "", err
 	}
 

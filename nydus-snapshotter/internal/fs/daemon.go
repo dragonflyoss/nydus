@@ -68,7 +68,7 @@ type Daemon struct {
 
 // daemon returns the paths of the daemon serving an image.
 func (f *fileSystem) daemon(cfg *config.Config, id daemonID) *Daemon {
-	instanceDir, runtimeDir := cfg.InstanceDir(string(id)), cfg.RuntimeDir(string(id))
+	instanceDir, runtimeDir := cfg.DaemonInstanceDir(string(id)), cfg.DaemonRuntimeDir(string(id))
 	return &Daemon{
 		Instance: &store.Instance{
 			ChainID:    id.ChainID(),

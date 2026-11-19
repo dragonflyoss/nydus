@@ -7,6 +7,7 @@
 package cache
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestBlob_add(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "a.blob.meta")
-			assert.NoError(t, os.WriteFile(path, make([]byte, 8192), 0o644))
+			assert.NoError(t, os.WriteFile(path, bytes.Repeat([]byte{1}, 8192), 0o644))
 			if tc.link {
 				assert.NoError(t, os.Link(path, filepath.Join(dir, "image.blob.meta")))
 			}

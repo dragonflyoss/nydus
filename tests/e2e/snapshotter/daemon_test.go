@@ -3,7 +3,6 @@ package snapshotter
 import (
 	"fmt"
 	"math/rand/v2"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/registry"
 	"github.com/stretchr/testify/assert"
@@ -167,12 +167,7 @@ func TestDaemonMetrics(t *testing.T) {
 func TestHealth(t *testing.T) {
 	t.Parallel()
 	n := newNode(t)
-	for _, path := range []string{"/livez", "/readyz"} {
-		status, body, err := n.get(path)
-		assert.NoError(t, err)
-		assert.Equal(t, http.StatusOK, status)
-		assert.Equal(t, "ok\n", body)
-	}
+	assert.Eventually(t, n.serving, startTimeout, 100*time.Millisecond)
 }
 
 func TestConfigReload(t *testing.T) {
@@ -237,7 +232,11 @@ func TestSocketActivation(t *testing.T) {
 	n := newNode(t, withSocketActivation())
 	service, socket := n.service+".service", n.service+".socket"
 	img := newImage(t, registry.Start(t), "snapshotter/socket-activation")
-	pulled := n.pull(t, img.nydus)
+	var pulled containerd.Image
+	n.retryUnavailable(t, func() (err error) {
+		pulled, err = n.tryPull(img.nydus, containerd.WithImageHandlerWrapper(snapshotters.AppendInfoHandlerWrapper(img.nydus)))
+		return err
+	})
 	unit := n.unit(t, pulled)
 	first := n.start(t, pulled)
 	assertFiles(t, first, img)
@@ -250,7 +249,11 @@ func TestSocketActivation(t *testing.T) {
 	env.Run(t, "systemctl", "stop", service)
 	assert.Equal(t, listening, show(t, socket, "ActiveState", "InvocationID"))
 	assertFiles(t, first, img)
-	second := n.start(t, pulled)
+	var second *container
+	n.retryUnavailable(t, func() (err error) {
+		second, err = n.tryStart(pulled)
+		return err
+	})
 	assertFiles(t, second, img)
 	reactivated := show(t, service, "ActiveState", "InvocationID")
 	assert.Equal(t, "active", reactivated["ActiveState"])

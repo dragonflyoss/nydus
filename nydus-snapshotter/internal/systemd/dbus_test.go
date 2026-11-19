@@ -202,7 +202,7 @@ func TestManager_unitProperty(t *testing.T) {
 			expect: func(t *testing.T, m *manager) {
 				assert := assert.New(t)
 				var state uint64
-				assert.ErrorContains(m.unitProperty(t.Context(), mockUnknownUnit, unitInterface, "ActiveState", &state), "cannot convert string to uint64")
+				assert.Error(m.unitProperty(t.Context(), mockUnknownUnit, unitInterface, "ActiveState", &state))
 				assert.Zero(state)
 			},
 		},

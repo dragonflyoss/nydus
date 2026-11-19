@@ -37,7 +37,6 @@ func TestServer_Serve(t *testing.T) {
 		name    string
 		method  string
 		path    string
-		ready   error
 		daemons prometheus.GathererFunc
 		expect  func(t *testing.T, code int, body string)
 	}{
@@ -69,47 +68,6 @@ func TestServer_Serve(t *testing.T) {
 			},
 		},
 		{
-			name:   "live",
-			method: http.MethodGet,
-			path:   "/livez",
-			expect: func(t *testing.T, code int, body string) {
-				assert := assert.New(t)
-				assert.Equal(http.StatusOK, code)
-				assert.Equal("ok\n", body)
-			},
-		},
-		{
-			name:   "live while not ready",
-			method: http.MethodGet,
-			path:   "/livez",
-			ready:  errors.New("foo"),
-			expect: func(t *testing.T, code int, body string) {
-				assert := assert.New(t)
-				assert.Equal(http.StatusOK, code)
-			},
-		},
-		{
-			name:   "ready",
-			method: http.MethodGet,
-			path:   "/readyz",
-			expect: func(t *testing.T, code int, body string) {
-				assert := assert.New(t)
-				assert.Equal(http.StatusOK, code)
-				assert.Equal("ok\n", body)
-			},
-		},
-		{
-			name:   "not ready",
-			method: http.MethodGet,
-			path:   "/readyz",
-			ready:  errors.New("foo"),
-			expect: func(t *testing.T, code int, body string) {
-				assert := assert.New(t)
-				assert.Equal(http.StatusServiceUnavailable, code)
-				assert.Equal("foo\n", body)
-			},
-		},
-		{
 			name:   "metrics",
 			method: http.MethodGet,
 			path:   "/metrics",
@@ -122,7 +80,7 @@ func TestServer_Serve(t *testing.T) {
 		{
 			name:   "method not allowed",
 			method: http.MethodPost,
-			path:   "/livez",
+			path:   "/metrics",
 			expect: func(t *testing.T, code int, body string) {
 				assert := assert.New(t)
 				assert.Equal(http.StatusMethodNotAllowed, code)
@@ -137,7 +95,7 @@ func TestServer_Serve(t *testing.T) {
 				daemons = func() ([]*dto.MetricFamily, error) { return nil, nil }
 			}
 
-			s, err := NewServer("127.0.0.1:0", func() error { return tc.ready }, daemons)
+			s, err := NewServer("127.0.0.1:0", daemons)
 			assert.NoError(t, err)
 			served := make(chan error, 1)
 			go func() { served <- s.Serve() }()
@@ -198,7 +156,7 @@ func TestNewServer(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := NewServer(tc.addr, func() error { return nil }, prometheus.NewRegistry())
+			s, err := NewServer(tc.addr, prometheus.NewRegistry())
 			tc.expect(t, s, err)
 		})
 	}

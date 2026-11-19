@@ -13,9 +13,8 @@ import (
 	context "context"
 	reflect "reflect"
 
-	gomock "go.uber.org/mock/gomock"
-
 	registry "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockKeychain is a mock of Keychain interface.

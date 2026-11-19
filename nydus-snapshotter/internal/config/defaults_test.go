@@ -37,8 +37,8 @@ func TestNew(t *testing.T) {
 			name: "every call returns a config of its own",
 			expect: func(t *testing.T, cfg *Config) {
 				assert := assert.New(t)
-				cfg.Root = "/var/lib/other"
-				assert.Equal(DefaultRoot, New().Root)
+				cfg.RootDir = "/var/lib/other"
+				assert.Equal(DefaultRootDir, New().RootDir)
 			},
 		},
 	}

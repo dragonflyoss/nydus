@@ -195,6 +195,46 @@ func TestRegistryKey_matches(t *testing.T) {
 				assert.False(matched)
 			},
 		},
+		{
+			name:   "same port",
+			key:    "registry.example.com:5000",
+			target: "registry.example.com:5000/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(matched)
+			},
+		},
+		{
+			name:   "ipv6 host",
+			key:    "[fd00::1]",
+			target: "[fd00::1]/team/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(matched)
+			},
+		},
+		{
+			name:   "ipv6 host with the same port",
+			key:    "[fd00::1]:5000",
+			target: "[fd00::1]:5000/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(matched)
+			},
+		},
+		{
+			name:   "ipv6 host without the port",
+			key:    "[fd00::1]:5000",
+			target: "[fd00::1]/app",
+			expect: func(t *testing.T, matched bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(matched)
+			},
+		},
 	}
 
 	for _, tc := range tests {

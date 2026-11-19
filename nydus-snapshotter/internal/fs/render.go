@@ -20,8 +20,12 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
 )
 
-// renderOptions are the per-daemon values filled into the template.
+// renderOptions are the values of a daemon's config.
 type renderOptions struct {
+	// nydusd holds what all daemons share: runtime_dir and the backend,
+	// storage and prefetch sections.
+	nydusd config.NydusdDaemonConfig
+
 	// cacheDir is the shared blob cache, storage.dir.
 	cacheDir string
 
@@ -40,24 +44,13 @@ type renderOptions struct {
 	// caCert is the CA bundle, backend.config.http.tls.ca_cert.
 	caCert string
 
-	// dragonfly is backend.config.dragonfly, ignored without a scheduler.
-	dragonfly config.NydusdDragonflyConfig
-
 	// prefetchScope is prefetch.scope.
 	prefetchScope string
 }
 
-// document is a decoded YAML mapping.
-type document map[string]any
-
 // renderConfig renders the daemon's config and writes it into the daemon's
 // runtime dir, on tmpfs because the config holds the credential.
 func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, prefetchScope string) error {
-	template, err := os.ReadFile(cfg.Nydusd.Template)
-	if err != nil {
-		return fmt.Errorf("read nydusd template: %w", err)
-	}
-
 	endpoint, err := f.hosts.Resolve(ref.Host)
 	if err != nil {
 		return err
@@ -74,17 +67,17 @@ func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Da
 	}
 
 	opts := &renderOptions{
+		nydusd:        cfg.Nydusd.Config,
 		cacheDir:      cfg.CacheDir(),
 		addr:          endpoint.Addr,
 		repository:    ref.Repository,
 		auth:          credential,
 		skipVerify:    endpoint.SkipVerify,
 		caCert:        caCert,
-		dragonfly:     cfg.Nydusd.Dragonfly,
-		prefetchScope: cmp.Or(prefetchScope, cfg.Nydusd.PrefetchScope),
+		prefetchScope: cmp.Or(prefetchScope, cfg.Nydusd.Config.Prefetch.Scope),
 	}
 
-	data, err := opts.render(template)
+	data, err := opts.render()
 	if err != nil {
 		return err
 	}
@@ -120,88 +113,59 @@ func (f *fileSystem) caBundle(cas []string, dir string) (string, error) {
 	return path, nil
 }
 
-// render fills the per-daemon values into a nydus-config template. The
-// snapshotter owns these keys; every other key is passed through for nydus to
-// validate, refer to the Storage config section of docs/nydus.md.
-func (r *renderOptions) render(template []byte) ([]byte, error) {
-	root := document{}
-	if err := yaml.Unmarshal(template, &root); err != nil {
-		return nil, fmt.Errorf("decode nydusd template: %w", err)
+// render returns the daemon's config, refer to the Storage config section of
+// docs/nydus.md.
+//
+//	snapshotter config   nydusd.config, key for key
+//	image reference      backend.config.{addr,repository}
+//	keychain             backend.config.auth
+//	certs.d hosts.toml   backend.config.http.tls
+//	nydus-prefetch label prefetch.scope
+func (r *renderOptions) render() ([]byte, error) {
+	registryConfig := r.nydusd.Backend.Config
+	httpConfig := map[string]any{
+		"request_timeout":      registryConfig.HTTP.RequestTimeout,
+		"request_read_timeout": registryConfig.HTTP.RequestReadTimeout,
+		"max_retries":          registryConfig.HTTP.MaxRetries,
 	}
-
-	storage, err := root.child("storage")
-	if err != nil {
-		return nil, err
-	}
-	storage["dir"] = r.cacheDir
-
-	prefetch, err := root.child("prefetch")
-	if err != nil {
-		return nil, err
-	}
-	prefetch["scope"] = r.prefetchScope
-
-	backend, err := root.child("backend")
-	if err != nil {
-		return nil, err
-	}
-	backend["type"] = "registry"
-
-	registryConfig, err := backend.child("config")
-	if err != nil {
-		return nil, err
-	}
-	registryConfig["addr"] = r.addr
-	registryConfig["repository"] = r.repository
-	delete(registryConfig, "auth")
-	if r.auth != "" {
-		registryConfig["auth"] = r.auth
+	if registryConfig.HTTP.Proxy.Addr != "" {
+		httpConfig["proxy"] = registryConfig.HTTP.Proxy
 	}
 
 	if r.skipVerify || r.caCert != "" {
-		httpConfig, err := registryConfig.child("http")
-		if err != nil {
-			return nil, err
-		}
-
-		tls, err := httpConfig.child("tls")
-		if err != nil {
-			return nil, err
-		}
-		tls["skip_verify"] = r.skipVerify
+		tls := map[string]any{"skip_verify": r.skipVerify}
 		if r.caCert != "" {
 			tls["ca_cert"] = r.caCert
 		}
+		httpConfig["tls"] = tls
 	}
 
-	if r.dragonfly.SchedulerEndpoint != "" {
-		registryConfig["dragonfly"] = r.dragonfly
+	registry := map[string]any{
+		"addr":       r.addr,
+		"repository": r.repository,
+		"http":       httpConfig,
+		"fallback":   registryConfig.Fallback,
+	}
+	if r.auth != "" {
+		registry["auth"] = r.auth
 	}
 
-	data, err := yaml.Marshal(root)
+	if registryConfig.Dragonfly.SchedulerEndpoint != "" {
+		registry["dragonfly"] = registryConfig.Dragonfly
+	}
+
+	storage, prefetch := r.nydusd.Storage, r.nydusd.Prefetch
+	storage.Dir, prefetch.Scope = r.cacheDir, r.prefetchScope
+
+	data, err := yaml.Marshal(map[string]any{
+		"runtime_dir": r.nydusd.RuntimeDir,
+		"backend":     map[string]any{"type": "registry", "config": registry},
+		"storage":     storage,
+		"prefetch":    prefetch,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("encode nydusd config: %w", err)
 	}
 
 	return data, nil
-}
-
-// child returns the mapping under key, creating it when absent.
-func (d document) child(key string) (document, error) {
-	v, ok := d[key]
-	if !ok || v == nil {
-		child := document{}
-		d[key] = child
-		return child, nil
-	}
-
-	switch child := v.(type) {
-	case document:
-		return child, nil
-	case map[string]any:
-		d[key] = document(child)
-		return child, nil
-	default:
-		return nil, fmt.Errorf("nydusd template: %s is %T, want a mapping", key, v)
-	}
 }

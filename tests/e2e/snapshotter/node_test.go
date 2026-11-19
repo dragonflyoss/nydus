@@ -25,11 +25,15 @@ import (
 	dockerconfig "github.com/containerd/containerd/v2/core/remotes/docker/config"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/snapshotters"
+	"github.com/containerd/errdefs"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/opencontainers/image-spec/identity"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -184,18 +188,16 @@ func (n *node) writeConfig(t *testing.T) {
 	}
 
 	config, err := yaml.Marshal(map[string]any{
-		"version":  1,
-		"root":     n.root,
-		"address":  n.snapshotterAddress(),
-		"run_dir":  n.runDir,
-		"log":      map[string]any{"level": "debug"},
-		"metrics":  map[string]any{"address": n.metricsAddress},
-		"registry": map[string]any{"config_path": n.certsDir()},
-		"auth":     auth,
+		"root_dir":    n.root,
+		"runtime_dir": n.runDir,
+		"grpc":        map[string]any{"addr": n.snapshotterAddress()},
+		"log":         map[string]any{"level": "debug"},
+		"metrics":     map[string]any{"addr": n.metricsAddress},
+		"registry":    map[string]any{"config_path": n.certsDir()},
+		"auth":        auth,
 		"nydusd": map[string]any{
-			"binary":   nydus,
-			"template": deployPath(t, "nydus-snapshotter", "nydusd.template.yaml"),
-			"log_dir":  n.daemonLogDir(),
+			"binary":  nydus,
+			"log_dir": n.daemonLogDir(),
 		},
 		"cgroup": cgroup,
 	})
@@ -252,6 +254,19 @@ func (n *node) get(path string) (int, string, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body), err
+}
+
+func (n *node) serving() bool {
+	conn, err := grpc.NewClient("unix://"+n.snapshotterAddress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(n.ctx, 10*time.Second)
+	defer cancel()
+	resp, err := grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+	return err == nil && resp.GetStatus() == grpc_health_v1.HealthCheckResponse_SERVING
 }
 
 func (n *node) snapshotterAddress() string {
@@ -486,6 +501,17 @@ func (n *node) pull(t *testing.T, ref string, opts ...containerd.RemoteOpt) cont
 	}
 
 	return img
+}
+
+func (n *node) retryUnavailable(t *testing.T, try func() error) {
+	t.Helper()
+	var err error
+	if !assert.Eventually(t, func() bool {
+		err = try()
+		return !errdefs.IsUnavailable(err)
+	}, startTimeout, 200*time.Millisecond) || !assert.NoError(t, err) {
+		t.FailNow()
+	}
 }
 
 func (n *node) tryPull(ref string, opts ...containerd.RemoteOpt) (containerd.Image, error) {

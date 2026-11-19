@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 func TestInstaller_nydusVersion(t *testing.T) {
@@ -214,7 +215,7 @@ func TestInstaller_switchVersion(t *testing.T) {
 		{
 			name: "keep a version that cannot be removed",
 			prepare: func(t *testing.T, binDir string) {
-				mountTmpfs(t, filepath.Join(binDir, "1.0.0"), "")
+				testutil.MountTmpfs(t, filepath.Join(binDir, "1.0.0"), "")
 			},
 			expect: func(t *testing.T, binDir string, err error) {
 				assert := assert.New(t)

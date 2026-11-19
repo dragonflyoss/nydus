@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
@@ -28,6 +27,9 @@ import (
 	sddaemon "github.com/coreos/go-systemd/v22/daemon"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/cache"
@@ -54,6 +56,10 @@ const (
 
 	// reloadTimeout bounds applying a reloaded config.
 	reloadTimeout = time.Minute
+
+	// syncedPollInterval is how often the registry credentials are checked
+	// for their first sync, as client-go polls an informer's.
+	syncedPollInterval = 100 * time.Millisecond
 )
 
 // Server is the snapshotter process.
@@ -86,10 +92,10 @@ type Server struct {
 	// listener is the gRPC listener.
 	listener net.Listener
 
-	// serving reports whether gRPC is serving.
-	serving atomic.Bool
+	// health answers the gRPC health checking protocol on the same socket.
+	health *health.Server
 
-	// metrics serves /metrics, /livez and /readyz; nil when disabled.
+	// metrics serves /metrics; nil when disabled.
 	metrics *metrics.Server
 
 	// cancel stops the background workers.
@@ -102,7 +108,7 @@ type Server struct {
 // New returns a server. Its background workers start once every component
 // is built and stop on Stop.
 func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, error) {
-	for _, dir := range []string{cfg.Root, cfg.RunDir} {
+	for _, dir := range []string{cfg.RootDir, cfg.RuntimeDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
@@ -111,8 +117,8 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 	// Rendered daemon configs hold credentials, which stay off persistent
 	// disk only on tmpfs; a failed statfs is caught by the first daemon.
 	var stat unix.Statfs_t
-	if err := unix.Statfs(cfg.RunDir, &stat); err == nil && stat.Type != unix.TMPFS_MAGIC {
-		log.G(ctx).WithField("path", cfg.RunDir).Warn("run_dir is not on tmpfs, so rendered daemon configs keep credentials on disk")
+	if err := unix.Statfs(cfg.RuntimeDir, &stat); err == nil && stat.Type != unix.TMPFS_MAGIC {
+		log.G(ctx).WithField("path", cfg.RuntimeDir).Warn("runtime_dir is not on tmpfs, so rendered daemon configs keep credentials on disk")
 	}
 
 	// A stop job takes up to twice TimeoutStopSec, SIGTERM then SIGKILL,
@@ -132,6 +138,7 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 	s.wg.Go(func() { s.snapshotter.Run(ctx) })
 	s.wg.Go(func() { s.gc.Run(ctx) })
 	s.wg.Go(func() { s.fileSystem.Run(ctx) })
+	s.wg.Go(func() { s.reportServing(ctx) })
 	watcher := config.NewWatcher(configPath, cfg)
 	s.wg.Go(func() { watcher.Run(ctx, s.reload) })
 	if s.metrics != nil {
@@ -148,7 +155,7 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 // setup builds the components in dependency order.
 func (s *Server) setup(ctx context.Context) error {
 	var err error
-	s.store, err = store.New(filepath.Join(s.cfg.Root, "nydusd.db"), store.DefaultOpenTimeout)
+	s.store, err = store.New(filepath.Join(s.cfg.RootDir, "nydusd.db"), store.DefaultOpenTimeout)
 	if err != nil {
 		return err
 	}
@@ -167,13 +174,13 @@ func (s *Server) setup(ctx context.Context) error {
 		return fmt.Errorf("init nydus file system: %w", err)
 	}
 
-	s.snapshotter, err = snapshot.New(s.cfg.Root, s.fileSystem)
+	s.snapshotter, err = snapshot.New(s.cfg.RootDir, s.fileSystem)
 	if err != nil {
 		return fmt.Errorf("init snapshotter: %w", err)
 	}
 
-	if s.cfg.Metrics.Address != "" {
-		s.metrics, err = metrics.NewServer(s.cfg.Metrics.Address, s.ready, s.fileSystem)
+	if s.cfg.Metrics.Addr != "" {
+		s.metrics, err = metrics.NewServer(s.cfg.Metrics.Addr, s.fileSystem)
 		if err != nil {
 			return err
 		}
@@ -195,21 +202,25 @@ func (s *Server) setup(ctx context.Context) error {
 	)
 	snapshotsapi.RegisterSnapshotsServer(s.grpc, snapshotservice.FromSnapshotter(s.snapshotter))
 
+	// Health is the gRPC health checking protocol, served as containerd
+	// serves its own, refer to
+	// https://github.com/containerd/containerd/blob/main/plugins/services/healthcheck/service.go.
+	s.health = health.NewServer()
+	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
+	grpc_health_v1.RegisterHealthServer(s.grpc, s.health)
+
 	return nil
 }
 
 // Serve serves gRPC until Stop, and tells systemd the snapshotter is ready.
 func (s *Server) Serve() error {
-	s.serving.Store(true)
-	defer s.serving.Store(false)
-
 	// The listener is bound, so containerd's calls queue until Serve accepts
 	// them, refer to https://github.com/containerd/containerd/blob/main/cmd/containerd/command/notify_systemd.go.
 	if _, err := sddaemon.SdNotify(false, sddaemon.SdNotifyReady); err != nil {
 		log.L.WithError(err).Warn("notify systemd ready")
 	}
 
-	log.L.WithField("address", s.cfg.Address).Info("serving snapshotter")
+	log.L.WithField("address", s.cfg.GRPC.Addr).Info("serving snapshotter")
 	if err := s.grpc.Serve(s.listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}
@@ -225,6 +236,8 @@ func (s *Server) Stop() {
 	}
 
 	if s.grpc != nil {
+		// Health checks answer NOT_SERVING while the calls drain.
+		s.health.Shutdown()
 		stopped := make(chan struct{})
 		go func() {
 			s.grpc.GracefulStop()
@@ -263,17 +276,22 @@ func (s *Server) Stop() {
 	s.systemd.Close()
 }
 
-// ready reports why the snapshotter cannot serve yet, nil once it can.
-func (s *Server) ready() error {
-	if !s.serving.Load() {
-		return errors.New("grpc is not serving")
+// reportServing sets the health status to SERVING once the registry
+// credentials are synced, refer to
+// https://github.com/grpc/grpc/blob/master/doc/health-checking.md.
+//
+//	Check answers ─▶ the snapshotter is alive
+//	NOT_SERVING   ─▶ credentials are not synced yet, or the snapshotter stops
+//	SERVING       ─▶ ready
+func (s *Server) reportServing(ctx context.Context) {
+	// The poll fails only once ctx is done.
+	if err := wait.PollUntilContextCancel(ctx, syncedPollInterval, true, func(context.Context) (bool, error) {
+		return s.keychain.Synced(), nil
+	}); err != nil {
+		return
 	}
 
-	if !s.keychain.Synced() {
-		return errors.New("registry credentials are not synced")
-	}
-
-	return nil
+	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 }
 
 // reload applies the reloadable sections of a changed config file.
@@ -283,7 +301,7 @@ func (s *Server) reload(ctx context.Context, next *config.Config) {
 
 	merged, restartOnly := s.cfg.Merge(next)
 	if restartOnly {
-		log.G(ctx).Warn("config changes outside cgroup and nydusd.dragonfly apply after a restart")
+		log.G(ctx).Warn("config changes outside cgroup and nydusd.config apply after a restart")
 	}
 
 	if err := s.fileSystem.Reload(ctx, merged); err != nil {
@@ -308,7 +326,7 @@ func (s *Server) listen(ctx context.Context) (net.Listener, error) {
 		return listeners[0], nil
 	}
 
-	address := s.cfg.Address
+	address := s.cfg.GRPC.Addr
 	if err := os.MkdirAll(filepath.Dir(address), 0o700); err != nil {
 		return nil, fmt.Errorf("create socket dir: %w", err)
 	}

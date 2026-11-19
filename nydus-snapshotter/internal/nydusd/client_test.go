@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+var mockUsername = "user"
+
 func TestClient_UpdateAuth(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -34,7 +36,7 @@ func TestClient_UpdateAuth(t *testing.T) {
 					Username string `json:"username"`
 					Password string `json:"password"`
 				}
-				if r.Method != http.MethodPut || r.URL.Path != endpointBackendAuthBasic || json.NewDecoder(r.Body).Decode(&body) != nil || body.Username != "user" || body.Password != "pass" {
+				if r.Method != http.MethodPut || r.URL.Path != endpointBackendAuthBasic || json.NewDecoder(r.Body).Decode(&body) != nil || body.Username != mockUsername || body.Password != "pass" {
 					w.WriteHeader(http.StatusTeapot)
 					return
 				}
@@ -80,6 +82,78 @@ func TestClient_UpdateAuth(t *testing.T) {
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.ErrorIs(err, errdefs.ErrPermissionDenied)
+			},
+		},
+		{
+			name: "password holding a colon",
+			auth: "dXNlcjpwYTpzcw==",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Username string `json:"username"`
+					Password string `json:"password"`
+				}
+				if json.NewDecoder(r.Body).Decode(&body) != nil || body.Username != mockUsername || body.Password != "pa:ss" {
+					w.WriteHeader(http.StatusTeapot)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+			},
+		},
+		{
+			name: "empty password",
+			auth: "dXNlcjo=",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Username string `json:"username"`
+					Password string `json:"password"`
+				}
+				if json.NewDecoder(r.Body).Decode(&body) != nil || body.Username != mockUsername || body.Password != "" {
+					w.WriteHeader(http.StatusTeapot)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+			},
+		},
+		{
+			name: "credential too large",
+			auth: "dXNlcjpwYXNz",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+			},
+		},
+		{
+			name: "auth without a colon",
+			auth: "dXNlcg==",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+			},
+		},
+		{
+			name: "auth that is not UTF-8",
+			auth: "dXNlcjpw5HNz",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+				assert.NotContains(err.Error(), "user:p")
 			},
 		},
 		{

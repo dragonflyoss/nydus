@@ -255,13 +255,13 @@ impl FetchTokenResponse {
 ///
 /// request ─▶ authorize: send `authorization` ───────────────────▶ 2xx
 ///             └─ 401 ─▶ invalidate: forget it
-///                     ─▶ authenticate: answer the challenge and keep the answer
+///                     ─▶ authenticate: answer the challenge, keep and send the answer
 ///                          Basic  ─▶ `basic`
 ///                          Bearer ─▶ a token fetched with `basic`, until it expires
-///                     ─▶ authorize: send the answer
 ///
 /// set_basic   forgets a kept answer, keeps a bearer token given to the daemon
 /// set_bearer  replaces `authorization`, keeps `basic`
+/// either, during a handshake ─▶ the challenge is answered again
 /// ```
 pub(crate) struct Authorizer {
     /// The configured basic credentials, `None` when the config has no `auth`,
@@ -273,8 +273,8 @@ pub(crate) struct Authorizer {
     /// a `401` invalidates it or [`Authorizer::set_bearer`] replaces it.
     authorization: RwLock<Option<Authorization>>,
 
-    /// The number of times a credential was replaced, so a handshake that
-    /// began before keeps nothing.
+    /// The number of times a credential was replaced, bumped under the lock
+    /// of `authorization`, so a handshake that began before keeps nothing.
     generation: AtomicU64,
 
     /// The lock one handshake holds while it answers a challenge, so a burst
@@ -317,11 +317,22 @@ impl Authorizer {
 
         let basic = Authorization::basic(&STANDARD.encode(format!("{username}:{password}")))?;
 
-        // Bump the generation between the two writes, so a handshake in
-        // flight either sees the bump or has its answer forgotten here.
-        *self.basic.write().unwrap() = Some(basic);
-        self.generation.fetch_add(1, Ordering::SeqCst);
+        // The same credentials replace nothing, so a push that repeats them
+        // costs the daemon no token.
+        {
+            let mut current = self.basic.write().unwrap();
+            if current
+                .as_ref()
+                .is_some_and(|current| current.value() == basic.value())
+            {
+                return Ok(());
+            }
+
+            *current = Some(basic);
+        }
+
         let mut kept = self.authorization.write().unwrap();
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if kept.as_ref().is_some_and(Authorization::is_answer) {
             *kept = None;
         }
@@ -335,11 +346,9 @@ impl Authorizer {
     /// An empty `token`, or one a header cannot carry, is `InvalidInput`.
     pub(crate) fn set_bearer(&self, token: &str) -> io::Result<()> {
         let bearer = Authorization::bearer(token, None)?;
-
-        // Bump the generation first, so a handshake in flight never
-        // replaces the token with its answer.
+        let mut kept = self.authorization.write().unwrap();
         self.generation.fetch_add(1, Ordering::SeqCst);
-        *self.authorization.write().unwrap() = Some(bearer);
+        *kept = Some(bearer);
         Ok(())
     }
 
@@ -371,44 +380,47 @@ impl Authorizer {
     }
 
     /// Answers `challenge` with the basic credentials or a bearer token fetched
-    /// through `fetcher`, one handshake at a time.
+    /// through `fetcher`, one handshake at a time, and returns the header
+    /// value to send.
     ///
-    /// An answer to credentials [`Authorizer::set_basic`] or
-    /// [`Authorizer::set_bearer`] replaced meanwhile is dropped.
+    /// A challenge whose answer a replaced credential outdated meanwhile is
+    /// answered again, so the request is never sent without one.
     pub(crate) async fn authenticate(
         &self,
         fetcher: &impl Fetcher,
         challenge: Challenge,
-    ) -> io::Result<()> {
+    ) -> io::Result<HeaderValue> {
         let _handshake = self.handshake.lock().await;
-        if self
-            .authorization
-            .read()
-            .unwrap()
-            .as_ref()
-            .is_some_and(Authorization::is_valid)
-        {
-            return Ok(());
+        loop {
+            // Check and load under the lock the setters bump and replace
+            // under, so a replacement lands wholly before or after.
+            let generation = {
+                let kept = self.authorization.read().unwrap();
+                if let Some(valid) = kept.as_ref().filter(|kept| kept.is_valid()) {
+                    return Ok(valid.value().clone());
+                }
+
+                self.generation.load(Ordering::SeqCst)
+            };
+
+            let authorization = match &challenge {
+                Challenge::Basic => self.basic.read().unwrap().clone().ok_or_else(|| {
+                    io::Error::other("registry requires basic-auth credentials".to_string())
+                })?,
+                Challenge::Bearer {
+                    realm,
+                    service,
+                    scope,
+                } => self.fetch_token(fetcher, realm, service, scope).await?,
+            };
+
+            let mut kept = self.authorization.write().unwrap();
+            if self.generation.load(Ordering::SeqCst) == generation {
+                let value = authorization.value().clone();
+                *kept = Some(authorization);
+                return Ok(value);
+            }
         }
-
-        let generation = self.generation.load(Ordering::SeqCst);
-        let authorization = match challenge {
-            Challenge::Basic => self.basic.read().unwrap().clone().ok_or_else(|| {
-                io::Error::other("registry requires basic-auth credentials".to_string())
-            })?,
-            Challenge::Bearer {
-                realm,
-                service,
-                scope,
-            } => self.fetch_token(fetcher, &realm, &service, &scope).await?,
-        };
-
-        let mut kept = self.authorization.write().unwrap();
-        if self.generation.load(Ordering::SeqCst) == generation {
-            *kept = Some(authorization);
-        }
-
-        Ok(())
     }
 
     /// Fetches a bearer token from `realm` through `fetcher`, never Dragonfly,
@@ -648,7 +660,10 @@ mod tests {
             None,
         )
         .unwrap();
-        let test_cases: Vec<(Option<&str>, fn(io::Result<()>, Option<HeaderValue>))> = vec![
+        let test_cases: Vec<(
+            Option<&str>,
+            fn(io::Result<HeaderValue>, Option<HeaderValue>),
+        )> = vec![
             (Some("YWxpY2U6c2VjcmV0"), |result, header| {
                 assert!(result.is_ok());
                 assert_eq!(header.unwrap(), "Basic YWxpY2U6c2VjcmV0");
@@ -744,6 +759,13 @@ mod tests {
             ),
             (("bob", ""), fetched, None, None, "Basic Ym9iOg=="),
             (("bob", "pa:ss"), fetched, None, None, "Basic Ym9iOnBhOnNz"),
+            (
+                ("alice", "secret"),
+                fetched,
+                None,
+                Some("Bearer xyz"),
+                "Basic YWxpY2U6c2VjcmV0",
+            ),
             (
                 ("bob", "hunter2"),
                 None,
@@ -850,7 +872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_keeps_no_token_fetched_before_a_credential_is_replaced() {
+    async fn authenticate_answers_again_when_a_credential_is_replaced_meanwhile() {
         let http_client = Http::new(
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -861,39 +883,53 @@ mod tests {
             None,
         )
         .unwrap();
-        let test_cases: Vec<(fn(&Authorizer) -> io::Result<()>, Option<&str>)> = vec![
-            (|_| Ok(()), Some("Bearer abc")),
-            (|authorizer| authorizer.set_basic("bob", "hunter2"), None),
+        let test_cases: Vec<(fn(&Authorizer) -> io::Result<()>, &str, Vec<&str>)> = vec![
+            (|_| Ok(()), "Bearer abc", vec!["Basic YWxpY2U6c2VjcmV0"]),
+            (
+                |authorizer| authorizer.set_basic("bob", "hunter2"),
+                "Bearer def",
+                vec!["Basic YWxpY2U6c2VjcmV0", "Basic Ym9iOmh1bnRlcjI="],
+            ),
             (
                 |authorizer| authorizer.set_bearer("given"),
-                Some("Bearer given"),
+                "Bearer given",
+                vec!["Basic YWxpY2U6c2VjcmV0"],
             ),
         ];
 
-        for (replace, expected) in test_cases {
+        for (replace, expected, fetches) in test_cases {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let realm = format!("http://{}/token", listener.local_addr().unwrap());
             let fetched = std::sync::Arc::new(tokio::sync::Notify::new());
             let (release, released) = std::sync::mpsc::channel::<()>();
-            let notify = fetched.clone();
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (notify, recorded, count) = (fetched.clone(), requests.clone(), fetches.len());
             std::thread::spawn(move || {
                 use std::io::{Read, Write};
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                while !request.ends_with(b"\r\n\r\n") {
-                    stream.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
+                for (i, token) in ["abc", "def"].into_iter().take(count).enumerate() {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                    }
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8(request).unwrap());
+                    if i == 0 {
+                        notify.notify_one();
+                        released.recv().unwrap();
+                    }
+                    let body = format!(r#"{{"token":"{token}","expires_in":300}}"#);
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
                 }
-                notify.notify_one();
-                released.recv().unwrap();
-                let body = r#"{"token":"abc","expires_in":300}"#;
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                )
-                .unwrap();
             });
             let authorizer = Authorizer::new(Some("YWxpY2U6c2VjcmV0"), None).unwrap();
             let challenge = Challenge::Bearer {
@@ -902,21 +938,33 @@ mod tests {
                 scope: String::new(),
             };
 
-            let (result, ()) =
+            let (sent, ()) =
                 tokio::join!(authorizer.authenticate(&http_client, challenge), async {
                     fetched.notified().await;
                     replace(&authorizer).unwrap();
                     release.send(()).unwrap();
                 });
 
-            assert!(result.is_ok());
+            assert_eq!(sent.unwrap(), expected);
             let mut headers = HeaderMap::new();
             authorizer.authorize(&mut headers);
-            assert_eq!(
-                headers.get(AUTHORIZATION),
-                expected.map(HeaderValue::from_static).as_ref(),
-                "{expected:?}"
-            );
+            assert_eq!(headers[AUTHORIZATION], expected);
+            let sent_with: Vec<String> = requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| {
+                    request
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(": ")
+                                .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                                .map(|(_, value)| value.to_string())
+                        })
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(sent_with, fetches, "{expected}");
         }
     }
 

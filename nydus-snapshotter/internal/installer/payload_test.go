@@ -17,6 +17,7 @@ import (
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd/mocks"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 func TestFile_installed(t *testing.T) {
@@ -31,6 +32,7 @@ func TestFile_installed(t *testing.T) {
 			file: &file{perm: 0o644, data: []byte("data")},
 			prepare: func(t *testing.T, target string) {
 				assert.NoError(t, os.WriteFile(target, []byte("data"), 0o644))
+				assert.NoError(t, os.Chmod(target, 0o644))
 			},
 			expect: func(t *testing.T, installed bool, err error) {
 				assert := assert.New(t)
@@ -43,6 +45,7 @@ func TestFile_installed(t *testing.T) {
 			file: &file{perm: 0o755, src: "testdata/payload"},
 			prepare: func(t *testing.T, target string) {
 				assert.NoError(t, os.WriteFile(target, []byte("payload\n"), 0o755))
+				assert.NoError(t, os.Chmod(target, 0o755))
 			},
 			expect: func(t *testing.T, installed bool, err error) {
 				assert := assert.New(t)
@@ -275,7 +278,7 @@ func TestFile_write(t *testing.T) {
 			name: "file system without a free inode",
 			file: &file{perm: 0o644, data: []byte("data")},
 			prepare: func(t *testing.T, target string) {
-				mountTmpfs(t, filepath.Dir(target), "nr_inodes=1")
+				testutil.MountTmpfs(t, filepath.Dir(target), "nr_inodes=1")
 			},
 			expect: func(t *testing.T, target string, err error) {
 				assert := assert.New(t)
@@ -288,7 +291,7 @@ func TestFile_write(t *testing.T) {
 			name: "leave no temporary file when the file system is full",
 			file: &file{perm: 0o644, data: make([]byte, 1<<20)},
 			prepare: func(t *testing.T, target string) {
-				mountTmpfs(t, filepath.Dir(target), "size=4k")
+				testutil.MountTmpfs(t, filepath.Dir(target), "size=4k")
 			},
 			expect: func(t *testing.T, target string, err error) {
 				assert := assert.New(t)
@@ -319,21 +322,21 @@ func TestInstaller_syncConfig(t *testing.T) {
 	}{
 		{
 			name:   "copy a changed config without restarting",
-			update: map[string]string{"config/config.yaml": "version: 1\ncgroup:\n  memory_max: \"4GiB\"\n"},
+			update: map[string]string{"config/config.yaml": "cgroup:\n  memory_max: \"4GiB\"\n"},
 			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assertFile(t, hostPath(t, cfg, config.DefaultPath), "version: 1\ncgroup:\n  memory_max: \"4GiB\"\n", 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultPath), "cgroup:\n  memory_max: \"4GiB\"\n", 0o644)
 				assertFile(t, hostPath(t, cfg, restartPending), mockServiceRestart, 0o644)
 			},
 		},
 		{
-			name:   "copy a changed template without a pending restart",
-			update: map[string]string{"config/nydusd.template.yaml": "backend: {}\n"},
+			name:   "copy a changed hosts.toml without a pending restart",
+			update: map[string]string{"config/certs.d/registry.example.com/hosts.toml": mockMirrorHostsTOML},
 			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assertFile(t, hostPath(t, cfg, config.DefaultNydusdTemplate), "backend: {}\n", 0o644)
+				assertFile(t, hostPath(t, cfg, config.DefaultRegistryConfigPath+"/registry.example.com/hosts.toml"), mockMirrorHostsTOML, 0o644)
 				assert.NoFileExists(hostPath(t, cfg, restartPending))
 			},
 		},
@@ -350,10 +353,10 @@ func TestInstaller_syncConfig(t *testing.T) {
 		},
 		{
 			name:   "keep the host config when the new one is invalid",
-			update: map[string]string{"config/config.yaml": "version: 2\n"},
+			update: map[string]string{"config/config.yaml": mockInvalidConfig},
 			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "unsupported config version 2")
+				assert.ErrorContains(err, "invalid log.level")
 				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.yaml"), 0o644)
 			},
 		},
@@ -428,18 +431,4 @@ func TestInstaller_clearRestarts(t *testing.T) {
 			tc.expect(t, cfg, New(cfg, nil).clearRestarts())
 		})
 	}
-}
-
-func mountTmpfs(t *testing.T, dir, options string) {
-	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("mounts as root")
-	}
-
-	assert.NoError(t, os.MkdirAll(dir, 0o755))
-	if !assert.NoError(t, unix.Mount("tmpfs", dir, "tmpfs", 0, options)) {
-		t.FailNow()
-	}
-
-	t.Cleanup(func() { assert.NoError(t, unix.Unmount(dir, unix.MNT_DETACH)) })
 }
