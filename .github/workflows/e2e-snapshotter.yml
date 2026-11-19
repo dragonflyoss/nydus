@@ -104,7 +104,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         run: |
           containerd="containerd-${{ matrix.containerd }}-linux-amd64.tar.gz"
-          curl -fsSL --retry 2 -O "https://github.com/containerd/containerd/releases/download/v${{ matrix.containerd }}/${containerd}"{,.sha256sum}
+          curl -fsSL --retry 2 --remote-name-all "https://github.com/containerd/containerd/releases/download/v${{ matrix.containerd }}/${containerd}"{,.sha256sum}
           sha256sum -c "${containerd}.sha256sum"
           mkdir -p containerd && tar -xzf "${containerd}" -C containerd
           curl -fsSL --retry 2 -O "https://github.com/opencontainers/runc/releases/download/v${RUNC_VERSION}/runc.amd64" \

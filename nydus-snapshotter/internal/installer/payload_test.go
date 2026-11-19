@@ -386,7 +386,7 @@ func TestInstaller_clearRestarts(t *testing.T) {
 		{
 			name: "forget the pending units",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.HostRoot, map[string]string{restartPending: mockServiceRestart})
+				writeFiles(t, cfg.RootfsDir, map[string]string{restartPending: mockServiceRestart})
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
@@ -415,7 +415,7 @@ func TestInstaller_clearRestarts(t *testing.T) {
 		{
 			name: "host path that cannot be resolved",
 			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.HostRoot, "run")))
+				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.RootfsDir, "run")))
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)

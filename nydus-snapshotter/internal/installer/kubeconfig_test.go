@@ -98,7 +98,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			name: "follow the host config when the payload config is invalid",
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.HostRoot, map[string]string{config.DefaultPath: mockKubeSecretConfig})
+				writeFiles(t, cfg.RootfsDir, map[string]string{config.DefaultPath: mockKubeSecretConfig})
 				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": mockInvalidConfig})
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
@@ -148,7 +148,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			name: "host directory that cannot be created",
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.HostRoot, map[string]string{filepath.Dir(config.DefaultAuthKubeconfig): ""})
+				writeFiles(t, cfg.RootfsDir, map[string]string{filepath.Dir(config.DefaultAuthKubeconfig): ""})
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
@@ -159,7 +159,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			name: "host path that cannot be resolved",
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.HostRoot, "run")))
+				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.RootfsDir, "run")))
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
@@ -171,7 +171,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *Config) {
 				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": mockInvalidConfig})
-				assert.NoError(t, os.Symlink("etc", filepath.Join(cfg.HostRoot, "etc")))
+				assert.NoError(t, os.Symlink("etc", filepath.Join(cfg.RootfsDir, "etc")))
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
@@ -183,7 +183,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *Config) {
 				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": mockInvalidConfig})
-				writeFiles(t, cfg.HostRoot, map[string]string{config.DefaultPath: mockInvalidConfig})
+				writeFiles(t, cfg.RootfsDir, map[string]string{config.DefaultPath: mockInvalidConfig})
 			},
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)

@@ -152,7 +152,7 @@ func TestInstaller_Run(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "foo")
-				entries, err := os.ReadDir(cfg.HostRoot)
+				entries, err := os.ReadDir(cfg.RootfsDir)
 				assert.NoError(err)
 				assert.Empty(entries)
 			},
@@ -421,8 +421,8 @@ func TestInstaller_install(t *testing.T) {
 		{
 			name: "resolve an absolute host symlink within the host root",
 			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.MkdirAll(filepath.Join(cfg.HostRoot, "data/opt"), 0o755))
-				assert.NoError(t, os.Symlink("/data/opt", filepath.Join(cfg.HostRoot, "opt")))
+				assert.NoError(t, os.MkdirAll(filepath.Join(cfg.RootfsDir, "data/opt"), 0o755))
+				assert.NoError(t, os.Symlink("/data/opt", filepath.Join(cfg.RootfsDir, "opt")))
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {
 				gomock.InOrder(
@@ -434,14 +434,14 @@ func TestInstaller_install(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.FileExists(filepath.Join(cfg.HostRoot, "data/opt/nydus-snapshotter/bin", mockVersion, "nydus"))
+				assert.FileExists(filepath.Join(cfg.RootfsDir, "data/opt/nydus-snapshotter/bin", mockVersion, "nydus"))
 			},
 		},
 		{
 			name: "finish a pending restart",
 			prepare: func(t *testing.T, cfg *Config) {
 				install(t, cfg)
-				writeFiles(t, cfg.HostRoot, map[string]string{restartPending: mockServiceRestart})
+				writeFiles(t, cfg.RootfsDir, map[string]string{restartPending: mockServiceRestart})
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {
 				gomock.InOrder(
@@ -627,7 +627,7 @@ func TestInstaller_install(t *testing.T) {
 		{
 			name: "host path that cannot be resolved",
 			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.Symlink("opt", filepath.Join(cfg.HostRoot, "opt")))
+				assert.NoError(t, os.Symlink("opt", filepath.Join(cfg.RootfsDir, "opt")))
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {},
 			expect: func(t *testing.T, cfg *Config, err error) {
@@ -639,7 +639,7 @@ func TestInstaller_install(t *testing.T) {
 		{
 			name: "restart marker whose host path cannot be resolved",
 			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.HostRoot, "run")))
+				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.RootfsDir, "run")))
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {},
 			expect: func(t *testing.T, cfg *Config, err error) {
@@ -651,7 +651,7 @@ func TestInstaller_install(t *testing.T) {
 		{
 			name: "host directory that cannot be created",
 			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.HostRoot, map[string]string{filepath.Dir(snapshotterBinary): ""})
+				writeFiles(t, cfg.RootfsDir, map[string]string{filepath.Dir(snapshotterBinary): ""})
 			},
 			mock: func(m *mocks.MockManagerMockRecorder) {},
 			expect: func(t *testing.T, cfg *Config, err error) {
@@ -727,7 +727,7 @@ func hostPath(t *testing.T, cfg *Config, path string) string {
 func newConfig(t *testing.T) *Config {
 	t.Helper()
 	cfg := &Config{
-		HostRoot:     t.TempDir(),
+		RootfsDir:    t.TempDir(),
 		PayloadDir:   t.TempDir(),
 		TokenDir:     t.TempDir(),
 		SyncInterval: DefaultSyncInterval,

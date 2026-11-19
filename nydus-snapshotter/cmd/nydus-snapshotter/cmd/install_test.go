@@ -14,7 +14,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/installer"
 )
 
-func TestNewInstallCmd(t *testing.T) {
+func TestInstallCmd(t *testing.T) {
 	tests := []struct {
 		name   string
 		args   []string
@@ -30,7 +30,7 @@ func TestNewInstallCmd(t *testing.T) {
 		},
 		{
 			name: "payload that is missing",
-			args: []string{"--host-root", "testdata/host", "--payload-dir", "testdata/missing"},
+			args: []string{"--rootfs-dir", "testdata/host", "--payload-dir", "testdata/missing"},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.Error(err)
@@ -48,26 +48,24 @@ func TestNewInstallCmd(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := newInstallCmd()
-			cmd.SilenceUsage, cmd.SilenceErrors = true, true
-			cmd.SetArgs(tc.args)
-			tc.expect(t, cmd.ExecuteContext(t.Context()))
+			_, err := executeCommand(t, append([]string{"install"}, tc.args...)...)
+			tc.expect(t, err)
 		})
 	}
 }
 
-func TestNewInstallCmd_flags(t *testing.T) {
+func TestInstallCmd_flags(t *testing.T) {
 	tests := []struct {
 		name   string
 		flag   string
 		expect func(t *testing.T, value string)
 	}{
 		{
-			name: "host root",
-			flag: "host-root",
+			name: "rootfs dir",
+			flag: "rootfs-dir",
 			expect: func(t *testing.T, value string) {
 				assert := assert.New(t)
-				assert.Equal(installer.DefaultHostRoot, value)
+				assert.Equal(installer.DefaultRootfsDir, value)
 			},
 		},
 		{
@@ -98,7 +96,7 @@ func TestNewInstallCmd_flags(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			flag := newInstallCmd().Flags().Lookup(tc.flag)
+			flag := installCmd.Flags().Lookup(tc.flag)
 			if !assert.NotNil(t, flag) {
 				return
 			}

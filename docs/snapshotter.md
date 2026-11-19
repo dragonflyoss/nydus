@@ -949,8 +949,10 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 Placement follows [Organizing a Go module](https://go.dev/doc/modules/layout):
 `cmd/` and `internal/` only; nothing is meant to be imported. The
 `cmd/<bin>/cmd/root.go` split, `Config` defaults and validation, testify table
-tests and mockgen mocks follow Dragonfly; golangci-lint v2 runs Dragonfly's
-linters plus containerd's. Logging
+tests and mockgen mocks follow Dragonfly; the commands are written as
+dragonflyoss/perf-tests writes its own (`cmd/dfbench/cmd`): a package-level
+command per file, its flags registered in `init` and its work in a `run`
+function. golangci-lint v2 runs Dragonfly's linters plus containerd's. Logging
 (`containerd/log`) and errors (`containerd/errdefs`, `%w`) follow containerd.
 Behaviour lives in methods: a package-level function is a constructor
 (`New`, `newX`, `ParseX`, `xFromY`), and a string with rules of its own gets a

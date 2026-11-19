@@ -136,7 +136,7 @@ func (n *installNode) install(t *testing.T, environment ...string) string {
 	}
 
 	n.exec(t, append(args, payloadDir+"/bin/nydus-snapshotter", "install",
-		"--host-root", "/", "--payload-dir", payloadDir, "--token-dir", tokenDir, "--sync-interval", "1s")...)
+		"--rootfs-dir", "/", "--payload-dir", payloadDir, "--token-dir", tokenDir, "--sync-interval", "1s")...)
 	if !assert.Eventually(t, func() bool {
 		return strings.Contains(n.journal(unit), installed)
 	}, installTimeout, 200*time.Millisecond) {

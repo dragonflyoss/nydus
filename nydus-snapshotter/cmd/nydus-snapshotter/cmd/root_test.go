@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
@@ -23,7 +24,28 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/version"
 )
 
-func TestNewRootCmd(t *testing.T) {
+func executeCommand(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	out := &bytes.Buffer{}
+	rootCmd.SetOut(out)
+	rootCmd.SetErr(out)
+	rootCmd.SetArgs(args)
+	t.Cleanup(func() {
+		for _, cmd := range []*cobra.Command{rootCmd, installCmd} {
+			for _, name := range []string{"config", "rootfs-dir", "payload-dir", "token-dir", "sync-interval", "help", "version"} {
+				if flag := cmd.Flags().Lookup(name); flag != nil {
+					assert.NoError(t, flag.Value.Set(flag.DefValue))
+					flag.Changed = false
+				}
+			}
+		}
+	})
+
+	err := rootCmd.ExecuteContext(t.Context())
+	return out.String(), err
+}
+
+func TestRootCmd(t *testing.T) {
 	tests := []struct {
 		name   string
 		args   []string
@@ -75,18 +97,13 @@ func TestNewRootCmd(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out := &bytes.Buffer{}
-			cmd := newRootCmd()
-			cmd.SetOut(out)
-			cmd.SetErr(out)
-			cmd.SetArgs(tc.args)
-			err := cmd.ExecuteContext(t.Context())
-			tc.expect(t, out.String(), err)
+			out, err := executeCommand(t, tc.args...)
+			tc.expect(t, out, err)
 		})
 	}
 }
 
-func TestRootOptions_run(t *testing.T) {
+func TestRunSnapshotter(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(t *testing.T, cfg *config.Config)
@@ -129,14 +146,14 @@ func TestRootOptions_run(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan error, 1)
-			o := &rootOptions{configPath: filepath.Join(t.TempDir(), "config.yaml")}
-			go func() { done <- o.run(ctx, cfg) }()
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			go func() { done <- runSnapshotter(ctx, cfg, path) }()
 			tc.expect(t, cfg, cancel, done)
 		})
 	}
 }
 
-func TestRootOptions_loadConfig(t *testing.T) {
+func TestLoadConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     string
@@ -188,7 +205,7 @@ func TestRootOptions_loadConfig(t *testing.T) {
 				assert.NoError(t, os.WriteFile(path, []byte(tc.data), 0o644))
 			}
 
-			cfg, err := (&rootOptions{configPath: path}).loadConfig(t.Context(), tc.explicit)
+			cfg, err := loadConfig(t.Context(), path, tc.explicit)
 			tc.expect(t, cfg, err)
 		})
 	}

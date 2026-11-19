@@ -7,36 +7,48 @@
 package cmd
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/installer"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd"
 )
 
-// newInstallCmd returns the DaemonSet entrypoint: it installs the snapshotter
-// onto the host and keeps its config and Kubernetes credentials in sync.
-func newInstallCmd() *cobra.Command {
-	var cfg installer.Config
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "install nydus-snapshotter onto the host and keep its config and credentials in sync",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := cfg.Validate(); err != nil {
-				return err
-			}
+// installConfig is the installer config, which the flags of the install
+// command set.
+var installConfig = &installer.Config{}
 
-			manager := systemd.New(installer.JobTimeout)
-			defer manager.Close()
+// installCmd represents the install command, the DaemonSet entrypoint.
+var installCmd = &cobra.Command{
+	Use:               "install [flags]",
+	Short:             "Install nydus-snapshotter onto the host and keep its config and credentials in sync",
+	Args:              cobra.NoArgs,
+	DisableAutoGenTag: true,
+	SilenceUsage:      true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runInstall(cmd.Context(), installConfig)
+	},
+}
 
-			return installer.New(&cfg, manager).Run(cmd.Context())
-		},
+// init initializes the install command.
+func init() {
+	flags := installCmd.Flags()
+	flags.StringVar(&installConfig.RootfsDir, "rootfs-dir", installer.DefaultRootfsDir, "Specify the directory the root filesystem of the host is mounted at, / on the host")
+	flags.StringVar(&installConfig.PayloadDir, "payload-dir", installer.DefaultPayloadDir, "Specify the directory holding bin/, systemd/ and config/ to install")
+	flags.StringVar(&installConfig.TokenDir, "token-dir", installer.DefaultTokenDir, "Specify the service account token directory to copy to the host when kube_secret is enabled")
+	flags.DurationVar(&installConfig.SyncInterval, "sync-interval", installer.DefaultSyncInterval, "Specify how often the token and the config are copied to the host")
+}
+
+// runInstall installs the snapshotter onto the host, then keeps its config
+// and Kubernetes credentials in sync until ctx is done.
+func runInstall(ctx context.Context, cfg *installer.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
 
-	flags := cmd.Flags()
-	flags.StringVar(&cfg.HostRoot, "host-root", installer.DefaultHostRoot, "path the host root is mounted at, / on the host")
-	flags.StringVar(&cfg.PayloadDir, "payload-dir", installer.DefaultPayloadDir, "directory holding bin/, systemd/ and config/ to install")
-	flags.StringVar(&cfg.TokenDir, "token-dir", installer.DefaultTokenDir, "service account token directory to copy to the host when kube_secret is enabled")
-	flags.DurationVar(&cfg.SyncInterval, "sync-interval", installer.DefaultSyncInterval, "how often the token and the config are copied to the host")
-	return cmd
+	manager := systemd.New(installer.JobTimeout)
+	defer manager.Close()
+
+	return installer.New(cfg, manager).Run(ctx)
 }

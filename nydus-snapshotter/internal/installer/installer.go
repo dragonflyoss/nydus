@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	// DefaultHostRoot is where the DaemonSet mounts the host root.
-	DefaultHostRoot = "/host"
+	// DefaultRootfsDir is where the DaemonSet mounts the root filesystem of
+	// the host.
+	DefaultRootfsDir = "/host"
 
 	// DefaultPayloadDir holds what is installed: bin/ and systemd/ from the
 	// image, config/ from the ConfigMap.
@@ -64,8 +65,9 @@ const (
 
 // Config is the installer config.
 type Config struct {
-	// HostRoot is where the host root is mounted, / when run on the host.
-	HostRoot string
+	// RootfsDir is where the root filesystem of the host is mounted, / when
+	// run on the host.
+	RootfsDir string
 
 	// PayloadDir holds what is installed.
 	PayloadDir string
@@ -92,7 +94,7 @@ func (c *Config) Validate() error {
 // must, refer to https://github.com/containerd/continuity/blob/main/fs/path.go.
 // The last element is kept, so a link itself can be replaced.
 func (c *Config) host(path string) (string, error) {
-	dir, err := continuityfs.RootPath(c.HostRoot, filepath.Dir(path))
+	dir, err := continuityfs.RootPath(c.RootfsDir, filepath.Dir(path))
 	if err != nil {
 		return "", fmt.Errorf("resolve host path %s: %w", path, err)
 	}
