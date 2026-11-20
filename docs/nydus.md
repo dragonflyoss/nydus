@@ -1,6 +1,6 @@
 # Nydus Design
 
-Current contract for this branch. Start at the
+Current contract for Nydus v3. Start at the
 [documentation index](../README.md#documentation) for the EROFS format and
 transport guides.
 The private `.blob.meta` and footer layouts carry no version: compatibility is
@@ -3142,7 +3142,8 @@ These rules belong in the merge metadata layer, not in build and not in mount.
 
 The nydus v3 format described here is self-consistent and does not preserve
 on-disk compatibility with earlier Nydus image formats (RAFS v5/v6): bootstraps
-are native EROFS images rather than RAFS metadata.
+are native EROFS images rather than RAFS metadata. Nydus v2 (RAFS) lives on the
+[`master`](https://github.com/dragonflyoss/nydus/tree/master) branch.
 
 EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Nydus runtime

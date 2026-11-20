@@ -1,6 +1,6 @@
 # EROFS Technical Internals
 
-This document describes the EROFS structures emitted by this branch, not every
+This document describes the EROFS structures emitted by Nydus v3, not every
 upstream EROFS feature. The private chunk-table `.blob.meta` format is version
 **1**; its layout and cache translation belong in
 [Nydus Design](nydus.md#blob-meta-region-layout). See the
