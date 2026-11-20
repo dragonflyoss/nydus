@@ -62,6 +62,9 @@ type Config struct {
 
 	// GC is the blob cache GC config.
 	GC GCConfig `yaml:"gc"`
+
+	// Installer is the installer config, which the snapshotter ignores.
+	Installer InstallerConfig `yaml:"installer"`
 }
 
 // GRPCConfig is the gRPC server config, a section of its own as in
@@ -332,6 +335,41 @@ type GCPolicyConfig struct {
 	DiskLowThresholdPercent int `yaml:"disk_low_threshold_percent"`
 }
 
+// InstallerConfig is the config of the installer, the DaemonSet Pod that
+// installs the snapshotter onto the host, read once when it starts. It holds
+// what every node shares, as kubelet keeps that in its config file and not
+// in flags, refer to
+// https://github.com/kubernetes/kubernetes/blob/v1.34.0/cmd/kubelet/app/options/options.go.
+type InstallerConfig struct {
+	// RootfsDir is where the Pod mounts the root filesystem of the host, /
+	// when the installer runs on the host.
+	RootfsDir string `yaml:"rootfs_dir"`
+
+	// PayloadDir holds what the image ships to install: bin/ and systemd/.
+	PayloadDir string `yaml:"payload_dir"`
+
+	// TokenDir is the Pod's service account token directory.
+	TokenDir string `yaml:"token_dir"`
+
+	// SyncInterval is how often the token and the config are copied to the
+	// host and the node label is checked.
+	SyncInterval Duration `yaml:"sync_interval"`
+
+	// NodeLabel is the node label config.
+	NodeLabel InstallerNodeLabelConfig `yaml:"node_label"`
+}
+
+// InstallerNodeLabelConfig is the node label config of the installer.
+type InstallerNodeLabelConfig struct {
+	// Enable labels the node while its Pods can use the snapshotter. The
+	// node is the one NODE_NAME names.
+	Enable bool `yaml:"enable"`
+
+	// ContainerdAddr is the socket of the host's containerd, which is asked
+	// whether it loaded the snapshotter.
+	ContainerdAddr string `yaml:"containerd_addr"`
+}
+
 // New returns a config holding the defaults.
 func New() *Config {
 	return &Config{
@@ -413,6 +451,15 @@ func New() *Config {
 				DiskLowThresholdPercent:  DefaultGCDiskLowThresholdPercent,
 			},
 		},
+		Installer: InstallerConfig{
+			RootfsDir:    DefaultInstallerRootfsDir,
+			PayloadDir:   DefaultInstallerPayloadDir,
+			TokenDir:     DefaultInstallerTokenDir,
+			SyncInterval: DefaultInstallerSyncInterval,
+			NodeLabel: InstallerNodeLabelConfig{
+				ContainerdAddr: DefaultInstallerContainerdAddr,
+			},
+		},
 	}
 }
 
@@ -468,6 +515,10 @@ func (c *Config) Validate() error {
 		{name: "nydusd.log_dir", path: c.Nydusd.LogDir},
 		{name: "nydusd.config.runtime_dir", path: c.Nydusd.Config.RuntimeDir},
 		{name: "nydusd.config.storage.dir", path: c.Nydusd.Config.Storage.Dir, optional: true},
+		{name: "installer.rootfs_dir", path: c.Installer.RootfsDir},
+		{name: "installer.payload_dir", path: c.Installer.PayloadDir},
+		{name: "installer.token_dir", path: c.Installer.TokenDir},
+		{name: "installer.node_label.containerd_addr", path: c.Installer.NodeLabel.ContainerdAddr},
 	} {
 		if p.optional && p.path == "" {
 			continue
@@ -607,6 +658,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid gc.policy thresholds: low %d%%, high %d%%", low, high)
 	}
 
+	if c.Installer.SyncInterval <= 0 {
+		return errors.New("installer.sync_interval must be positive")
+	}
+
 	return nil
 }
 
@@ -615,8 +670,10 @@ func (c *Config) Validate() error {
 // reads when it starts. It reports whether next changes anything else, which
 // applies on the next restart; a new cgroup slice, runtime directory or cache
 // directory would hide the running daemons' own, so they are among those.
+// The installer section is not: the snapshotter ignores it.
 func (c *Config) Merge(next *Config) (*Config, bool) {
 	merged := *c
+	merged.Installer = next.Installer
 	merged.Cgroup = next.Cgroup
 	merged.Cgroup.Slice = c.Cgroup.Slice
 	merged.Nydusd.Config = next.Nydusd.Config

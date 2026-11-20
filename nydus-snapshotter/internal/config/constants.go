@@ -9,6 +9,8 @@ package config
 import (
 	"regexp"
 	"time"
+
+	"github.com/containerd/containerd/v2/defaults"
 )
 
 const (
@@ -194,6 +196,27 @@ const (
 
 	// DefaultGCDiskLowThresholdPercent stops disk watermark eviction.
 	DefaultGCDiskLowThresholdPercent = 60
+)
+
+const (
+	// DefaultInstallerRootfsDir is where the DaemonSet mounts the root
+	// filesystem of the host.
+	DefaultInstallerRootfsDir = "/host"
+
+	// DefaultInstallerPayloadDir holds what the image ships to install: bin/
+	// and systemd/.
+	DefaultInstallerPayloadDir = "/opt/nydus-snapshotter/payload"
+
+	// DefaultInstallerTokenDir is the Pod's projected service account token
+	// directory.
+	DefaultInstallerTokenDir = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+	// DefaultInstallerSyncInterval is how often the installer syncs, well
+	// within the hour a projected token lives.
+	DefaultInstallerSyncInterval = Duration(time.Minute)
+
+	// DefaultInstallerContainerdAddr is containerd's own default socket.
+	DefaultInstallerContainerdAddr = defaults.DefaultAddress
 )
 
 var (

@@ -535,6 +535,46 @@ func TestConfig_Validate(t *testing.T) {
 				assert.ErrorContains(err, "invalid gc.policy thresholds")
 			},
 		},
+		{
+			name:   "installer rootfs dir that is relative",
+			mutate: func(cfg *Config) { cfg.Installer.RootfsDir = "host" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `installer.rootfs_dir must be an absolute path, got "host"`)
+			},
+		},
+		{
+			name:   "installer payload dir that is relative",
+			mutate: func(cfg *Config) { cfg.Installer.PayloadDir = "payload" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `installer.payload_dir must be an absolute path, got "payload"`)
+			},
+		},
+		{
+			name:   "installer token dir that is empty",
+			mutate: func(cfg *Config) { cfg.Installer.TokenDir = "" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `installer.token_dir must be an absolute path, got ""`)
+			},
+		},
+		{
+			name:   "installer containerd addr that is relative",
+			mutate: func(cfg *Config) { cfg.Installer.NodeLabel.ContainerdAddr = "containerd.sock" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `installer.node_label.containerd_addr must be an absolute path, got "containerd.sock"`)
+			},
+		},
+		{
+			name:   "installer sync interval that is not positive",
+			mutate: func(cfg *Config) { cfg.Installer.SyncInterval = 0 },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "installer.sync_interval must be positive")
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -619,6 +659,17 @@ func TestConfig_Merge(t *testing.T) {
 				assert := assert.New(t)
 				assert.True(restartOnly)
 				assert.Equal(running.Cgroup.Slice, merged.Cgroup.Slice)
+			},
+		},
+		{
+			name: "ignore the installer config",
+			update: func(next *Config) {
+				next.Installer.SyncInterval = Duration(time.Second)
+				next.Installer.NodeLabel.Enable = true
+			},
+			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
+				assert := assert.New(t)
+				assert.False(restartOnly)
 			},
 		},
 		{

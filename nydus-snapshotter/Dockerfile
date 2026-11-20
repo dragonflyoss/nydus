@@ -16,11 +16,12 @@
 #   docker buildx build -f nydus-snapshotter/Dockerfile \
 #     --build-context binaries=<dir holding nydus and nydus-snapshotter> -t <image> .
 #
-# The image holds the payload the installer copies onto the host:
+# The image holds what the installer copies onto the host: the payload, and
+# the config at the path the installer and the snapshotter both default to.
 #
 #   /opt/nydus-snapshotter/payload/bin/{nydus-snapshotter,nydus}
 #   /opt/nydus-snapshotter/payload/systemd/nydus-snapshotter.{service,socket}
-#   /opt/nydus-snapshotter/payload/config/  defaults, shadowed by the ConfigMap
+#   /etc/nydus-snapshotter/  default config.yaml, shadowed by the ConfigMap
 
 # nydus runs on the host, so it is a static musl build with the release
 # workflow's features and environment. It builds on the target platform, as
@@ -106,6 +107,6 @@ FROM gcr.io/distroless/static-debian12:latest@sha256:d75cdd72874d4790092fcb1b058
 
 COPY --from=verify /opt/nydus-snapshotter/payload/bin/ /opt/nydus-snapshotter/payload/bin/
 COPY nydus-snapshotter/deploy/systemd/ /opt/nydus-snapshotter/payload/systemd/
-COPY nydus-snapshotter/deploy/nydus-snapshotter/ /opt/nydus-snapshotter/payload/config/
+COPY nydus-snapshotter/deploy/nydus-snapshotter/ /etc/nydus-snapshotter/
 
 ENTRYPOINT ["/opt/nydus-snapshotter/payload/bin/nydus-snapshotter", "install"]

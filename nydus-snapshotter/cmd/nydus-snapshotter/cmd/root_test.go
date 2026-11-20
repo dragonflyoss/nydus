@@ -31,8 +31,8 @@ func executeCommand(t *testing.T, args ...string) (string, error) {
 	rootCmd.SetErr(out)
 	rootCmd.SetArgs(args)
 	t.Cleanup(func() {
-		for _, cmd := range []*cobra.Command{rootCmd, installCmd} {
-			for _, name := range []string{"config", "rootfs-dir", "payload-dir", "token-dir", "sync-interval", "help", "version"} {
+		for _, cmd := range []*cobra.Command{rootCmd, installCmd, unlabelCmd} {
+			for _, name := range []string{"config", "help", "version"} {
 				if flag := cmd.Flags().Lookup(name); flag != nil {
 					assert.NoError(t, flag.Value.Set(flag.DefValue))
 					flag.Changed = false
@@ -66,7 +66,7 @@ func TestRootCmd(t *testing.T) {
 			expect: func(t *testing.T, out string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Contains(out, "--payload-dir")
+				assert.Contains(out, "--config")
 			},
 		},
 		{

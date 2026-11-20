@@ -9,6 +9,7 @@ package installer
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,37 +38,190 @@ var (
 
 	mockInvalidConfig = "log:\n  level: loud\n"
 
+	mockInstalledConfig = "installer:\n  sync_interval: 2s\n"
+
+	mockInstallerConfig = "installer:\n  rootfs_dir: /\n  payload_dir: /opt/payload\n  token_dir: /opt/token\n  sync_interval: 1s\n  node_label:\n    enable: true\n    containerd_addr: /run/k3s/containerd/containerd.sock\n"
+
 	mockServiceRestart = serviceUnit + "\n"
 )
 
-func TestConfig_Validate(t *testing.T) {
+func TestNewConfig(t *testing.T) {
 	tests := []struct {
 		name     string
-		interval time.Duration
-		expect   func(t *testing.T, err error)
+		data     string
+		nodeName string
+		expect   func(t *testing.T, path string, cfg *Config, err error)
 	}{
 		{
-			name:     "valid config",
-			interval: DefaultSyncInterval,
-			expect: func(t *testing.T, err error) {
+			name:     "installer section and the node of the pod",
+			data:     mockInstallerConfig,
+			nodeName: mockNodeName,
+			expect: func(t *testing.T, path string, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
+				assert.Equal(&Config{
+					InstallerConfig: config.InstallerConfig{
+						RootfsDir:    "/",
+						PayloadDir:   "/opt/payload",
+						TokenDir:     "/opt/token",
+						SyncInterval: config.Duration(time.Second),
+						NodeLabel:    config.InstallerNodeLabelConfig{Enable: true, ContainerdAddr: "/run/k3s/containerd/containerd.sock"},
+					},
+					Path:     path,
+					NodeName: mockNodeName,
+				}, cfg)
 			},
 		},
 		{
-			name:     "invalid sync interval",
-			interval: 0,
-			expect: func(t *testing.T, err error) {
+			name: "defaults without an installer section",
+			data: "log:\n  level: debug\n",
+			expect: func(t *testing.T, path string, cfg *Config, err error) {
 				assert := assert.New(t)
-				assert.EqualError(err, "invalid sync interval 0s")
+				assert.NoError(err)
+				assert.Equal(&Config{InstallerConfig: config.New().Installer, Path: path}, cfg)
+			},
+		},
+		{
+			name: "node label without the node of the pod",
+			data: mockInstallerConfig,
+			expect: func(t *testing.T, path string, cfg *Config, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "NODE_NAME must name the node when installer.node_label.enable is set")
+				assert.Nil(cfg)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &Config{SyncInterval: tc.interval}
-			tc.expect(t, cfg.Validate())
+			t.Setenv(NodeNameEnvVar, tc.nodeName)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			assert.NoError(t, os.WriteFile(path, []byte(tc.data), 0o644))
+
+			cfg, err := NewConfig(path)
+			tc.expect(t, path, cfg, err)
+		})
+	}
+}
+
+func TestConfig_load(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      string
+		installed string
+		expect    func(t *testing.T, held config.InstallerConfig, cfg *Config)
+	}{
+		{
+			name:      "installer section of the config file",
+			data:      mockInstallerConfig,
+			installed: mockInstalledConfig,
+			expect: func(t *testing.T, held config.InstallerConfig, cfg *Config) {
+				assert := assert.New(t)
+				assert.Equal(config.Duration(time.Second), cfg.SyncInterval)
+				assert.True(cfg.NodeLabel.Enable)
+			},
+		},
+		{
+			name:      "config that is invalid keeps the installer settings of the installed config",
+			data:      mockInvalidConfig,
+			installed: mockInstalledConfig,
+			expect: func(t *testing.T, held config.InstallerConfig, cfg *Config) {
+				assert := assert.New(t)
+				assert.Equal(config.Duration(2*time.Second), cfg.SyncInterval)
+			},
+		},
+		{
+			name:      "config that is missing keeps the installer settings of the installed config",
+			installed: mockInstalledConfig,
+			expect: func(t *testing.T, held config.InstallerConfig, cfg *Config) {
+				assert := assert.New(t)
+				assert.Equal(config.Duration(2*time.Second), cfg.SyncInterval)
+			},
+		},
+		{
+			name: "config that is invalid with none installed keeps the settings it holds",
+			data: mockInvalidConfig,
+			expect: func(t *testing.T, held config.InstallerConfig, cfg *Config) {
+				assert := assert.New(t)
+				assert.Equal(held, cfg.InstallerConfig)
+			},
+		},
+		{
+			name:      "config and installed config that are invalid keep the settings it holds",
+			data:      mockInvalidConfig,
+			installed: mockInvalidConfig,
+			expect: func(t *testing.T, held config.InstallerConfig, cfg *Config) {
+				assert := assert.New(t)
+				assert.Equal(held, cfg.InstallerConfig)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newConfig(t)
+			assert.NoError(t, os.Remove(cfg.Path))
+			if tc.data != "" {
+				assert.NoError(t, os.WriteFile(cfg.Path, []byte(tc.data), 0o644))
+			}
+
+			if tc.installed != "" {
+				writeFiles(t, cfg.RootfsDir, map[string]string{config.DefaultPath: tc.installed})
+			}
+
+			held := cfg.InstallerConfig
+			cfg.load()
+			tc.expect(t, held, cfg)
+		})
+	}
+}
+
+func TestConfig_installed(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, cfg *Config)
+		expect  func(t *testing.T, installed *config.Config, err error)
+	}{
+		{
+			name: "config installed on the host",
+			prepare: func(t *testing.T, cfg *Config) {
+				writeFiles(t, cfg.RootfsDir, map[string]string{config.DefaultPath: mockInstallerConfig})
+			},
+			expect: func(t *testing.T, installed *config.Config, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(config.Duration(time.Second), installed.Installer.SyncInterval)
+				assert.True(installed.Installer.NodeLabel.Enable)
+			},
+		},
+		{
+			name:    "host without an installed config",
+			prepare: func(t *testing.T, cfg *Config) {},
+			expect: func(t *testing.T, installed *config.Config, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, fs.ErrNotExist)
+				assert.Nil(installed)
+			},
+		},
+		{
+			name: "installed config that is invalid",
+			prepare: func(t *testing.T, cfg *Config) {
+				writeFiles(t, cfg.RootfsDir, map[string]string{config.DefaultPath: mockInvalidConfig})
+			},
+			expect: func(t *testing.T, installed *config.Config, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "invalid log.level")
+				assert.Nil(installed)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := newConfig(t)
+			tc.prepare(t, cfg)
+			installed, err := cfg.installed()
+			tc.expect(t, installed, err)
 		})
 	}
 }
@@ -220,7 +374,7 @@ func TestInstaller_Run(t *testing.T) {
 			defer ctl.Finish()
 			manager := mocks.NewMockManager(ctl)
 			cfg := newConfig(t)
-			cfg.SyncInterval = 10 * time.Millisecond
+			cfg.SyncInterval = config.Duration(10 * time.Millisecond)
 			writeFiles(t, cfg.PayloadDir, tc.payload)
 			tc.mock(t, cfg, manager.EXPECT(), cancel)
 
@@ -529,6 +683,19 @@ func TestInstaller_install(t *testing.T) {
 			},
 		},
 		{
+			name: "config naming a socket the socket unit does not listen on",
+			prepare: func(t *testing.T, cfg *Config) {
+				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "grpc:\n  addr: /run/nydus-snapshotter/other.sock\n"})
+			},
+			mock: func(m *mocks.MockManagerMockRecorder) {},
+			expect: func(t *testing.T, cfg *Config, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "grpc.addr must be "+config.DefaultGRPCAddr)
+				assert.Contains(readFile(t, cfg.payload("systemd/"+socketUnit)), "ListenStream="+config.DefaultGRPCAddr+"\n")
+				assert.NoFileExists(hostPath(t, cfg, snapshotterBinary))
+			},
+		},
+		{
 			name: "config naming a nydus binary the installer does not write",
 			prepare: func(t *testing.T, cfg *Config) {
 				writeFiles(t, cfg.PayloadDir, map[string]string{"config/config.yaml": "nydusd:\n  binary: /usr/bin/nydus\n"})
@@ -727,12 +894,15 @@ func hostPath(t *testing.T, cfg *Config, path string) string {
 func newConfig(t *testing.T) *Config {
 	t.Helper()
 	cfg := &Config{
-		RootfsDir:    t.TempDir(),
-		PayloadDir:   t.TempDir(),
-		TokenDir:     t.TempDir(),
-		SyncInterval: DefaultSyncInterval,
+		InstallerConfig: config.InstallerConfig{
+			RootfsDir:    t.TempDir(),
+			PayloadDir:   t.TempDir(),
+			TokenDir:     t.TempDir(),
+			SyncInterval: config.DefaultInstallerSyncInterval,
+		},
 	}
 
+	cfg.Path = cfg.payload("config/config.yaml")
 	writeFiles(t, cfg.PayloadDir, map[string]string{
 		"bin/nydus":                                      nydusScript(mockVersion),
 		"bin/nydus-snapshotter":                          "nydus-snapshotter",

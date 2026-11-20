@@ -49,3 +49,20 @@ image:
 		--build-arg GIT_COMMIT_SHORT_HASH=$(GIT_COMMIT_SHORT_HASH) --build-arg GIT_COMMIT_DATE=$(GIT_COMMIT_DATE) \
 		-t $(IMAGE):$(VERSION) ..
 .PHONY: image
+
+# Clear compiled files.
+clean:
+	go clean
+	rm -rf bin
+.PHONY: clean
+
+help:
+	@echo "make build                          build nydus-snapshotter to bin/"
+	@echo "make test                           run unit tests"
+	@echo "make fmt                            format code"
+	@echo "make vet                            run go vet"
+	@echo "make lint                           run code lint"
+	@echo "make generate                       regenerate mocks"
+	@echo "make image                          build the installer image"
+	@echo "make clean                          clean"
+.PHONY: help

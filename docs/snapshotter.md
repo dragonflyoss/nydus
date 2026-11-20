@@ -674,7 +674,34 @@ gc:
     disk_threshold: '0'
     disk_high_threshold_percent: 80
     disk_low_threshold_percent: 60
+
+# Read only by the installer, nydus-snapshotter install, once when it starts;
+# the snapshotter ignores it.
+installer:
+  # Where the Pod mounts the root filesystem of the host, the payload of the
+  # image (bin/ and systemd/) and its service account token. They follow the
+  # volumeMounts of the DaemonSet.
+  rootfs_dir: /host
+  payload_dir: /opt/nydus-snapshotter/payload
+  token_dir: /var/run/secrets/kubernetes.io/serviceaccount
+  # How often the token and the config are copied to the host and the node
+  # label is checked.
+  sync_interval: 1m
+  node_label:
+    # Label the node NODE_NAME names d7y.io/nydus-snapshotter=true while the
+    # snapshotter serves and containerd has loaded it.
+    enable: false
+    # Socket of the host's containerd, asked whether it loaded the snapshotter.
+    containerd_addr: /run/containerd/containerd.sock
 ```
+
+The `installer` section holds every setting of `nydus-snapshotter install`,
+which has no flag of its own: what is the same on every node belongs in the
+config file the nodes share, and only what differs per node, the node name,
+comes from the environment, as kubelet splits `KubeletConfiguration` from its
+flags. The installer reads the section once, when it starts, so a change
+takes a rollout of the DaemonSet. The snapshotter ignores it, also on a
+reload.
 
 `registry.config_path` is a containerd certs.d directory, or a list of them as
 CRI's `config_path` is, read with containerd's lookup and its
@@ -782,11 +809,21 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
   `privileged`, `tolerations: [{operator: Exists}]`, with the host root at
   `/host` and `/run/dbus` and `/run/systemd` mounted at their own paths. It
   needs no host PID namespace: D-Bus authorizes root by uid.
-  - Runs `nydus-snapshotter install`: checks that the host's systemd answers
+  - Runs `nydus-snapshotter install` with no argument. The installer reads
+    the config it installs at the path the snapshotter defaults to,
+    `/etc/nydus-snapshotter/config.yaml` (`--config` names another), where
+    the DaemonSet mounts the ConfigMap, `certs.d` beside it, as the charts of
+    node-feature-discovery and Dragonfly's dfinit mount a ConfigMap at their
+    binary's default config path. The image carries the default config there.
+    Its own settings are the `installer` section of that file. A file that
+    cannot be used keeps the installer settings of the config installed on
+    the host, so the token rotation goes on while the install rejects it.
+  - The installer checks that the host's systemd answers
     and is 240 or newer before it writes anything to the host, as kubeadm runs
     its preflight checks first; validates `config.yaml` and every
     `hosts.toml` by the rules a daemon start applies, rejects a config whose
-    `nydusd.binary`, kubeconfig or certs.d directory is not the path it writes, copies binaries, units and config from its image and
+    `grpc.addr`, `nydusd.binary`, kubeconfig or certs.d directory is not the
+    path it sets up, copies binaries, units and config from its image and
     ConfigMap to the host, then `EnableUnitFiles` over D-Bus. A file is
     compared by digest and copied as a stream to `<file>.tmp` beside it, synced
     and renamed, as the Calico and Cilium CNI installers do, so no binary is
@@ -804,14 +841,23 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
     paths resolve within `/host`, so an absolute symlink on the host is
     followed there (`continuity/fs.RootPath`).
   - Stays running to keep `/run/nydus-snapshotter/kubernetes/token` in sync with its
-    projected service account token (mounted only with kube_secret enabled), and
+    service account token (mounted only with kube_secret or the node label enabled), and
     to copy ConfigMap changes to the host without a restart: the snapshotter
     reloads `cgroup` and `nydusd.config` itself and reads `certs.d` per daemon
     start; other keys apply on its next restart.
+  - With `installer.node_label.enable`, labels the node the environment
+    variable `NODE_NAME` names, the Pod's `spec.nodeName`,
+    `d7y.io/nydus-snapshotter=true` for Pods and RuntimeClasses to select, see
+    [Node label](#node-label). A post-delete hook Job then runs
+    `nydus-snapshotter unlabel`, which removes the label from every node, with
+    a ServiceAccount of its own.
   - Has no `preStop` uninstall: deleting the Pod must never remove the
     snapshotter. Uninstalling is an explicit operation.
   - A dedicated ServiceAccount; with kube_secret enabled, a ClusterRole with
-    `list` and `watch` on `secrets` (no `get`).
+    `list` and `watch` on `secrets` (no `get`); with the node label, `get`
+    and `patch` on `nodes`, and `list` and `patch` on `nodes` for the
+    ServiceAccount of the post-delete hook, which exists only while the hook
+    runs.
   - A node whose containerd already uses `nydus` as its snapshotter needs the
     units baked into its image: the installer Pod's own sandbox goes through the
     snapshotter.
@@ -851,6 +897,82 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
   `.github/workflows/e2e-snapshotter.yml`. containerd 2.1.3 with a version 2
   config, as kind's node image ships, was checked by hand.
 
+### Node label
+
+A Pod that needs Nydus images must land on a node where they work. With
+`installer.node_label.enable` the installer keeps the label
+`d7y.io/nydus-snapshotter=true` on its node, the one the environment variable
+`NODE_NAME` names, while both conditions below hold. A Pod or a RuntimeClass
+selects it, as a RuntimeClass of kata-deploy selects
+`katacontainers.io/kata-runtime`:
+
+```text
+snapshotter SERVING ──┐
+                      ├─▶ both ───────────────────▶ d7y.io/nydus-snapshotter=true
+containerd loaded it ─┘   else, 3 checks in a row ─▶ label removed
+installer stops ─────────────────────────────────▶ label kept
+helm uninstall ──────────────────────────────────▶ label removed by a hook
+```
+
+```yaml
+nodeSelector:
+  d7y.io/nydus-snapshotter: "true"
+```
+
+- **The snapshotter serves**: its gRPC health check answers `SERVING`
+  through the host socket, so with kube_secret the secrets are listed. The
+  socket is the `grpc.addr` of the config installed on the host, read once
+  when the installer starts.
+- **containerd has loaded it**: the installer never edits containerd's config,
+  so a node is only usable once its containerd was restarted with the proxy
+  plugin. containerd reads its config only when it starts, and the file a
+  node uses may come from `imports` or from a distribution's own path, so the
+  installer does not read or watch a config file. It asks the running
+  containerd (`installer.node_label.containerd_addr`) for its loaded
+  snapshotter plugins over the introspection API, as `ctr plugins ls`, nerdctl
+  and BuildKit do, and looks for the proxy plugin whose exported `address` is
+  the snapshotter's socket, compared as host paths, whatever its name.
+  Whether CRI uses it by default
+  or through a runtime handler is the node's choice and is not checked.
+- **The node is reconciled**: both are checked after the install and on every
+  `installer.sync_interval`. The installer then reads the node and patches it
+  only when its label differs, so a label removed or changed by hand is put
+  right within one interval.
+- **A node that is right costs one cached read**: the read asks for resource
+  version 0, which the API server answers from its watch cache without
+  reaching etcd. At 5000 nodes that is about 83 reads a second, next to the
+  500 Lease renewals a second their kubelets write, and API Priority and
+  Fairness keeps the requests of a ServiceAccount apart from the kubelets'.
+- **The label does not flap**: a Pod scheduled by its `nodeSelector` keeps
+  running when the label goes away, but the DaemonSet controller deletes the
+  Pods of a DaemonSet that selects the label from a node that lost it. So
+  the label is set on the first check that passes and removed only after
+  three checks in a row fail, the default `failureThreshold` of a probe,
+  which a restart of containerd does not reach. And an installer that stops
+  keeps the label: a rollout hands the node to the next installer Pod, which
+  takes the label over.
+- **`helm uninstall` removes it with a hook**: the installers keep the label
+  when they stop, and helm deletes their ClusterRole before that anyway. The
+  chart therefore runs `nydus-snapshotter unlabel` in a post-delete hook Job,
+  as node-feature-discovery prunes its labels, which removes the label from
+  every node that carries it:
+
+  ```text
+  installer stops ─▶ label kept, the next installer Pod takes it over
+  helm uninstall ──▶ post-delete hook ─▶ nydus-snapshotter unlabel ─▶ label removed
+  ```
+
+  It lists the labeled nodes in pages and patches them at kubelet's default
+  request rate, 50 a second, so 5000 nodes take under two minutes of the five
+  helm gives a hook.
+- **A label nobody keeps is removed by hand**: the `installer` section is
+  read when the installer starts, so switching the label takes a rollout.
+  With the label disabled the next installer Pod leaves the node alone, and
+  no hook runs then; the same holds for a node the DaemonSet no longer
+  covers, and for a DaemonSet deleted without helm. Remove the label with
+  `kubectl label nodes --all d7y.io/nydus-snapshotter-`, or by running
+  `nydus-snapshotter unlabel`.
+
 ## Known risks and limitations
 
 - **The first pull decides the source repository.** Identical content in two
@@ -869,6 +991,10 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
 - **User-namespace Pods** (`hostUsers: false` on 2.x): without the `remap-ids`
   capability, containerd chowns the whole rootfs, which reads and copies up the
   entire image.
+- **Node patch.** With `installer.node_label.enable` the ServiceAccount can
+  `get` and `patch` every node, as kata-deploy's and virt-handler's can: RBAC
+  cannot narrow `nodes` to the Pod's own. Leave it disabled where that is not
+  wanted. `helm uninstall --no-hooks` skips the hook that removes the label.
 - **Cluster-wide secret read.** RBAC cannot narrow `secrets` by type or label, so
   a node holding the token can list every secret, and a tenant able to create a
   secret carrying the selected label can shadow another's credential. The role
@@ -922,7 +1048,7 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
 nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-snapshotter, go 1.25
 ├── cmd/nydus-snapshotter/
 │   ├── main.go                     cmd.Execute()
-│   └── cmd/{root.go,install.go}    serve; install (DaemonSet entrypoint)
+│   └── cmd/{root.go,install.go,unlabel.go}  serve; install (DaemonSet entrypoint); unlabel (post-delete hook)
 ├── internal/
 │   ├── config/                     config.go (Config, New, Load, Validate), constants.go, types.go, watch.go; testdata/
 │   ├── snapshot/                   snapshots.Snapshotter on core/snapshots/storage: snapshot.go, mount.go, label.go, blobs.go, release.go
@@ -933,7 +1059,7 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 │   ├── auth/                       Keychain (keychain.go), keyring, kube_secret and docker config providers
 │   ├── registry/                   image reference, hosts.toml
 │   ├── cache/                      blob cache GC
-│   ├── installer/                  host install: installer.go, payload.go, kubeconfig.go, version.go
+│   ├── installer/                  host install: installer.go, payload.go, kubeconfig.go, version.go, label.go
 │   ├── server/                     wiring, gRPC serving, socket activation, workers
 │   ├── version/                    -ldflags build information
 │   ├── kmutex/                     keyed mutex (from containerd internal/kmutex)
@@ -1057,6 +1183,23 @@ keeps the first definition read, so one daemon never costs the scrape.
   retries, slice naming).
 - kubernetes: sample-controller (informer and workqueue), kubelet
   `credentialprovider` keyring and config search order.
+- Node label: kata-deploy (`katacontainers.io/kata-runtime` set after the
+  install and selected by its RuntimeClasses, `nodes: get, patch`), KubeVirt
+  `pkg/virt-handler/heartbeat` (the node's own agent patches
+  `kubevirt.io/schedulable`), node-feature-discovery
+  (a post-delete hook Job runs `nfd-master -prune`, with a ServiceAccount
+  and a ClusterRole that are hooks too); nerdctl `pkg/infoutil`, `ctr plugins`
+  and BuildKit's containerd worker (asking the running containerd for its
+  plugins through the introspection API); client-go `tools/pager`; kubelet's
+  `kubeAPIQPS` and `kubeAPIBurst` defaults and the `failureThreshold` of a
+  probe; the DaemonSet controller, which deletes its Pods from a node that
+  no longer matches the `nodeSelector`.
+- Installer config: kubelet `cmd/kubelet/app/options` (`KubeletFlags` keeps
+  only what nodes cannot share, the rest is `KubeletConfiguration`, which
+  holds `containerRuntimeEndpoint`), Cilium (agent and operator read one
+  ConfigMap through `--config-dir`), node-feature-discovery, kube-proxy and
+  Dragonfly's dfinit (a ConfigMap mounted at the binary's `--config` path),
+  node-problem-detector (`NODE_NAME` from the Downward API).
 - gRPC health checking protocol (`grpc.health.v1`) with grpc-go's `health`
   server, as containerd `plugins/services/healthcheck` and BuildKit
   `cmd/buildkitd` register it.

@@ -67,11 +67,13 @@ func Execute() {
 
 // init initializes the root command.
 func init() {
-	flags := rootCmd.Flags()
+	// The install command reads the same config file, the one it installs.
+	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&configPath, "config", config.DefaultPath, "Specify the path to the config file")
 
 	// Add sub command.
 	rootCmd.AddCommand(installCmd)
+	rootCmd.AddCommand(unlabelCmd)
 }
 
 // loadConfig loads the config at path. Only a path that was not asked for

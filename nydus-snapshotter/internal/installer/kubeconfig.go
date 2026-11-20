@@ -74,15 +74,15 @@ func (i *Installer) syncKubeconfig(ctx context.Context) error {
 // clients do and reads the token and the CA from host files, refer to
 // https://github.com/kubernetes/client-go/blob/master/rest/config.go.
 func (i *Installer) kubeconfig(tokenPath, caPath string) ([]byte, error) {
-	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
-	if host == "" || port == "" {
-		return nil, errors.New("KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
+	server, err := i.apiServer()
+	if err != nil {
+		return nil, err
 	}
 
 	kubeconfig, err := clientcmd.Write(clientcmdapi.Config{
 		Clusters: map[string]*clientcmdapi.Cluster{
 			"default": {
-				Server:               "https://" + net.JoinHostPort(host, port),
+				Server:               server,
 				CertificateAuthority: caPath,
 			},
 		},
@@ -106,6 +106,16 @@ func (i *Installer) kubeconfig(tokenPath, caPath string) ([]byte, error) {
 	return kubeconfig, nil
 }
 
+// apiServer returns the address of the API server a Pod is given.
+func (i *Installer) apiServer() (string, error) {
+	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
+	if host == "" || port == "" {
+		return "", errors.New("KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
+	}
+
+	return "https://" + net.JoinHostPort(host, port), nil
+}
+
 // kubeSecretEnabled reports whether the snapshotter reads credentials from
 // secrets: by the payload config or, when the installer rejects that one, by
 // the config installed on the host, which the running snapshotter keeps
@@ -116,13 +126,8 @@ func (i *Installer) kubeSecretEnabled() (bool, error) {
 		return cfg.Auth.KubeSecret.Enable, nil
 	}
 
-	path, hostErr := i.cfg.host(config.DefaultPath)
-	if hostErr != nil {
-		return false, err
-	}
-
-	installed, loadErr := config.Load(path)
-	if loadErr != nil {
+	installed, installedErr := i.cfg.installed()
+	if installedErr != nil {
 		return false, err
 	}
 

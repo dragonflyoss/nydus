@@ -35,12 +35,6 @@ const (
 	// payloadUnitDir is the directory of the unit files in the payload.
 	payloadUnitDir = "systemd"
 
-	// payloadConfigFile is the snapshotter config in the payload.
-	payloadConfigFile = "config/config.yaml"
-
-	// payloadCertsDir is the certs.d directory in the payload.
-	payloadCertsDir = "config/certs.d"
-
 	// temporarySuffix names the file a write goes to before it is renamed
 	// into place.
 	temporarySuffix = ".tmp"
@@ -212,7 +206,7 @@ func (i *Installer) configFiles() ([]file, error) {
 // from certs.d stay on the host, so hosts.toml baked into the node image
 // survive.
 func (i *Installer) certsFiles() ([]file, error) {
-	certsDir := i.cfg.payload(payloadCertsDir)
+	certsDir := i.cfg.certsDir()
 	if _, err := os.Stat(certsDir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -249,7 +243,7 @@ func (i *Installer) certsFiles() ([]file, error) {
 // payloadConfig returns the validated config.yaml of the payload and its
 // content.
 func (i *Installer) payloadConfig() (*config.Config, []byte, error) {
-	data, err := os.ReadFile(i.cfg.payload(payloadConfigFile))
+	data, err := os.ReadFile(i.cfg.Path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read payload config: %w", err)
 	}
@@ -259,9 +253,11 @@ func (i *Installer) payloadConfig() (*config.Config, []byte, error) {
 		return nil, nil, fmt.Errorf("parse payload config: %w", err)
 	}
 
-	// The installer writes to fixed host paths, so a config naming others
-	// would reach the node and never work.
+	// The installer writes to fixed host paths and installs the socket unit
+	// that listens on one, so a config naming others would reach the node
+	// and never work.
 	paths := []struct{ name, path, want string }{
+		{name: "grpc.addr", path: cfg.GRPC.Addr, want: config.DefaultGRPCAddr},
 		{name: "nydusd.binary", path: cfg.Nydusd.Binary, want: config.DefaultNydusdBinary},
 	}
 	if cfg.Auth.KubeSecret.Enable {

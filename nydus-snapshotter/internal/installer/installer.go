@@ -12,32 +12,27 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"time"
 
 	continuityfs "github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
+	"k8s.io/client-go/kubernetes"
 
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd"
 )
 
 const (
-	// DefaultRootfsDir is where the DaemonSet mounts the root filesystem of
-	// the host.
-	DefaultRootfsDir = "/host"
-
-	// DefaultPayloadDir holds what is installed: bin/ and systemd/ from the
-	// image, config/ from the ConfigMap.
-	DefaultPayloadDir = "/opt/nydus-snapshotter/payload"
-
-	// DefaultTokenDir is the Pod's projected service account token directory.
-	DefaultTokenDir = "/var/run/secrets/kubernetes.io/serviceaccount"
-
-	// DefaultSyncInterval is how often the token and the config are copied to
-	// the host, well within the hour a projected token lives.
-	DefaultSyncInterval = time.Minute
+	// NodeNameEnvVar is the environment variable the DaemonSet sets to the
+	// spec.nodeName of the Pod, as node-problem-detector reads its node,
+	// refer to
+	// https://github.com/kubernetes/node-problem-detector/blob/master/cmd/options/options.go.
+	NodeNameEnvVar = "NODE_NAME"
 
 	// JobTimeout bounds a unit start or restart. Restarting the socket stops
 	// the service, then starts the socket and the service again; systemd
@@ -65,28 +60,73 @@ const (
 
 // Config is the installer config.
 type Config struct {
-	// RootfsDir is where the root filesystem of the host is mounted, / when
-	// run on the host.
-	RootfsDir string
+	// InstallerConfig is the installer section of the config file, as it was
+	// when the installer started.
+	config.InstallerConfig
 
-	// PayloadDir holds what is installed.
-	PayloadDir string
+	// Path is the config file to install, the ConfigMap, with certs.d beside
+	// it as on the host.
+	Path string
 
-	// TokenDir is the Pod's service account token directory.
-	TokenDir string
-
-	// SyncInterval is how often the token and the config are copied to the
-	// host.
-	SyncInterval time.Duration
+	// NodeName is the node to label with NodeLabel, the spec.nodeName of the
+	// Pod.
+	NodeName string
 }
 
-// Validate checks the config.
-func (c *Config) Validate() error {
-	if c.SyncInterval <= 0 {
-		return fmt.Errorf("invalid sync interval %s", c.SyncInterval)
+// NewConfig returns the installer config of the config file at path.
+//
+//	config.yaml (ConfigMap) ──▶ installer section ─┐
+//	NODE_NAME (Downward API) ─▶ node name ─────────┴─▶ Config
+func NewConfig(path string) (*Config, error) {
+	c := &Config{
+		InstallerConfig: config.New().Installer,
+		Path:            path,
+		NodeName:        os.Getenv(NodeNameEnvVar),
 	}
 
-	return nil
+	c.load()
+	if c.NodeLabel.Enable && c.NodeName == "" {
+		return nil, errors.New(NodeNameEnvVar + " must name the node when installer.node_label.enable is set")
+	}
+
+	return c, nil
+}
+
+// load sets the installer settings from the config file. A file that cannot
+// be used is left for the install to reject, and the settings fall back, so
+// a broken ConfigMap does not stop the token rotation of a running
+// snapshotter. The installed config is looked up under the rootfs directory
+// c holds, the default one, where the chart mounts the host.
+//
+//	config.yaml ─▶ usable ─────────────────────────▶ its installer section
+//	            └▶ not usable ─▶ installed config ─▶ its installer section
+//	                            └▶ none ───────────▶ the settings c holds
+func (c *Config) load() {
+	cfg, err := config.Load(c.Path)
+	if err == nil {
+		c.InstallerConfig = cfg.Installer
+		return
+	}
+
+	logger := log.L.WithError(err)
+	installed, err := c.installed()
+	if err != nil {
+		logger.WithField("installed", err).Warn("config is not usable and none is installed, keeping the default installer settings")
+		return
+	}
+
+	logger.Warn("config is not usable, keeping the installer settings of the installed config")
+	c.InstallerConfig = installed.Installer
+}
+
+// installed returns the config installed on the host.
+func (c *Config) installed() (*config.Config, error) {
+	path, err := c.host(config.DefaultPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return config.Load(path)
 }
 
 // host returns where a host path is in the Pod. Symlinks in its parent
@@ -107,6 +147,12 @@ func (c *Config) payload(path string) string {
 	return filepath.Join(c.PayloadDir, path)
 }
 
+// certsDir returns the certs.d directory to install, beside the config file
+// as config.DefaultRegistryConfigPath is on the host.
+func (c *Config) certsDir() string {
+	return filepath.Join(filepath.Dir(c.Path), filepath.Base(config.DefaultRegistryConfigPath))
+}
+
 // Installer installs the snapshotter onto the host from the DaemonSet Pod.
 type Installer struct {
 	// cfg is the installer config.
@@ -114,6 +160,21 @@ type Installer struct {
 
 	// systemd manages the host's snapshotter units.
 	systemd systemd.Manager
+
+	// kubeClient is the client of the API server the node is labeled
+	// through, built once.
+	kubeClient kubernetes.Interface
+
+	// snapshotterAddr is the snapshotter's socket on the host, read once
+	// from the config installed there.
+	snapshotterAddr string
+
+	// notReadyChecks is how many checks in a row found the node not ready.
+	notReadyChecks int
+
+	// notReady is why the node had no label coming at the last sync, empty
+	// when it had.
+	notReady string
 }
 
 // New returns an installer that drives the host's units through manager.
@@ -127,8 +188,10 @@ func New(cfg *Config, manager systemd.Manager) *Installer {
 // done. A host whose systemd cannot be used is left untouched. A synced
 // config is not followed by a restart: the snapshotter reloads cgroup and
 // nydusd.config itself and reads certs.d per daemon start; other keys apply
-// on its next restart. It never stops daemons, edits containerd's config or
-// uninstalls.
+// on its next restart. Only with installer.node_label.enable it labels the
+// node while the snapshotter serves and containerd has loaded it. It never
+// stops daemons, edits containerd's config, removes the label when it stops
+// or uninstalls.
 func (i *Installer) Run(ctx context.Context) error {
 	// Check the host's systemd before anything is written to the host, as
 	// kubeadm runs its preflight checks before its first change, refer to
@@ -147,8 +210,15 @@ func (i *Installer) Run(ctx context.Context) error {
 		return err
 	}
 
+	// The snapshotter just started serves a moment later, with kube_secret
+	// once the secrets are listed.
+	i.waitServing(ctx)
+	if err := i.syncNodeLabel(ctx); err != nil {
+		log.G(ctx).WithError(err).Error("sync node label")
+	}
+
 	log.G(ctx).Info("installed, keeping the config and the credentials in sync")
-	tick := time.NewTicker(i.cfg.SyncInterval)
+	tick := time.NewTicker(time.Duration(i.cfg.SyncInterval))
 	defer tick.Stop()
 	for {
 		select {
@@ -159,6 +229,10 @@ func (i *Installer) Run(ctx context.Context) error {
 
 			if err := i.syncConfig(ctx); err != nil {
 				log.G(ctx).WithError(err).Error("sync config")
+			}
+
+			if err := i.syncNodeLabel(ctx); err != nil {
+				log.G(ctx).WithError(err).Error("sync node label")
 			}
 		case <-ctx.Done():
 			return nil

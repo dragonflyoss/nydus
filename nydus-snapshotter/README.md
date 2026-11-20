@@ -19,6 +19,8 @@ make vet        # go vet ./...
 make lint       # golangci-lint v2
 make generate   # mocks
 make image      # installer image with the nydus binary, built from the repository root
+make clean      # remove bin/
+make help       # list the targets
 ```
 
 A multi-arch image: `make image IMAGE=<registry>/nydus-snapshotter
@@ -42,6 +44,17 @@ IMAGE_FLAGS="--platform linux/amd64,linux/arm64 --push"`.
    snapshotter only once it is installed there: the installer Pod itself needs
    a working snapshotter to start, so new nodes either join with overlayfs
    first or carry the units in their image.
+
+The installer takes no flag but `--config`: its settings are the `installer`
+section of `config.yaml`, which it reads from `/etc/nydus-snapshotter/` in the
+Pod, where the DaemonSet mounts the ConfigMap. With
+`installer.node_label.enable` it labels the node `NODE_NAME` names
+`d7y.io/nydus-snapshotter=true` while the snapshotter serves and the node's
+containerd has loaded it, and removes it after three checks in a row fail;
+select the label with a `nodeSelector` or a RuntimeClass. It needs `get` and
+`patch` on `nodes`. An installer that stops keeps the label, so a rollout
+does not take it from the node; `nydus-snapshotter unlabel` removes it from
+every node, and the chart runs that as a post-delete hook.
 
 The installer copies ConfigMap changes to the host every sync interval
 without restarting the snapshotter, which reloads `cgroup` and
