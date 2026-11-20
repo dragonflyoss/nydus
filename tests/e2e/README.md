@@ -109,7 +109,8 @@ requests by itself; nothing is called from `ci.yml`.
   sparse tar corpus run on schedule.
 - Weekly: Benchmark runs the cold-start benchmark and keeps `bench.txt` as
   an artifact; E2E Test With Image Conversion runs
-  the nydusify convert/check sweep over popular images. Neither runs on PRs.
+  the nydusify convert/check sweep over popular images and can also be
+  started manually. Neither runs on PRs.
   Ordinary GA soak defaults remain a 30-second smoke.
 ### PR check groups
 
