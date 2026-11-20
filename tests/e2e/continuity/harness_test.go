@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,24 +30,32 @@ const (
 	heldFileXattrName  = "user.continuity"
 	heldFileXattrValue = "held-across-handoff"
 
-	stressFileRel  = "upgrade/stress_64k.bin"
-	stressFileSize = 64 << 10
+	stressFileRel       = "upgrade/stress_64k.bin"
+	stressFileSize      = 64 << 10
+	recoveryHeldFileRel = "upgrade/recovery-held-64k.bin"
 
 	heldDirRel     = "upgrade/dirmany"
 	heldDirEntries = 1024
 
 	maxUpgradeStall        = 20 * time.Second
 	controlProtocolTimeout = 10 * time.Second
+
+	// helperInheritedFD is the first descriptor a helper process inherits
+	// through exec.Cmd.ExtraFiles.
+	helperInheritedFD = 3
 )
 
 type harness struct {
-	nydus         string
-	workDir       string
-	sourceDir     string
-	blobDir       string
-	mountpoint    string
-	bootstrap     string
-	controlSocket string
+	nydus            string
+	workDir          string
+	sourceDir        string
+	blobDir          string
+	mountpoint       string
+	bootstrap        string
+	controlSocket    string
+	supervisorSocket string
+
+	holder *fakeRecoveryHolder
 }
 
 func (h *harness) spawn(t testing.TB, name string, extra ...string) *mount.Daemon {
@@ -61,11 +72,16 @@ func (h *harness) spawn(t testing.TB, name string, extra ...string) *mount.Daemo
 		args = append(args, "--apiserver", "unix://"+h.controlSocket)
 	}
 
+	if h.supervisorSocket != "" {
+		args = append(args, "--supervisor-socket", "unix://"+h.supervisorSocket)
+	}
+
 	args = append(args, extra...)
 	cmd := exec.Command(h.nydus, args...)
 
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "NYDUS_FUSE_APISERVER=") {
+		if !strings.HasPrefix(entry, "NYDUS_FUSE_APISERVER=") &&
+			!strings.HasPrefix(entry, "NYDUS_FUSE_SUPERVISOR_SOCKET=") {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
@@ -99,16 +115,41 @@ func (h *harness) waitUnmounted(t *testing.T) {
 	}
 }
 
-func (h *harness) waitServing(t *testing.T, daemon *mount.Daemon, timeout time.Duration) {
+// waitServing waits until daemon answers on the control endpoint with the
+// expected Session Identity; a nil sessionID expects a standalone session.
+func (h *harness) waitServing(t *testing.T, daemon *mount.Daemon, sessionID *string, timeout time.Duration) {
 	t.Helper()
 	if !assert.Eventually(t, func() bool {
 		info, err := requestControlInfo(h.controlSocket)
 		if err != nil || info.Info.PID != uint32(daemon.Pid()) {
 			return false
 		}
+		if sessionID == nil {
+			return info.SessionID == nil
+		}
 
-		return info.SessionID == nil
+		return info.SessionID != nil && *info.SessionID == *sessionID
 	}, timeout, 100*time.Millisecond) {
+		t.FailNow()
+	}
+}
+
+func (h *harness) waitControlOwner(t *testing.T, daemon *mount.Daemon, timeout time.Duration) {
+	t.Helper()
+	if !assert.Eventually(t, func() bool {
+		pid, err := controlOwnerPID(h.controlSocket)
+		return err == nil && pid == uint32(daemon.Pid())
+	}, timeout, 100*time.Millisecond) {
+		t.FailNow()
+	}
+}
+
+func (h *harness) waitControlUnavailable(t *testing.T) {
+	t.Helper()
+	if !assert.Eventually(t, func() bool {
+		_, err := requestControlInfo(h.controlSocket)
+		return err != nil
+	}, 10*time.Second, 100*time.Millisecond) {
 		t.FailNow()
 	}
 }
@@ -158,17 +199,26 @@ func (h *harness) stateBase() string {
 	return filepath.Join("/run/nydus/fuse", fmt.Sprint(os.Geteuid()), fmt.Sprintf("%x", digest))
 }
 
-func setup(t *testing.T) (*harness, []byte) {
+// setup builds the continuity image. A protected harness also runs a fake
+// Recovery Holder that every daemon it spawns is pointed at.
+func setup(t *testing.T, protected bool) (*harness, []byte) {
 	t.Helper()
 	mount.FUSE{}.Require(t)
 	h := newHarness(t)
-	stressSource := bytes.Repeat([]byte("nydus-upgrade\n"), stressFileSize/14+1)
+	stressSource := bytes.Repeat([]byte("nydus-failover\n"), stressFileSize/15+1)
 	stressSource = stressSource[:stressFileSize]
 	stressPath := filepath.Join(h.sourceDir, stressFileRel)
 	if !assert.NoError(t, os.MkdirAll(filepath.Dir(stressPath), 0o755)) {
 		t.FailNow()
 	}
 	if !assert.NoError(t, os.WriteFile(stressPath, stressSource, 0o644)) {
+		t.FailNow()
+	}
+	if !assert.NoError(t, os.WriteFile(
+		filepath.Join(h.sourceDir, recoveryHeldFileRel),
+		stressSource,
+		0o644,
+	)) {
 		t.FailNow()
 	}
 
@@ -206,6 +256,11 @@ func setup(t *testing.T) (*harness, []byte) {
 	layout := fixture.MustLayout(t, "zstd-4k")
 	fixture.BuildInto(t, h.blobDir, h.bootstrap, h.sourceDir, layout)
 
+	if protected {
+		h.supervisorSocket = filepath.Join(filepath.Dir(h.controlSocket), "supervisor.sock")
+		newFakeRecoveryHolder(t, h)
+	}
+
 	return h, stressSource
 }
 
@@ -217,6 +272,9 @@ type ioStress struct {
 	ops      int64
 	errs     []string
 	maxStall time.Duration
+
+	crashGeneration int64
+	eioByCrash      map[int64]int64
 }
 
 func (h *harness) startStress(t *testing.T, want []byte) *ioStress {
@@ -224,8 +282,9 @@ func (h *harness) startStress(t *testing.T, want []byte) *ioStress {
 	mntDir := h.mountpoint
 
 	s := &ioStress{
-		stopCh: make(chan struct{}),
-		doneCh: make(chan struct{}),
+		stopCh:     make(chan struct{}),
+		doneCh:     make(chan struct{}),
+		eioByCrash: make(map[int64]int64),
 	}
 
 	t.Cleanup(func() { s.stopOnce.Do(func() { close(s.stopCh) }) })
@@ -246,27 +305,53 @@ func (h *harness) startStress(t *testing.T, want []byte) *ioStress {
 			start := time.Now()
 			var errs []string
 
+			// An operation that spans a crash may fail once with EIO or
+			// ECONNABORTED; those are counted per crash, not reported.
+			recordError := func(operation string, err error, startedAtCrash int64) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+
+				if (errors.Is(err, unix.EIO) || errors.Is(err, unix.ECONNABORTED)) &&
+					s.crashGeneration > startedAtCrash {
+					s.eioByCrash[s.crashGeneration]++
+					return
+				}
+
+				s.errs = append(s.errs, fmt.Sprintf("%s: %v", operation, err))
+			}
+
+			readGeneration := s.currentCrashGeneration()
 			got, err := os.ReadFile(filePath)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("read %s: %v", stressFileRel, err))
+				recordError("read "+stressFileRel, err, readGeneration)
 			} else if !bytes.Equal(want, got) {
 				errs = append(errs, fmt.Sprintf("read %s: content mismatch", stressFileRel))
 			}
 
+			statGeneration := s.currentCrashGeneration()
 			var stat unix.Stat_t
 			if err := unix.Stat(filePath, &stat); err != nil {
-				errs = append(errs, fmt.Sprintf("stat %s: %v", stressFileRel, err))
+				recordError("stat "+stressFileRel, err, statGeneration)
 			} else if stat.Size != int64(len(want)) {
 				errs = append(errs, fmt.Sprintf("stat %s: size %d, want %d",
 					stressFileRel, stat.Size, len(want)))
 			}
 
+			readdirGeneration := s.currentCrashGeneration()
 			entries, err := os.ReadDir(dirPath)
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("readdir %s: %v", heldDirRel, err))
+				recordError("readdir "+heldDirRel, err, readdirGeneration)
 			} else if len(entries) != heldDirEntries {
 				errs = append(errs, fmt.Sprintf("readdir %s: %d entries, want %d",
 					heldDirRel, len(entries), heldDirEntries))
+			}
+
+			// Send an explicit uncached request every iteration; buffered reads,
+			// stat and readdir are served from the kernel caches once warm.
+			statfsGeneration := s.currentCrashGeneration()
+			var statfs unix.Statfs_t
+			if err := unix.Statfs(mntDir, &statfs); err != nil {
+				recordError("statfs", err, statfsGeneration)
 			}
 
 			stall := time.Since(start)
@@ -305,6 +390,28 @@ func (s *ioStress) stop(t *testing.T) (int64, []string, time.Duration) {
 	return s.ops, s.errs, s.maxStall
 }
 
+func (s *ioStress) currentCrashGeneration() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.crashGeneration
+}
+
+func (s *ioStress) markCrash() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.crashGeneration++
+
+	return s.crashGeneration
+}
+
+func (s *ioStress) failoverEIOs() map[int64]int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return maps.Clone(s.eioByCrash)
+}
+
 type partialDirReader struct {
 	fd    int
 	names []string
@@ -312,7 +419,11 @@ type partialDirReader struct {
 
 func (h *harness) openPartialDir(t *testing.T, rel string) *partialDirReader {
 	t.Helper()
-	path := filepath.Join(h.mountpoint, rel)
+	return openPartialDirAt(t, filepath.Join(h.mountpoint, rel))
+}
+
+func openPartialDirAt(t *testing.T, path string) *partialDirReader {
+	t.Helper()
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -357,8 +468,13 @@ func (r *partialDirReader) close() {
 	r.fd = -1
 }
 
-func (h *harness) startFakeHotUpgradeSuccessor(t *testing.T) *mount.Daemon {
+func (h *harness) startFakeHotUpgradeSuccessor(t *testing.T, sessionID *string) *mount.Daemon {
 	t.Helper()
+	sessionJSON, err := json.Marshal(sessionID)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
 	cmd := exec.Command(os.Args[0], "-test.run=^TestPreReadyRollback$")
 
 	cmd.Env = append(os.Environ(),
@@ -366,6 +482,7 @@ func (h *harness) startFakeHotUpgradeSuccessor(t *testing.T) *mount.Daemon {
 		"NYDUS_E2E_FUSE_APISERVER=unix://"+h.controlSocket,
 		"NYDUS_E2E_FUSE_MOUNTPOINT="+h.mountpoint,
 		"NYDUS_E2E_FUSE_BOOTSTRAP="+h.bootstrap,
+		preReadySessionEnv+"="+string(sessionJSON),
 	)
 
 	stdout, w, err := os.Pipe()

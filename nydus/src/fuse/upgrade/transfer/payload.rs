@@ -1,11 +1,13 @@
-//! FUSE hot-upgrade metadata and connection validation.
+//! FUSE transfer metadata and validation of the transferred descriptors.
 
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
+use std::sync::Arc;
 
 use nydus_error::{Context, Error, Result};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::continuity::wire::Transfer;
 
@@ -16,9 +18,14 @@ use super::state::FuseInitState;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct SessionTransferMetadata {
     pub(crate) version: u32,
+    /// The crash-failover session, `None` for a standalone session.
+    pub(crate) session_id: Option<Uuid>,
     pub(crate) mountpoint: String,
     pub(crate) image_digest: String,
     pub(crate) fuse_session_state: FuseInitState,
+    /// Whether fuser's inflight journal follows the FUSE devices; fuser keeps
+    /// none where the kernel resends unanswered requests itself.
+    pub(crate) inflight_journal: bool,
 }
 
 impl SessionTransferMetadata {
@@ -37,6 +44,16 @@ impl SessionTransferMetadata {
 
     fn validate(&self) -> Result<()> {
         check_json_version(self.version)?;
+        if self.session_id.is_some_and(|id| id.is_nil()) {
+            return Err(Error::Protocol(
+                "session transfer metadata has a nil session identity".to_string(),
+            ));
+        }
+        if self.inflight_journal && self.session_id.is_none() {
+            return Err(Error::Protocol(
+                "a standalone session transfer has no inflight journal".to_string(),
+            ));
+        }
         if !Path::new(&self.mountpoint).is_absolute() {
             return Err(Error::Protocol(
                 "session transfer metadata mountpoint is not absolute".to_string(),
@@ -55,7 +72,16 @@ impl SessionTransferMetadata {
         self.fuse_session_state.validate()
     }
 
-    fn check_expected(&self, expected: &InstanceInfo) -> Result<()> {
+    /// Checks the transfer against the expected identity. `session_id` is the one
+    /// the peer advertised or the owner record holds; a standalone `None` must
+    /// match too, so no transfer adds or drops protection.
+    fn check_expected(&self, session_id: Option<Uuid>, expected: &InstanceInfo) -> Result<()> {
+        if self.session_id != session_id {
+            return Err(Error::Protocol(format!(
+                "session transfer returned session {:?}, expected {:?}",
+                self.session_id, session_id
+            )));
+        }
         if self.mountpoint != expected.mountpoint {
             return Err(Error::Protocol(format!(
                 "session transfer mountpoint mismatch: transfer uses {}, expected {}",
@@ -75,59 +101,123 @@ impl SessionTransferMetadata {
 
 /// A received session whose identity and resources have been validated for adoption.
 pub(crate) struct SessionTransfer {
+    /// The validated transfer metadata.
     metadata: SessionTransferMetadata,
-    fuse_fd: OwnedFd,
+
+    /// The FUSE devices, main device first.
+    devices: Vec<OwnedFd>,
+
+    /// The inflight journal, present when the metadata reports one.
+    journal: Option<OwnedFd>,
 }
 
 impl SessionTransfer {
-    /// Duplicates the live connection for handoff.
+    /// Duplicates the session's FUSE devices, main device first, followed by the
+    /// inflight journal of a protected session.
     pub(in crate::fuse::upgrade) fn capture(
         info: &InstanceInfo,
         fuse_session_state: &FuseInitState,
-        fuse_fd: BorrowedFd<'_>,
+        devices: &[OwnedFd],
+        protection: &SessionProtection,
     ) -> Result<Transfer> {
         let metadata = SessionTransferMetadata {
             version: JSON_FORMAT_VERSION,
+            session_id: protection.session_id(),
             mountpoint: info.mountpoint.clone(),
             image_digest: info.require_image_digest()?.to_owned(),
             fuse_session_state: fuse_session_state.clone(),
+            inflight_journal: protection.journal().is_some(),
         };
         let metadata = metadata.encode()?;
-        let fuse_fd = fuse_fd
-            .try_clone_to_owned()
-            .context("failed to duplicate session transfer FUSE descriptor")?;
-        Ok(Transfer {
-            metadata,
-            fds: vec![fuse_fd],
-        })
+        let mut fds = devices
+            .iter()
+            .map(OwnedFd::try_clone)
+            .collect::<std::io::Result<Vec<_>>>()
+            .context("failed to duplicate session transfer FUSE devices")?;
+        if let Some(journal) = protection.journal() {
+            fds.push(
+                journal
+                    .try_clone()
+                    .context("failed to duplicate inflight journal")?,
+            );
+        }
+        Ok(Transfer { metadata, fds })
     }
 
     pub(in crate::fuse::upgrade) fn from_opaque(
         opaque: Transfer,
+        session_id: Option<Uuid>,
         expected: &InstanceInfo,
     ) -> Result<Self> {
         let metadata = SessionTransferMetadata::decode(&opaque.metadata)
             .context("failed to decode session transfer metadata")?;
-        metadata.check_expected(expected)?;
-        if opaque.fds.len() != 1 {
-            return Err(Error::Protocol(
-                "FUSE handoff requires exactly one connection descriptor".to_string(),
-            ));
+        metadata.check_expected(session_id, expected)?;
+        // A standalone session hands over its main device; a protected one every
+        // device its workers read, since only that device can answer a request read on it.
+        let journals = usize::from(metadata.inflight_journal);
+        let device_count = opaque
+            .fds
+            .len()
+            .checked_sub(journals)
+            .filter(|&count| count == 1 || (count > 1 && metadata.session_id.is_some()))
+            .ok_or_else(|| {
+                Error::Protocol(
+                    "session transfer descriptors do not match its protection".to_string(),
+                )
+            })?;
+        let mut devices = opaque.fds;
+        let journal = devices.split_off(device_count).pop();
+        for device in &devices {
+            validate_fuse_connection(device.as_fd())
+                .context("session transfer FUSE connection is unusable")?;
         }
-        let mut fds = opaque.fds.into_iter();
-        let fuse_fd = fds.next().unwrap();
-        validate_fuse_connection(fuse_fd.as_fd())
-            .context("session transfer FUSE connection is unusable")?;
-        Ok(Self { metadata, fuse_fd })
+        Ok(Self {
+            metadata,
+            devices,
+            journal,
+        })
     }
 
-    pub(crate) fn into_adoption(self) -> (SessionTransferMetadata, OwnedFd) {
-        (self.metadata, self.fuse_fd)
+    /// Splits the transfer into its metadata, FUSE devices and inflight journal.
+    pub(crate) fn into_adoption(self) -> (SessionTransferMetadata, Vec<OwnedFd>, Option<OwnedFd>) {
+        (self.metadata, self.devices, self.journal)
+    }
+}
+
+/// Optional crash-failover protection, preserved unchanged across hot upgrade.
+#[derive(Clone)]
+pub(crate) enum SessionProtection {
+    /// The session has no Recovery Holder.
+    Standalone,
+
+    /// The session is retained by a Recovery Holder; `journal` is absent where
+    /// the kernel resends unanswered requests itself.
+    Failover {
+        session_id: Uuid,
+        journal: Option<Arc<OwnedFd>>,
+    },
+}
+
+impl SessionProtection {
+    /// Returns the crash-failover session ID, `None` for a standalone session.
+    pub(crate) fn session_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Standalone => None,
+            Self::Failover { session_id, .. } => Some(*session_id),
+        }
+    }
+
+    /// Returns the inflight journal of a protected session, if fuser keeps one.
+    pub(crate) fn journal(&self) -> Option<&OwnedFd> {
+        match self {
+            Self::Standalone => None,
+            Self::Failover { journal, .. } => journal.as_deref(),
+        }
     }
 }
 
 /// Checks that `fd` is a live, read-write `/dev/fuse` connection.
-pub(crate) fn validate_fuse_connection(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+fn validate_fuse_connection(fd: BorrowedFd<'_>) -> std::io::Result<()> {
     let mut stat = MaybeUninit::<libc::stat>::uninit();
     // SAFETY: stat provides writable storage and fd stays borrowed throughout the call.
     if unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
@@ -172,18 +262,48 @@ mod tests {
     use crate::continuity::test_support::assert_peer_closed;
     use crate::fuse::upgrade::test_support::fuse_init_state;
 
-    fn metadata() -> SessionTransferMetadata {
+    const SESSION: Option<Uuid> = Some(Uuid::from_u128(1));
+
+    fn metadata(session_id: Option<Uuid>) -> SessionTransferMetadata {
         SessionTransferMetadata {
             version: JSON_FORMAT_VERSION,
+            session_id,
             mountpoint: "/mnt/nydus".to_string(),
             image_digest: "01".repeat(32),
             fuse_session_state: fuse_init_state(),
+            inflight_journal: session_id.is_some(),
         }
+    }
+
+    fn transfer(metadata: &SessionTransferMetadata, count: usize) -> (Transfer, Vec<UnixStream>) {
+        let (fds, peers): (Vec<_>, Vec<_>) =
+            (0..count).map(|_| UnixStream::pair().unwrap()).unzip();
+        let transfer = Transfer {
+            metadata: serde_json::to_vec(metadata).unwrap(),
+            fds: fds.into_iter().map(Into::into).collect(),
+        };
+        (transfer, peers)
+    }
+
+    fn rejection(
+        transfer: Transfer,
+        session_id: Option<Uuid>,
+        info: &InstanceInfo,
+        peers: Vec<UnixStream>,
+    ) -> String {
+        let error = SessionTransfer::from_opaque(transfer, session_id, info)
+            .err()
+            .expect("the transfer must be rejected");
+        for peer in peers {
+            assert_peer_closed(peer);
+        }
+        let message = error.report().to_string();
+        message
     }
 
     #[test]
     fn metadata_round_trip_checks_version_and_tolerates_additions() {
-        let metadata = metadata();
+        let metadata = metadata(SESSION);
         let encoded = metadata.encode().unwrap();
         let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(json["version"], 1);
@@ -204,6 +324,18 @@ mod tests {
         extended["fuse_session_state"]["optional_extension"] = serde_json::json!(true);
         assert!(SessionTransferMetadata::decode(&serde_json::to_vec(&extended).unwrap()).is_ok());
 
+        let mut standalone = json.clone();
+        standalone["session_id"] = serde_json::Value::Null;
+        for (mut invalid, field, value) in [
+            (json.clone(), "session_id", serde_json::json!(Uuid::nil())),
+            (json.clone(), "mountpoint", serde_json::json!("relative")),
+            (standalone, "inflight_journal", serde_json::json!(true)),
+        ] {
+            invalid[field] = value;
+            assert!(
+                SessionTransferMetadata::decode(&serde_json::to_vec(&invalid).unwrap()).is_err()
+            );
+        }
         let mut invalid_protocol = json;
         invalid_protocol["fuse_session_state"]["proto_major"] = serde_json::json!(8);
         assert!(
@@ -213,57 +345,54 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_handoff_identity_closes_the_received_descriptor() {
-        for (info, expected_error) in [
+    fn mismatched_identity_or_protection_closes_the_received_descriptors() {
+        let info = InstanceInfo::new("/mnt/nydus", Some(&[1; 32]));
+        for (expected_info, advertised, transferred, expected_error) in [
             (
                 InstanceInfo::new("/other", Some(&[1; 32])),
+                None,
+                None,
                 "mountpoint mismatch",
             ),
             (
                 InstanceInfo::new("/mnt/nydus", Some(&[2; 32])),
+                None,
+                None,
                 "image content mismatch",
             ),
+            (info.clone(), None, SESSION, "returned session"),
+            (info.clone(), SESSION, None, "returned session"),
+            (
+                info.clone(),
+                SESSION,
+                Some(Uuid::from_u128(2)),
+                "returned session",
+            ),
         ] {
-            let (fd, peer) = UnixStream::pair().unwrap();
-            let transfer = Transfer {
-                metadata: metadata().encode().unwrap(),
-                fds: vec![fd.into()],
-            };
-            let error = SessionTransfer::from_opaque(transfer, &info)
-                .err()
-                .expect("handoff must match the expected identity");
-            assert!(
-                error.report().to_string().contains(expected_error),
-                "{error:?}"
-            );
-            assert_peer_closed(peer);
+            let (transfer, peers) = transfer(&metadata(transferred), 2);
+            let error = rejection(transfer, advertised, &expected_info, peers);
+            assert!(error.contains(expected_error), "{error}");
         }
     }
 
     #[test]
-    fn invalid_handoff_descriptors_are_rejected_and_closed() {
-        for count in [0, 1, 2] {
-            let (fds, peers): (Vec<_>, Vec<_>) =
-                (0..count).map(|_| UnixStream::pair().unwrap()).unzip();
-            let transfer = Transfer {
-                metadata: metadata().encode().unwrap(),
-                fds: fds.into_iter().map(Into::into).collect(),
-            };
-            let error = SessionTransfer::from_opaque(
-                transfer,
-                &InstanceInfo::new("/mnt/nydus", Some(&[1; 32])),
-            )
-            .err()
-            .expect("invalid handoff resources must be rejected");
-            let expected = if count == 1 {
-                "/dev/fuse"
-            } else {
-                "exactly one"
-            };
-            assert!(error.report().to_string().contains(expected), "{error:?}");
-            for peer in peers {
-                assert_peer_closed(peer);
-            }
+    fn descriptor_layout_must_match_the_protection() {
+        let info = InstanceInfo::new("/mnt/nydus", Some(&[1; 32]));
+        let mut resending = metadata(SESSION);
+        resending.inflight_journal = false;
+        for (metadata, count, expected_error) in [
+            (metadata(None), 0, "do not match its protection"),
+            (metadata(None), 2, "do not match its protection"),
+            (metadata(None), 1, "/dev/fuse"),
+            (metadata(SESSION), 1, "do not match its protection"),
+            (metadata(SESSION), 3, "/dev/fuse"),
+            (resending.clone(), 0, "do not match its protection"),
+            (resending, 2, "/dev/fuse"),
+        ] {
+            let session_id = metadata.session_id;
+            let (transfer, peers) = transfer(&metadata, count);
+            let error = rejection(transfer, session_id, &info, peers);
+            assert!(error.contains(expected_error), "{count}: {error}");
         }
     }
 }
