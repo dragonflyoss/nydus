@@ -1,6 +1,7 @@
 name: E2E Test With Image Conversion
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 4 * * 1'
 
