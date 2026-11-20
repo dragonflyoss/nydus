@@ -1,6 +1,6 @@
 [package]
 name = "nydus-format"
-version = "3.0.0-beta.3"
+version = "3.0.0-rc.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -14,6 +14,7 @@ zstd = "0.13"
 crc32c = "0.6"
 hex = { workspace = true }
 libc = { workspace = true }
+memmap2 = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 zerocopy = { version = "0.8", features = ["derive"] }

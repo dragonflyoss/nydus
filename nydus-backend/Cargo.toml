@@ -1,6 +1,6 @@
 [package]
 name = "nydus-backend"
-version = "3.0.0-beta.3"
+version = "3.0.0-rc.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -56,9 +56,9 @@ leaky-bucket = { version = "1", optional = true }
 libc = { workspace = true }
 lru = { version = "0.18", optional = true }
 rand = { version = "0.9", optional = true }
-nydus-config = { version = "3.0.0-beta.3", path = "../nydus-config" }
-nydus-format = { version = "3.0.0-beta.3", path = "../nydus-format" }
-nydus-telemetry = { version = "3.0.0-beta.3", path = "../nydus-telemetry" }
+nydus-config = { version = "3.0.0-rc.0", path = "../nydus-config" }
+nydus-format = { version = "3.0.0-rc.0", path = "../nydus-format" }
+nydus-telemetry = { version = "3.0.0-rc.0", path = "../nydus-telemetry" }
 reqwest = { version = "0.12", default-features = false, features = [
   "hickory-dns",
   "rustls-tls",

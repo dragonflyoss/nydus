@@ -481,18 +481,16 @@ impl LocalBlobCache {
     /// Fetch and decode one prefetch batch, trimmed to the groups no other
     /// reader or process has published yet; groups whose bytes are intact in
     /// the cache file are published without a fetch.
-    fn prefetch_batch(
-        &self,
-        batch: Range<usize>,
-        buffers: &mut ChunkGroupBuffers,
-        cache_file: &File,
-    ) -> io::Result<()> {
+    fn prefetch_batch(&self, batch: Range<usize>, cache_file: &File) -> io::Result<()> {
         let batch = self.trim_ready(batch)?;
         if batch.is_empty() {
             return Ok(());
         }
         self.adopt_intact_groups(batch.clone(), cache_file)?;
-        self.fill_unready_groups(batch, ReadKind::Prefetch, buffers, cache_file)?;
+
+        // Fresh buffers per batch, so a worker never holds the largest group it has seen.
+        let mut buffers = ChunkGroupBuffers::default();
+        self.fill_unready_groups(batch, ReadKind::Prefetch, &mut buffers, cache_file)?;
         Ok(())
     }
 
@@ -585,7 +583,6 @@ impl LocalBlobCache {
     fn stream_ondemand_blob_batch(
         &self,
         batch: Range<usize>,
-        buffers: &mut ChunkGroupBuffers,
         skip: &(dyn Fn(&BlobMetadataChunkGroupExtent) -> bool + Sync),
         cb: &(dyn Fn(&BlobMetadataChunkGroupExtent, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<(u64, u64)> {
@@ -602,8 +599,11 @@ impl LocalBlobCache {
         }
         let range = self.chunk_group(start).compressed_offset()
             ..self.chunk_group(end - 1).compressed_range().end;
+
+        // Fresh buffers per batch, so a worker never holds the largest group it has seen.
+        let mut buffers = ChunkGroupBuffers::default();
         let (mut reader, decoded) =
-            self.fetch_window(&(start..end), ReadKind::Prefetch, buffers)?;
+            self.fetch_window(&(start..end), ReadKind::Prefetch, &mut buffers)?;
         let mut failed = 0;
         for index in start..end {
             let group = self.chunk_group(index);
@@ -631,21 +631,19 @@ impl LocalBlobCache {
     }
 
     /// Run `job` over `batches` in blob order, sequentially or through a
-    /// pool of `workers` threads each owning its fetch buffers; the deadline
-    /// is checked before every batch and the first error stops every worker
-    /// after its current batch.
+    /// pool of `workers` threads; the deadline is checked before every batch
+    /// and the first error stops every worker after its current batch.
     fn run_batches(
         &self,
         batches: &[Range<usize>],
         workers: usize,
         deadline: Option<Instant>,
-        job: &(dyn Fn(&Range<usize>, &mut ChunkGroupBuffers) -> io::Result<()> + Sync),
+        job: &(dyn Fn(&Range<usize>) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         if workers <= 1 || batches.len() == 1 {
-            let mut buffers = ChunkGroupBuffers::default();
             for batch in batches {
                 super::check_prefetch_deadline(deadline)?;
-                job(batch, &mut buffers)?;
+                job(batch)?;
             }
             return Ok(());
         }
@@ -653,23 +651,20 @@ impl LocalBlobCache {
         let failure: Mutex<Option<io::Error>> = Mutex::new(None);
         thread::scope(|scope| {
             for _ in 0..workers.min(batches.len()) {
-                scope.spawn(|| {
-                    let mut buffers = ChunkGroupBuffers::default();
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= batches.len() {
-                            break;
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    if index >= batches.len() {
+                        break;
+                    }
+                    let result = super::check_prefetch_deadline(deadline)
+                        .and_then(|()| job(&batches[index]));
+                    if let Err(err) = result {
+                        let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
+                        if slot.is_none() {
+                            *slot = Some(err);
                         }
-                        let result = super::check_prefetch_deadline(deadline)
-                            .and_then(|()| job(&batches[index], &mut buffers));
-                        if let Err(err) = result {
-                            let mut slot = failure.lock().unwrap_or_else(|e| e.into_inner());
-                            if slot.is_none() {
-                                *slot = Some(err);
-                            }
-                            next.store(batches.len(), Ordering::Relaxed);
-                            break;
-                        }
+                        next.store(batches.len(), Ordering::Relaxed);
+                        break;
                     }
                 });
             }
@@ -843,8 +838,8 @@ impl BlobCache for LocalBlobCache {
         let workers = workers.max(1);
         let ramp = if workers > 1 { workers } else { 0 };
         let batches = plan_prefetch_batches(&self.blob_metadata, self.options.fetch_size, ramp);
-        self.run_batches(&batches, workers, deadline, &|batch, buffers| {
-            self.prefetch_batch(batch.clone(), buffers, cache_file.as_ref())
+        self.run_batches(&batches, workers, deadline, &|batch| {
+            self.prefetch_batch(batch.clone(), cache_file.as_ref())
         })?;
 
         // A successful full prefetch means every group is now ready (decoded
@@ -992,9 +987,9 @@ impl BlobCache for LocalBlobCache {
         let batches = plan_prefetch_batches(&self.blob_metadata, self.options.fetch_size, ramp);
         let bytes = AtomicU64::new(0);
         let failed = AtomicU64::new(0);
-        self.run_batches(&batches, workers, deadline, &|batch, buffers| {
+        self.run_batches(&batches, workers, deadline, &|batch| {
             let (batch_bytes, batch_failed) =
-                self.stream_ondemand_blob_batch(batch.clone(), buffers, skip, cb)?;
+                self.stream_ondemand_blob_batch(batch.clone(), skip, cb)?;
             bytes.fetch_add(batch_bytes, Ordering::Relaxed);
             failed.fetch_add(batch_failed, Ordering::Relaxed);
             Ok(())
@@ -1218,8 +1213,16 @@ fn load_or_fetch_blob_metadata(
     backend: &Arc<dyn Backend>,
     kind: ReadKind,
 ) -> io::Result<BlobMetadata> {
+    // Map the sidecar rather than read it, page cache rather than private memory.
+    let map_blob_metadata = || {
+        let file = File::open(blob_metadata_path)?;
+        // SAFETY: the sidecar is only ever replaced by rename, never rewritten.
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        BlobMetadata::from_bytes(mmap).map_err(io::Error::other)
+    };
+
     if blob_metadata_path.is_file() {
-        match BlobMetadata::from_path(blob_metadata_path) {
+        match map_blob_metadata() {
             Ok(blob_metadata) => return Ok(blob_metadata),
             Err(err) => warn!(
                 "cached blob meta {} is invalid, fetching it again: {err}",
@@ -1244,7 +1247,7 @@ fn load_or_fetch_blob_metadata(
     }
     tmp.persist(blob_metadata_path).map_err(|err| err.error)?;
 
-    BlobMetadata::from_path(blob_metadata_path).map_err(io::Error::other)
+    map_blob_metadata()
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up

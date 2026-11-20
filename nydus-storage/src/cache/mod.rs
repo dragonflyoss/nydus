@@ -14,7 +14,7 @@ use nydus_config::StorageConfig;
 use nydus_format::blob::{BlobMetadata, BlobMetadataChunkGroupExtent, BlobMetadataCompressor};
 use nydus_telemetry::metrics::WriteFailureReason;
 use tracing::debug;
-use zstd::stream::raw::{Decoder, InBuffer, Operation, OutBuffer};
+use zstd::stream::raw::{DParameter, Decoder, InBuffer, Operation, OutBuffer};
 
 /// Default on-demand fetch size: the compressed bytes one backend read
 /// covers around a missed chunk group (see [`CacheOptions::fetch_size`]).
@@ -467,6 +467,8 @@ impl<'b> ChunkGroupReader<'b> {
         self.skip_to(group.compressed_offset())?;
         let end = group.compressed_range().end;
         let mut decoder = Decoder::new()?;
+        // `decoded` holds the whole frame, so zstd decodes into it without a window buffer.
+        decoder.set_parameter(DParameter::StableOutBuffer(true))?;
         let mut output = OutBuffer::around(decoded);
         let mut hint = 0;
         while self.offset < end {

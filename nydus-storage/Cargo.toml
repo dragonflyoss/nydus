@@ -1,6 +1,6 @@
 [package]
 name = "nydus-storage"
-version = "3.0.0-beta.3"
+version = "3.0.0-rc.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -13,17 +13,17 @@ crc32c = "0.6"
 hex = { workspace = true }
 libc = { workspace = true }
 memmap2 = { workspace = true }
-nydus-backend = { version = "3.0.0-beta.3", path = "../nydus-backend" }
-nydus-config = { version = "3.0.0-beta.3", path = "../nydus-config" }
-nydus-format = { version = "3.0.0-beta.3", path = "../nydus-format" }
-nydus-telemetry = { version = "3.0.0-beta.3", path = "../nydus-telemetry" }
+nydus-backend = { version = "3.0.0-rc.0", path = "../nydus-backend" }
+nydus-config = { version = "3.0.0-rc.0", path = "../nydus-config" }
+nydus-format = { version = "3.0.0-rc.0", path = "../nydus-format" }
+nydus-telemetry = { version = "3.0.0-rc.0", path = "../nydus-telemetry" }
 prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
 xattr = { workspace = true }
-zstd = "0.13"
+zstd = { version = "0.13", features = ["experimental"] }
 lz4_flex = "0.11"
 
 [dev-dependencies]

@@ -8,6 +8,8 @@ use nydus_config::{default_log_dir, VersionValueParser, NAME};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub use nydus::api_server;
+#[cfg(target_os = "linux")]
+mod allocator;
 pub mod build;
 pub mod check;
 pub mod export;

@@ -22,7 +22,7 @@ pub use compressor::BlobMetadataCompressor;
 pub use digester::BlobMetadataDigester;
 pub use footer::BlobFooter;
 pub use metadata::{
-    BlobMetadata, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
+    BlobMetadata, BlobMetadataBytes, BlobMetadataChunkGroup, BlobMetadataChunkGroupDigest,
     BlobMetadataChunkGroupExtent, BlobMetadataChunkGroupIndex, BlobMetadataChunkGroupRedirect,
     BlobMetadataChunkLength, BlobMetadataHeader, BlobMetadataTable, BlobMetadataTableType,
 };

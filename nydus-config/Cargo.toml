@@ -1,6 +1,6 @@
 [package]
 name = "nydus-config"
-version = "3.0.0-beta.3"
+version = "3.0.0-rc.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ dragonfly = []
 [dependencies]
 clap = { workspace = true }
 humantime-serde = { workspace = true }
-nydus-error = { version = "3.0.0-beta.3", path = "../nydus-error" }
+nydus-error = { version = "3.0.0-rc.0", path = "../nydus-error" }
 rustls-pki-types = { version = "1", features = ["std"] }
 serde = { workspace = true }
 serde_yaml = "0.9"

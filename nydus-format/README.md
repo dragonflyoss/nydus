@@ -5,6 +5,9 @@ images: blob layout (footer, blob meta), EROFS metadata structures, and the
 byte-level utilities they share.
 
 - `blob`: the blob-level layout — footer, blob metadata, feature flags.
+  `BlobMetadata::from_bytes` is the one parser of a blob meta, from bytes in
+  memory (`Vec<u8>`) or a sidecar the caller mapped (`memmap2::Mmap`);
+  `from_path` reads a sidecar and parses it.
 - `erofs`: zero-copy views of EROFS on-disk metadata (superblock, inodes,
   dirents).
 - `utils`: digests, alignment and other byte-level helpers.

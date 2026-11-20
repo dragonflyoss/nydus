@@ -1,6 +1,6 @@
 # Nydus Design
 
-Current contract for this branch. Start at the
+Current contract for Nydus v3. Start at the
 [documentation index](../README.md#documentation) for the EROFS format and
 transport guides.
 The private `.blob.meta` and footer layouts carry no version: compatibility is
@@ -2563,14 +2563,25 @@ if the kernel cannot provide huge pages. The mapping lifetime is unchanged.
 Smaller buffers use ordinary vectors. Zstandard decodes directly into the
 declared-size output slice, and an unexpected decoded length remains an error.
 This changes temporary memory management, not the persistent data cache or
-fetch concurrency. Prefetch workers continue to reuse their fetch buffers.
+fetch concurrency. Prefetch workers take fresh buffers for every batch, so a
+worker holds the chunk groups of its batch rather than the largest it has seen.
 
-Three further measures keep the idle footprint of a mount service small. The
+Further measures keep the footprint of a mount service small. The
 standalone bootstrap is mapped with a read-ahead hint (`MADV_WILLNEED`) rather
 than pre-faulted, so the whole file is pulled into the page cache but only the
-metadata actually touched counts toward RSS. The asynchronous log writers queue
-at most 8192 lines each instead of the crate default of 128k, which alone
-pinned about 4 MiB per appender. On glibc, the `nydus` binary caps malloc at
+metadata actually touched counts toward RSS. The blob meta sidecars of the
+cache directory are mapped as well rather than read into memory. The
+asynchronous log writers queue at most 1024 lines each instead of the crate
+default of 128k, which alone pinned about 4 MiB per appender. The `nydus`
+binary allocates with mimalloc, and the long-running services set its options
+before the first allocation, each unless its `MIMALLOC_*` environment variable
+is already set: transparent huge pages are disabled for the process
+(`MIMALLOC_ALLOW_THP=0`, which also leaves the huge-page hint of the fetch
+buffers above without effect in these services), freed pages go back to the
+OS at once (`MIMALLOC_PURGE_DELAY=0`), objects over 4 MiB are mapped from the
+OS (`MIMALLOC_ARENA_MAX_OBJECT_SIZE=4MiB`, which keeps the zeroed 16 MiB
+request buffer of every FUSE thread untouched), and arenas are reserved
+64 MiB at a time (`MIMALLOC_ARENA_RESERVE=64MiB`). On glibc, the `nydus` binary caps malloc at
 two arenas and fixes the mmap threshold at 512 KiB (trim threshold 1 MiB) for
 the long-running services only; build, check, merge, export and optimize keep
 the allocator defaults. Explicit `MALLOC_ARENA_MAX`, `MALLOC_MMAP_THRESHOLD_`,
@@ -3193,7 +3204,8 @@ These rules belong in the merge metadata layer, not in build and not in mount.
 
 The nydus v3 format described here is self-consistent and does not preserve
 on-disk compatibility with earlier Nydus image formats (RAFS v5/v6): bootstraps
-are native EROFS images rather than RAFS metadata.
+are native EROFS images rather than RAFS metadata. Nydus v2 (RAFS) lives on the
+[`master`](https://github.com/dragonflyoss/nydus/tree/master) branch.
 
 EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Nydus runtime
