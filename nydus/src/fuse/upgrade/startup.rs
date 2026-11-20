@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use fuser::Config;
+use nydus_backend::Backend;
 use nydus_core::{Metrics, OndemandRecorder};
 use nydus_error::{Context, Error, Result};
 use uuid::Uuid;
@@ -16,6 +17,7 @@ use super::transfer::SessionTransfer;
 use crate::continuity::startup::{self, Frontend, Open};
 use crate::fuse::mount::{is_fuse_fstype, mount_entry_of};
 use crate::fuse::{ErofsFs, FuseService};
+use crate::systemd::Notifier;
 
 /// The maximum number of final-component symlinks explicitly expanded during resolution.
 const MAX_SYMLINK_HOPS: usize = 40;
@@ -38,6 +40,7 @@ impl Startup {
         image_digest: Option<&[u8]>,
         metrics: Arc<Metrics>,
         ondemand: Arc<OndemandRecorder>,
+        backend: Option<Arc<dyn Backend>>,
     ) -> Result<Self> {
         let mountpoint = normalize_mountpoint(mountpoint)?;
         let mountpoint_id = mountpoint.to_str().ok_or_else(|| {
@@ -60,6 +63,7 @@ impl Startup {
                 api_socket: api_socket.map(|path| path.components().collect()),
                 metrics,
                 ondemand,
+                backend,
             },
         })
     }
@@ -202,10 +206,11 @@ pub struct RunningSession {
 }
 
 impl RunningSession {
-    pub fn serve(self) -> Result<()> {
+    /// Serves until teardown finishes, reporting its start through `notifier`.
+    pub fn serve(self, notifier: &Notifier) -> Result<()> {
         self.session.serve(|session| {
             session
-                .serve(&self.shutdown)
+                .serve(&self.shutdown, notifier)
                 .context("failed to finish FUSE session")
         })
     }
@@ -301,7 +306,8 @@ mod tests {
                 None,
                 None,
                 metrics(),
-                ondemand()
+                ondemand(),
+                None
             )
             .unwrap()
             .mountpoint,
@@ -315,7 +321,8 @@ mod tests {
                 None,
                 None,
                 metrics(),
-                ondemand()
+                ondemand(),
+                None
             )
             .is_err());
         }
@@ -325,7 +332,8 @@ mod tests {
             Some(dir.path().join("api.sock")),
             Some(&[0; 32]),
             metrics(),
-            ondemand()
+            ondemand(),
+            None,
         )
         .is_err());
     }
@@ -346,6 +354,7 @@ mod tests {
                 Some(&[0; 32]),
                 metrics(),
                 ondemand(),
+                None,
             )
             .unwrap();
             startup.coordinator.state_base = state.clone();

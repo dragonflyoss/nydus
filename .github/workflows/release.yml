@@ -38,29 +38,31 @@ jobs:
             target: aarch64-unknown-linux-musl
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: 1.88.0
           targets: ${{ matrix.target }}
 
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
         with:
           repo-token: ${{ github.token }}
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: nydusify/go.mod
-          cache-dependency-path: nydusify/go.sum
+          cache-dependency-path: |
+            nydusify/go.sum
+            nydus-snapshotter/go.sum
 
       - name: Install musl toolchain
         run: |
@@ -86,11 +88,18 @@ jobs:
           cd nydusify
           go build -ldflags "-s -w" -o nydusify .
 
+      - name: Build nydus-snapshotter
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: make -C nydus-snapshotter build VERSION="${RELEASE_TAG}"
+
       - name: Package release tarball
         run: |
           mkdir nydus-static
-          cp target/${{ matrix.target }}/release/nydus nydusify/nydusify config/registry.example.yaml nydus-static/
-          for bin in nydus-static/nydus nydus-static/nydusify; do
+          cp target/${{ matrix.target }}/release/nydus nydusify/nydusify nydus-snapshotter/bin/nydus-snapshotter config/registry.example.yaml nydus-static/
+          for bin in nydus-static/nydus nydus-static/nydusify nydus-static/nydus-snapshotter; do
             file "${bin}" | grep -Eq 'statically linked|static-pie linked'
             "./${bin}" --help > /dev/null
           done
@@ -100,7 +109,7 @@ jobs:
           echo "tarball=${tarball}" >> "${GITHUB_ENV}"
 
       - name: Upload release tarball
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: nydus-release-tarball-linux-${{ matrix.arch }}
           path: |
@@ -108,16 +117,142 @@ jobs:
             ${{ env.tarball }}.sha256sum
           if-no-files-found: error
 
+  # Package the build job's binaries natively per platform and push them by
+  # digest, then merge the digests into one multi-arch image tagged like the
+  # release, nightly included, refer to
+  # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners.
+  image:
+    name: image (${{ matrix.arch }})
+    needs: [build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Download release tarball
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: nydus-release-tarball-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/tarball
+
+      # The binaries stage of the Dockerfile is replaced with the tarball's
+      # binaries, so the image ships exactly what the release publishes, with
+      # the version, commit and build time the Makefile stamped into them.
+      - name: Extract binaries
+        run: |
+          mkdir "${RUNNER_TEMP}/binaries"
+          tar -xzf "${RUNNER_TEMP}/tarball/nydus-static-${RELEASE_TAG}-linux-${{ matrix.arch }}.tgz" \
+            -C "${RUNNER_TEMP}/binaries" --strip-components=1 nydus-static/nydus nydus-static/nydus-snapshotter
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: nydus-snapshotter/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-contexts: binaries=${{ runner.temp }}/binaries
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.RELEASE_TAG }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/nydus-snapshotter,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: nydus-snapshotter-digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge
+    needs: [image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/nydus-snapshotter
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: nydus-snapshotter-digest-*
+          merge-multiple: true
+          path: digests
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list
+        id: manifest
+        working-directory: digests
+        run: |
+          docker buildx imagetools create -t "${IMAGE}:${RELEASE_TAG}" \
+            --annotation "index:org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --annotation "index:org.opencontainers.image.description=Installer of nydus-snapshotter, a containerd proxy snapshotter for Nydus v3 images" \
+            --annotation "index:org.opencontainers.image.version=${RELEASE_TAG}" \
+            $(printf "${IMAGE}@sha256:%s " *)
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${RELEASE_TAG}" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
   release:
     name: Release
-    needs: [build]
+    needs: [build, merge]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - name: Download release tarballs
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: nydus-release-tarball-*
           merge-multiple: true
@@ -125,7 +260,7 @@ jobs:
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: Nydus ${{ github.ref_name }}
           generate_release_notes: true

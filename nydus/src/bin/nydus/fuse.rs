@@ -4,6 +4,7 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::upgrade::Startup;
 use nydus::fuse::ErofsFs;
 use nydus::signal;
+use nydus::systemd::Notifier;
 use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, default_runtime_dir,
@@ -257,7 +258,7 @@ impl FuseCommand {
             .as_ref()
             .map(|config| CacheOptions::from(&config.storage))
             .unwrap_or_default();
-        let reader = match (&self.blob, &self.bootstrap, backend) {
+        let reader = match (&self.blob, &self.bootstrap, backend.clone()) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(
@@ -311,8 +312,20 @@ impl FuseCommand {
             image_digest.as_ref().map(|digest| digest.as_slice()),
             reader.metrics().clone(),
             ondemand_recorder,
+            backend,
         )?;
+
+        // Start the watchdog keep-alive before a session exists: a daemon
+        // that cannot keep it up fails here, with no mount for the service
+        // manager's kill to take down.
+        let notifier = Notifier::from_env();
+        let _watchdog = notifier.spawn_watchdog()?;
         let session = startup.start(fs, &config, shutdown)?;
+
+        // The mount is served and a configured API endpoint is published, or
+        // its publication failed after a hot upgrade: report readiness to the
+        // service manager.
+        notifier.ready();
 
         let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
@@ -340,7 +353,7 @@ impl FuseCommand {
             }
         }
 
-        let result = session.serve();
+        let result = session.serve(&notifier);
 
         // The filesystem is unmounted: wind down the detached prefetch thread.
         if let Some(stop) = prefetch_stop {

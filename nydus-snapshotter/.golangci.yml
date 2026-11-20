@@ -1,0 +1,59 @@
+version: "2"
+run:
+  modules-download-mode: readonly
+linters:
+  default: none
+  # The linters containerd and dragonfly enable, refer to
+  # https://github.com/containerd/containerd/blob/main/.golangci.yml. revive
+  # and staticcheck hold doc comments and names to Go's standard, refer to
+  # https://go.dev/doc/comment and https://go.dev/wiki/CodeReviewComments.
+  enable:
+    - bodyclose
+    - copyloopvar
+    - dupword
+    - errcheck
+    - errorlint
+    - goconst
+    - gocyclo
+    - govet
+    - ineffassign
+    - misspell
+    - nolintlint
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usetesting
+  settings:
+    gocyclo:
+      min-complexity: 100
+    staticcheck:
+      checks:
+        - all
+        - -QF1008
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Table test expect funcs name every parameter, used or not.
+      - linters:
+          - revive
+        text: unused-parameter
+    paths:
+      # A verbatim copy of containerd's internal/kmutex.
+      - internal/kmutex
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/dragonflyoss/nydus/nydus-snapshotter)
+  exclusions:
+    generated: lax

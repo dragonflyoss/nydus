@@ -341,6 +341,7 @@ mod tests {
             &format!("unix://{}", path.display()),
             metrics(),
             ondemand(),
+            None,
         )
         .unwrap();
         let error = probe(&path, &LiveInfo::new()).err().unwrap();
@@ -426,6 +427,7 @@ mod tests {
             session.clone(),
             metrics(),
             ondemand(),
+            None,
         )
         .unwrap();
         let handoff = probe(&path, &info).unwrap().unwrap().begin(&info).unwrap();

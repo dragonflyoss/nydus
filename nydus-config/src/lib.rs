@@ -237,14 +237,15 @@ pub struct RegistryConfig {
     /// The image repository (no tag or digest), e.g. `library/ubuntu`.
     pub repository: String,
 
-    /// The optional credentials: base64-encoded `username:password` for HTTP
-    /// Basic auth (the value sent verbatim after `Basic `).
+    /// The optional basic credentials, base64 of `username:password` as the
+    /// `auth` of a docker config.json. They answer a registry challenge,
+    /// directly or by fetching a bearer token the daemon renews on its own.
     #[serde(default)]
     pub auth: Option<RedactedString>,
 
-    /// The optional bearer token (the value sent verbatim after `Bearer `),
-    /// sent before any challenge until the registry answers `401`. Keep
-    /// `auth` to fetch a replacement once the token expires.
+    /// The optional bearer token, as the `registrytoken` of a docker
+    /// config.json, sent before any challenge. The daemon cannot renew it:
+    /// after a `401` it is dropped and `auth`, when set, answers.
     #[serde(default)]
     pub registry_token: Option<RedactedString>,
 

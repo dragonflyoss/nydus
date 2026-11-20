@@ -57,6 +57,24 @@ pub trait Backend: Send + Sync {
     /// Returns the metrics of the image, shared with the layers above.
     fn metrics(&self) -> &Arc<Metrics>;
 
+    /// Replaces the backend's basic credentials with `username` and
+    /// `password`. Backends without credentials report `Unsupported`.
+    fn set_basic_auth(&self, _username: &str, _password: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no credentials",
+        ))
+    }
+
+    /// Replaces the backend's bearer token with `token`. Backends without
+    /// credentials report `Unsupported`.
+    fn set_bearer_auth(&self, _token: &str) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no credentials",
+        ))
+    }
+
     /// Returns the full blob digest of `blob_id`, which names the cache files.
     ///
     /// ```text

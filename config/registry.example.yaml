@@ -29,14 +29,18 @@ backend:
     # Image repository (no tag/digest), e.g. "library/ubuntu".
     repository: library/nydus-demo
 
-    # Optional basic-auth credential: the base64-encoded `username:password`
-    # string. Omit `auth` entirely for anonymous / token-only registries.
+    # Optional credentials: the base64-encoded `username:password` string, as
+    # the `auth` of a docker config.json. They answer a registry challenge:
+    # sent as Basic to the registry, or to its token service to fetch a bearer
+    # token, which the daemon renews on its own. Omit `auth` entirely for
+    # anonymous / token-only registries.
     # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
 
-    # Optional bearer token, sent before any challenge until the registry
-    # answers 401. Keep `auth` above to fetch a replacement once the token
-    # expires.
+    # Optional bearer token issued for the registry, as the `registrytoken` of
+    # a docker config.json, sent as Bearer before any challenge. The daemon
+    # cannot renew it: once the registry answers 401 it is dropped, and the
+    # challenge is answered with `auth` above, when set.
     #
     # registry_token: <bearer-token>
 

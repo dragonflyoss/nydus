@@ -9,6 +9,7 @@ use super::mount::{connection_dead, finish_session, mount_dev_of};
 use super::upgrade::{
     validate_fuse_connection, FuseInitState, SessionOwner, SessionRuntimeHandle, SessionTransfer,
 };
+use crate::systemd::Notifier;
 use nydus_error::{Context, Error, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,7 +186,11 @@ impl FuseService {
     }
 
     /// Serves until shutdown or connection exit, then tears down only the owned mount.
-    pub fn serve(self, shutdown: &AtomicBool) -> std::io::Result<()> {
+    ///
+    /// Teardown starts by reporting `STOPPING=1` through `notifier`, whatever ended
+    /// serving: a termination signal, a session released in a handoff, or a dead
+    /// connection.
+    pub fn serve(self, shutdown: &AtomicBool, notifier: &Notifier) -> std::io::Result<()> {
         let FuseService {
             session: bg,
             mountpoint,
@@ -205,6 +210,7 @@ impl FuseService {
         {
             std::thread::sleep(Duration::from_millis(100));
         }
+        notifier.stopping();
         // Even a dead connection must exclude a concurrent handoff before teardown.
         lifecycle.begin_teardown();
         finish_session(
@@ -219,7 +225,7 @@ impl FuseService {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
 
     use super::*;
     use crate::fuse::upgrade::test_support::{empty_session, fuse_init_state};
@@ -261,6 +267,35 @@ mod tests {
     #[test]
     fn serving_observes_shutdown_without_a_signal_thread() {
         let (service, _kernel) = stub_service(SessionOrigin::Adopted);
-        service.serve(&AtomicBool::new(true)).unwrap();
+        service
+            .serve(&AtomicBool::new(true), &Notifier::new(None, None))
+            .unwrap();
+    }
+
+    #[test]
+    fn serving_reports_stopping_when_teardown_begins() {
+        let test_cases = vec![(true, false), (false, true)];
+
+        for (shutdown, released) in test_cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("notify.sock");
+            let receiver = UnixDatagram::bind(&path).unwrap();
+            receiver
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let notifier = Notifier::new(Some(SocketAddr::from_pathname(&path).unwrap()), None);
+            let (service, _kernel) = stub_service(SessionOrigin::Adopted);
+            if released {
+                let lifecycle = service.handle.lifecycle();
+                lifecycle.begin_handoff().unwrap();
+                lifecycle.mark_released().unwrap();
+            }
+            service
+                .serve(&AtomicBool::new(shutdown), &notifier)
+                .unwrap();
+            let mut buffer = [0; 64];
+            let len = receiver.recv(&mut buffer).unwrap();
+            assert_eq!(&buffer[..len], b"STOPPING=1");
+        }
     }
 }

@@ -9,8 +9,8 @@
 //! first rule that matches it, and every data read is logged as a
 //! [`ReadCall`].
 //!
-//! Only reads and blob meta lookups pass through the rules. Cache keys and
-//! raw device resolution go straight to the wrapped backend.
+//! Only reads and blob meta lookups pass through the rules. Cache keys, raw
+//! device resolution and credentials go straight to the wrapped backend.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -586,6 +586,30 @@ impl Backend for FaultBackend {
     ) -> io::Result<Box<dyn BufRead + Send>> {
         self.serve(blob_id, offset, len, ReadKind::Prefetch)
     }
+
+    /// Replaces the basic credentials of the wrapped backend; blobs in memory
+    /// have none.
+    fn set_basic_auth(&self, username: &str, password: &str) -> io::Result<()> {
+        match &self.source {
+            Source::Wrapped(inner) => inner.set_basic_auth(username, password),
+            Source::Memory(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "backend has no credentials",
+            )),
+        }
+    }
+
+    /// Replaces the bearer token of the wrapped backend; blobs in memory have
+    /// none.
+    fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+        match &self.source {
+            Source::Wrapped(inner) => inner.set_bearer_auth(token),
+            Source::Memory(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "backend has no credentials",
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -762,6 +786,69 @@ mod tests {
         assert_eq!(data, blob_data(0, 4));
         assert_eq!(inner.read_calls(), 1);
         assert_eq!(backend.read_calls(), 2);
+    }
+
+    #[test]
+    fn credentials_reach_only_a_wrapped_backend() {
+        struct Credentialed(Mutex<Vec<String>>, Arc<Metrics>);
+
+        impl Backend for Credentialed {
+            fn metrics(&self) -> &Arc<Metrics> {
+                &self.1
+            }
+
+            fn get_blob_metadata(&self, blob_id: &BlobId) -> io::Result<BlobMetadata> {
+                Err(unknown_blob(blob_id))
+            }
+
+            fn get(
+                &self,
+                blob_id: &BlobId,
+                _: u64,
+                _: usize,
+            ) -> io::Result<Box<dyn BufRead + Send>> {
+                Err(unknown_blob(blob_id))
+            }
+
+            fn set_basic_auth(&self, username: &str, password: &str) -> io::Result<()> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("basic {username}:{password}"));
+                Ok(())
+            }
+
+            fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+                self.0.lock().unwrap().push(format!("bearer {token}"));
+                Ok(())
+            }
+        }
+
+        let inner = Arc::new(Credentialed(Mutex::default(), Arc::new(Metrics::new())));
+        let test_cases = vec![
+            (
+                FaultBackend::wrap(inner.clone()),
+                None,
+                vec!["basic bob:hunter2", "bearer xyz"],
+            ),
+            (backend(), Some(io::ErrorKind::Unsupported), vec![]),
+        ];
+
+        for (backend, err, recorded) in test_cases {
+            inner.0.lock().unwrap().clear();
+            assert_eq!(
+                backend
+                    .set_basic_auth("bob", "hunter2")
+                    .err()
+                    .map(|err| err.kind()),
+                err
+            );
+            assert_eq!(
+                backend.set_bearer_auth("xyz").err().map(|err| err.kind()),
+                err
+            );
+            assert_eq!(*inner.0.lock().unwrap(), recorded);
+        }
     }
 
     #[test]

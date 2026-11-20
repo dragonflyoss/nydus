@@ -2282,6 +2282,7 @@ name = "nydus-backend"
 version = "3.0.0-rc.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "dragonfly-api",
  "dragonfly-client-request",

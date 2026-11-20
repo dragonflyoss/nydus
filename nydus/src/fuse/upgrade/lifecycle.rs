@@ -139,9 +139,15 @@ mod tests {
         let path = dir.path().join("api.sock");
         let (handle, background, _kernel) = parked_runtime_handle();
         background.pauser().resume();
-        let server =
-            ControlServer::start(&path, info.clone(), handle.clone(), metrics(), ondemand())
-                .unwrap();
+        let server = ControlServer::start(
+            &path,
+            info.clone(),
+            handle.clone(),
+            metrics(),
+            ondemand(),
+            None,
+        )
+        .unwrap();
         let mut handoff = probe(&path, &info)
             .unwrap()
             .unwrap()

@@ -131,10 +131,11 @@ impl Client {
             return Ok(challenge_response);
         };
 
-        self.authorizer
+        let authorization = self
+            .authorizer
             .authenticate(&self.auth_transport, challenge)
             .await?;
-        self.authorizer.authorize(&mut headers);
+        headers.insert(AUTHORIZATION, authorization);
         request(headers).await
     }
 

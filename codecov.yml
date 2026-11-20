@@ -6,10 +6,13 @@ coverage:
     project:
       rust:
         target: 90%
-        paths: ['nydus/', 'nydus-*/']
+        paths: ['nydus/', 'nydus-*/', '!nydus-snapshotter/']
       go:
         target: 90%
         paths: ['nydusify/']
+      snapshotter:
+        target: auto
+        paths: ['nydus-snapshotter/']
     patch:
       default:
         enabled: no
@@ -19,6 +22,7 @@ ignore:
   - '**/examples/'
   - '**/*_test.go'
   - 'nydusify/internal/registrytest/'
+  - '**/mocks/'
 
 comment:
   layout: 'reach, diff, flags, files'
