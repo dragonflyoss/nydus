@@ -2,6 +2,7 @@
 resolver = "2"
 members = ["nydus", "nydus-backend", "nydus-config", "nydus-core", "nydus-error", "nydus-format", "nydus-storage", "nydus-telemetry", "nydus-test-utils"]
 
+# TODO(Gaius) Remove this dependency in private registry.
 # Use fuser's handoff APIs until dragonflyoss/fuser#1 lands
 # (Zephyrcf/fuser branch session-handoff-and-recovery).
 [patch.crates-io]
@@ -17,8 +18,6 @@ memmap2 = "0.9"
 prometheus = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# "asm" is what selects the SHA2 CPU instructions on aarch64; x86_64 detects
-# SHA-NI at runtime regardless.
 sha2 = { version = "0.10", features = ["asm"] }
 tempfile = "3.1.0"
 thiserror = "2"
@@ -48,9 +47,6 @@ debug = true
 strip = false
 panic = "unwind"
 
-# The binaries the e2e suites run in CI: optimized, but without the minutes
-# of fat LTO, and with overflow checks and debug assertions on so the suites
-# also catch broken invariants.
 [profile.ci]
 inherits = "release"
 lto = "off"
