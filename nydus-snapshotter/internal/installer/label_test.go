@@ -311,6 +311,25 @@ func TestInstaller_syncNodeLabel(t *testing.T) {
 			},
 		},
 		{
+			name:   "keep the label on checks cut short because the installer stops",
+			enable: true,
+			nodes:  []*corev1.Node{mockLabeledNode},
+			prepare: func(t *testing.T, h *mockHost) {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				for range notReadyThreshold {
+					assert.NoError(t, h.installer.syncNodeLabel(ctx))
+				}
+			},
+			expect: func(t *testing.T, h *mockHost, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal([]string{"get"}, h.verbs())
+				assert.True(h.labeled(t))
+				assert.Zero(h.installer.notReadyChecks)
+			},
+		},
+		{
 			name:   "count the failed checks in a row only",
 			enable: true,
 			nodes:  []*corev1.Node{mockLabeledNode},

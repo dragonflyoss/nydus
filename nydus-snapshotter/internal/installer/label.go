@@ -116,6 +116,12 @@ func (i *Installer) syncNodeLabel(ctx context.Context) error {
 	logger := log.G(ctx).WithFields(log.Fields{"node": i.cfg.NodeName, "label": NodeLabel})
 	notReady := ""
 	if err := i.ready(ctx); err != nil {
+		// A check cut short because the installer stops says nothing about
+		// the node, and must not count towards removing its label.
+		if ctx.Err() != nil {
+			return nil
+		}
+
 		notReady = err.Error()
 	}
 
