@@ -1069,59 +1069,38 @@ impl FileCacheEntry {
                 chunks[0].blob_index()
             );
 
-            match self.read_chunks_from_backend(
+            let mut bufs = self.read_chunks_from_backend(
                 blob_offset,
                 blob_size,
                 &chunks[start_idx..=end_idx],
                 prefetch,
-            ) {
-                Ok(mut bufs) => {
-                    if self.is_raw_data {
-                        let res = Self::persist_cached_data(
-                            &self.file,
-                            blob_offset,
-                            bufs.compressed_buf(),
-                        );
-                        for idx in start_idx..=end_idx {
-                            if status[idx] {
-                                self.update_chunk_pending_status(chunks[idx].as_ref(), res.is_ok());
-                            }
-                        }
-                    } else {
-                        for idx in start_idx..=end_idx {
-                            let mut buf = match bufs.next() {
-                                None => return Err(einval!("invalid chunk decompressed status")),
-                                Some(Err(e)) => {
-                                    for idx in idx..=end_idx {
-                                        if status[idx] {
-                                            bitmap.clear_range_pending(chunks[idx].id(), 1)
-                                        }
-                                    }
-                                    return Err(e);
-                                }
-                                Some(Ok(v)) => v,
-                            };
-
-                            if status[idx] {
-                                if self.dio_enabled {
-                                    self.adjust_buffer_for_dio(&mut buf)
-                                }
-                                self.persist_chunk_data(chunks[idx].as_ref(), buf.as_ref());
-                            }
-                        }
+            )?;
+            if self.is_raw_data {
+                let res = Self::persist_cached_data(&self.file, blob_offset, bufs.compressed_buf());
+                for idx in start_idx..=end_idx {
+                    if status[idx] {
+                        self.update_chunk_pending_status(chunks[idx].as_ref(), res.is_ok());
                     }
                 }
-                Err(e) => {
-                    for idx in 0..chunks.len() {
-                        if status[idx] {
-                            bitmap.clear_range_pending(chunks[idx].id(), 1)
+            } else {
+                for idx in start_idx..=end_idx {
+                    let mut buf = match bufs.next() {
+                        None => return Err(einval!("invalid chunk decompressed status")),
+                        Some(Err(e)) => return Err(e),
+                        Some(Ok(v)) => v,
+                    };
+
+                    if status[idx] {
+                        if self.dio_enabled {
+                            self.adjust_buffer_for_dio(&mut buf)
                         }
+                        self.persist_chunk_data(chunks[idx].as_ref(), buf.as_ref());
                     }
-                    return Err(e);
                 }
             }
         }
 
+        drop(pending);
         if !bitmap.wait_for_range_ready(chunk_index, count)? {
             if prefetch {
                 return Err(eio!(format!(
@@ -1132,21 +1111,19 @@ impl FileCacheEntry {
 
             // if we are in on-demand path, retry for the timeout chunks
             for chunk in chunks {
-                match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
-                    Err(e) => return Err(eio!(format!("do_fetch_chunks failed, {:?}", e))),
-                    Ok(true) => {}
-                    Ok(false) => {
-                        info!("retry for timeout chunk, {}", chunk.id());
+                let retry = bitmap.check_range_ready_and_mark_pending(chunk.id(), 1)?;
+                if let Some(ref pending) = retry {
+                    if !pending.is_empty() {
                         let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
                         self.read_chunk_from_backend(chunk.as_ref(), &mut buf)
-                            .map_err(|e| {
-                                self.update_chunk_pending_status(chunk.as_ref(), false);
-                                eio!(format!("read_raw_chunk failed, {:?}", e))
-                            })?;
+                            .map_err(|e| eio!(format!("read_raw_chunk failed, {:?}", e)))?;
                         if self.dio_enabled {
                             self.adjust_buffer_for_dio(&mut buf)
                         }
                         self.persist_chunk_data(chunk.as_ref(), &buf);
+                    }
+                    if !bitmap.wait_for_range_ready(chunk.id(), 1)? {
+                        return Err(eio!("chunk producer failed"));
                     }
                 }
             }
@@ -1916,6 +1893,234 @@ mod tests {
     use crate::device::{BlobChunkFlags, BlobFeatures};
     use crate::meta::*;
     use crate::test::MockChunkInfo;
+
+    struct RangeReader {
+        metrics: Arc<nydus_utils::metrics::BackendMetrics>,
+        reads: AtomicU32,
+        started: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl BlobReader for RangeReader {
+        fn blob_size(&self) -> crate::backend::BackendResult<u64> {
+            Ok(8)
+        }
+
+        fn try_read(&self, buf: &mut [u8], _offset: u64) -> crate::backend::BackendResult<usize> {
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                buf.copy_from_slice(b"bad!");
+            } else {
+                buf.copy_from_slice(b"data");
+            }
+            Ok(buf.len())
+        }
+
+        fn metrics(&self) -> &nydus_utils::metrics::BackendMetrics {
+            &self.metrics
+        }
+    }
+
+    fn range_cache_entry(
+        dir: &vmm_sys_util::tempdir::TempDir,
+        reader: Arc<dyn BlobReader>,
+    ) -> FileCacheEntry {
+        use crate::cache::state::{BlobStateMap, IndexedChunkMap};
+
+        let path = dir.as_path().join("blob");
+        let path = path.to_str().unwrap();
+        let metrics = BlobcacheMetrics::new(path, path);
+        let prefetch_config = Arc::new(AsyncPrefetchConfig::from(
+            &nydus_api::PrefetchConfigV2::default(),
+        ));
+        let workers =
+            Arc::new(AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone()).unwrap());
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.set_len(8).unwrap();
+        FileCacheEntry {
+            blob_id: path.to_string(),
+            blob_info: Arc::new(BlobInfo::new(
+                0,
+                path.to_string(),
+                8,
+                8,
+                4,
+                2,
+                BlobFeatures::empty(),
+            )),
+            cache_cipher_object: Default::default(),
+            cache_cipher_context: Default::default(),
+            cas_mgr: None,
+            chunk_map: Arc::new(BlobStateMap::from(
+                IndexedChunkMap::new(path, 2, false).unwrap(),
+            )),
+            file: Arc::new(file),
+            file_path: Arc::new(path.to_string()),
+            meta: None,
+            metrics,
+            prefetch_state: Arc::new(AtomicU32::new(0)),
+            reader,
+            runtime: Arc::new(Runtime::new().unwrap()),
+            workers,
+            blob_compressed_size: 8,
+            blob_uncompressed_size: 8,
+            is_get_blob_object_supported: false,
+            is_raw_data: false,
+            is_cache_encrypted: false,
+            is_direct_chunkmap: true,
+            is_legacy_stargz: false,
+            is_tarfs: false,
+            is_batch: false,
+            is_zran: false,
+            dio_enabled: false,
+            need_validation: true,
+            user_io_batch_size: 8,
+            prefetch_config,
+        }
+    }
+
+    #[test]
+    fn test_fetch_waits_for_failed_producer_and_retries() {
+        use std::os::unix::fs::FileExt;
+        use std::sync::mpsc;
+        use std::thread;
+        use vmm_sys_util::tempdir::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let (started, entered) = mpsc::sync_channel(0);
+        let (release, released) = mpsc::channel();
+        let reader = Arc::new(RangeReader {
+            metrics: nydus_utils::metrics::BackendMetrics::new("range-retry", "test"),
+            reads: AtomicU32::new(0),
+            started,
+            release: Mutex::new(released),
+        });
+        let entry = Arc::new(range_cache_entry(&dir, reader.clone()));
+        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            block_id: digest::RafsDigest::from_buf(b"data", digest::Algorithm::Blake3),
+            compress_size: 4,
+            uncompress_size: 4,
+            ..Default::default()
+        });
+        let producer = entry.clone();
+        let producer_chunk = chunk.clone();
+        let (producer_done, producer_completed) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            producer_done
+                .send(producer.do_fetch_chunks(&[producer_chunk], false))
+                .unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        let references = crate::cache::state::pending_slot_references(entry.chunk_map.as_ref(), 0);
+        let before = references();
+        let waiting = entry.clone();
+        let waiting_chunk = chunk.clone();
+        let (done, completed) = mpsc::channel();
+        let waiter = thread::spawn(move || {
+            done.send(waiting.do_fetch_chunks(&[waiting_chunk], false))
+                .unwrap();
+        });
+        let started = Instant::now();
+        while references() == before {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            thread::yield_now();
+        }
+        let timeout = Duration::from_millis(2 * crate::cache::SINGLE_INFLIGHT_WAIT_TIMEOUT + 200);
+        let premature = completed.recv_timeout(timeout).ok();
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
+        release.send(()).unwrap();
+        assert!(producer_completed
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .is_err());
+        producer.join().unwrap();
+        assert!(premature.is_none(), "reader abandoned an active producer");
+        completed
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        waiter.join().unwrap();
+        let mut bytes = [0; 4];
+        entry.file.read_exact_at(&mut bytes, 0).unwrap();
+        assert_eq!(&bytes, b"data");
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 2);
+        entry.do_fetch_chunks(&[chunk], false).unwrap();
+        assert_eq!(reader.reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_fetch_releases_claims_when_backend_panics() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::sync::mpsc;
+        use vmm_sys_util::tempdir::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let (started, _) = mpsc::sync_channel(0);
+        let (_, released) = mpsc::channel();
+        let entry = range_cache_entry(
+            &dir,
+            Arc::new(RangeReader {
+                metrics: nydus_utils::metrics::BackendMetrics::new("range-panic", "test"),
+                reads: AtomicU32::new(0),
+                started,
+                release: Mutex::new(released),
+            }),
+        );
+        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            compress_size: 4,
+            uncompress_size: 4,
+            ..Default::default()
+        });
+        assert!(catch_unwind(AssertUnwindSafe(
+            || entry.do_fetch_chunks(std::slice::from_ref(&chunk), false)
+        ))
+        .is_err());
+        assert!(!entry.chunk_map.is_pending(chunk.as_ref()).unwrap());
+        let retry = entry
+            .chunk_map
+            .as_range_map()
+            .unwrap()
+            .check_range_ready_and_mark_pending(0, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&*retry, &[0]);
+    }
+
+    #[test]
+    fn test_fetch_releases_claims_when_range_is_invalid() {
+        use vmm_sys_util::tempdir::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let reader = Arc::new(crate::test::MockBackend {
+            metrics: nydus_utils::metrics::BackendMetrics::new("range-error", "test"),
+        });
+        let entry = range_cache_entry(&dir, reader);
+        let first: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            block_id: digest::RafsDigest::from_buf(&[0, 1, 2, 3], digest::Algorithm::Blake3),
+            compress_size: 4,
+            uncompress_size: 4,
+            ..Default::default()
+        });
+        let last: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            index: 1,
+            compress_offset: u32::MAX as u64 + 1,
+            compress_size: 4,
+            uncompress_size: 4,
+            ..Default::default()
+        });
+        assert!(entry
+            .do_fetch_chunks(&[first.clone(), last.clone()], false)
+            .is_err());
+        assert!(!entry.chunk_map.is_pending(first.as_ref()).unwrap());
+        assert!(!entry.chunk_map.is_pending(last.as_ref()).unwrap());
+        entry.do_fetch_chunks(&[first], false).unwrap();
+    }
 
     #[test]
     fn test_data_buffer() {
