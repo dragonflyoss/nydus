@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::{io::Read, sync::Arc};
 
 use nydus_storage::backend::{BackendResult, BlobReader};
@@ -6,7 +7,7 @@ use nydus_storage::device::BlobChunkInfo;
 use nydus_utils::compress::{self, Algorithm};
 use nydus_utils::metrics::BackendMetrics;
 
-use super::ChunkReader;
+use super::{BlobSources, ChunkReader};
 
 struct MockBlobReader {
     data: Vec<u8>,
@@ -203,6 +204,17 @@ fn test_read_chunk_compress() {
     assert_eq!(buf, [4u8; 256]);
 }
 
+#[test]
+fn test_read_chunk_size_mismatch() {
+    // Chunks hold 512 bytes, so a file size other than that must not produce a tar entry.
+    for size in [511, 513] {
+        let mut reader = create_default_chunk_reader_with_size(size);
+        let mut buf = Vec::new();
+        let err = reader.read_to_end(&mut buf).unwrap_err();
+        assert!(err.to_string().contains("size mismatch"), "{}", err);
+    }
+}
+
 fn create_compress_chunk_reader() -> ChunkReader {
     let chunk = [[1u8; 256], [2u8; 256], [3u8; 256], [4u8; 256]].concat();
 
@@ -225,10 +237,24 @@ fn create_compress_chunk_reader() -> ChunkReader {
     let mut compressors: HashMap<u32, Algorithm> = HashMap::new();
     compressors.insert(meta.blob_index(), Algorithm::GZip);
 
-    ChunkReader::new(compressors, readers, vec![meta])
+    let size = chunk.len() as u64;
+    ChunkReader::new(
+        Rc::new(BlobSources::new(
+            readers,
+            compressors,
+            HashMap::new(),
+            HashMap::new(),
+        )),
+        vec![meta],
+        size,
+    )
 }
 
 fn create_default_chunk_reader() -> ChunkReader {
+    create_default_chunk_reader_with_size(512)
+}
+
+fn create_default_chunk_reader_with_size(size: u64) -> ChunkReader {
     let chunk1 = [1u8; 256];
     let chunk2 = [2u8; 256];
 
@@ -257,5 +283,14 @@ fn create_default_chunk_reader() -> ChunkReader {
     compressors.insert(chunk_meta1.blob_index(), Algorithm::None);
     compressors.insert(chunk_meta2.blob_index(), Algorithm::None);
 
-    ChunkReader::new(compressors, readers, vec![chunk_meta1, chunk_meta2])
+    ChunkReader::new(
+        Rc::new(BlobSources::new(
+            readers,
+            compressors,
+            HashMap::new(),
+            HashMap::new(),
+        )),
+        vec![chunk_meta1, chunk_meta2],
+        size,
+    )
 }
