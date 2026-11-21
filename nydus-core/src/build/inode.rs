@@ -167,12 +167,14 @@ pub fn resolve_chunk_addrs<W: std::io::Write>(
 
 /// The z_erofs packed inode: a root-owned, unreadable regular file outside
 /// the directory tree that holds the fragment data of all small files. It
-/// takes the next free inode number after `inodes`.
+/// takes the next free inode number after `inodes`, and the image `epoch`
+/// as its mtime so that it stays compact.
 pub fn packed_inode(
     inodes: &[InodeInfo],
     tail: Vec<u8>,
     compressed_blocks: u32,
     size: u64,
+    epoch: u64,
 ) -> InodeInfo {
     let ino = inodes.iter().map(|inode| inode.ino).max().unwrap_or(0) + 1;
     InodeInfo {
@@ -180,7 +182,7 @@ pub fn packed_inode(
         uid: 0,
         gid: 0,
         size,
-        mtime: 0,
+        mtime: epoch,
         mtime_nsec: 0,
         nlink: 1,
         ino,
@@ -768,6 +770,12 @@ pub(crate) fn serialize_inode_remapped(
 
     let xattr_size = XattrEntry::ibody_size(&inode.xattrs);
     let i_xattr_icount = checked_xattr_icount(inode, xattr_size)?;
+    let compact_nlink = if inode.is_extended {
+        0
+    } else {
+        u16::try_from(inode.nlink)
+            .map_err(|_| Error::Overflow("compact link count exceeds u16".to_string()))?
+    };
 
     match &inode.data {
         InodeData::RegularFile {
@@ -798,7 +806,7 @@ pub(crate) fn serialize_inode_remapped(
                 let hdr = ErofsInodeCompact::new(
                     datalayout,
                     inode.mode,
-                    1,
+                    compact_nlink,
                     inode.size as u32,
                     i_mtime,
                     i_u,
@@ -863,11 +871,11 @@ pub(crate) fn serialize_inode_remapped(
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
+                let i_mtime = 0;
                 let hdr = ErofsInodeCompact::new(
                     datalayout,
                     inode.mode,
-                    1,
+                    compact_nlink,
                     inode.size as u32,
                     i_mtime,
                     i_u,
@@ -928,9 +936,7 @@ pub(crate) fn serialize_inode_remapped(
                 let hdr = ErofsInodeCompact::new(
                     datalayout,
                     inode.mode,
-                    u16::try_from(inode.nlink).map_err(|_| {
-                        Error::Overflow("compact link count exceeds u16".to_string())
-                    })?,
+                    compact_nlink,
                     inode.size as u32,
                     i_mtime,
                     startblk_lo,
@@ -994,7 +1000,7 @@ pub(crate) fn serialize_inode_remapped(
                 let hdr = ErofsInodeCompact::new(
                     datalayout,
                     inode.mode,
-                    1,
+                    compact_nlink,
                     inode.size as u32,
                     i_mtime,
                     startblk_lo,
@@ -1033,7 +1039,7 @@ pub(crate) fn serialize_inode_remapped(
                 let hdr = ErofsInodeCompact::new(
                     datalayout,
                     inode.mode,
-                    1,
+                    compact_nlink,
                     0,
                     i_mtime,
                     *rdev,
@@ -1069,7 +1075,7 @@ pub(crate) fn serialize_inode_remapped(
                 let hdr = ErofsInodeCompact::new(
                     datalayout,
                     inode.mode,
-                    1,
+                    compact_nlink,
                     0,
                     i_mtime,
                     0,
@@ -1259,7 +1265,7 @@ mod tests {
                 1 => excluded.size = u32::MAX as u64 + 1,
                 2 => excluded.uid = u16::MAX as u32 + 1,
                 3 => excluded.gid = u16::MAX as u32 + 1,
-                _ => excluded.nlink = 2,
+                _ => excluded.nlink = u16::MAX as u32 + 1,
             }
             assert_eq!(choose_epoch(std::slice::from_ref(&excluded)), 0);
             inodes.push(excluded);

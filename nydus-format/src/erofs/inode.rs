@@ -103,9 +103,8 @@ impl ErofsInodeCompact {
     /// `i_format` carries only the version bit and the layout. The
     /// `EROFS_I_NLINK_1` optimization (bit 4) is deliberately not used:
     /// older kernels (5.10) reject any inode with bits outside `EROFS_I_ALL`,
-    /// and since [`ErofsInodeExtended::is_needed`] sends every inode with more
-    /// than one link to the extended layout, a compact inode always has its
-    /// link count of one in `i_nb`.
+    /// so a compact inode always has its link count in `i_nb`, as
+    /// `mkfs.erofs` writes it.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         datalayout: u16,
@@ -252,10 +251,13 @@ const _: () = assert!(mem::size_of::<ErofsInodeExtended>() == EROFS_INODE_EXTEND
 /// Builds an extended inode and reads its fields.
 impl ErofsInodeExtended {
     /// Whether an inode of these values must use this layout instead of the
-    /// compact one, which holds a size up to `u32::MAX`, a uid and gid up to
-    /// `u16::MAX`, exactly one link, and no mtime of its own.
+    /// compact one, which holds a size up to `u32::MAX`, a uid, gid and
+    /// link count up to `u16::MAX`, and no mtime of its own.
     pub fn is_needed(size: u64, uid: u32, gid: u32, nlink: u64) -> bool {
-        size > u32::MAX as u64 || uid > u16::MAX as u32 || gid > u16::MAX as u32 || nlink > 1
+        size > u32::MAX as u64
+            || uid > u16::MAX as u32
+            || gid > u16::MAX as u32
+            || nlink > u16::MAX as u64
     }
 
     /// Creates an extended inode with `datalayout`, one of the
@@ -991,7 +993,8 @@ mod tests {
             (u32::MAX as u64 + 1, 0, 0, 1, true),
             (0, u16::MAX as u32 + 1, 0, 1, true),
             (0, 0, u16::MAX as u32 + 1, 1, true),
-            (0, 0, 0, 2, true),
+            (0, 0, 0, u16::MAX as u64, false),
+            (0, 0, 0, u16::MAX as u64 + 1, true),
         ];
 
         for (size, uid, gid, nlink, expected) in test_cases {
