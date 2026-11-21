@@ -560,7 +560,9 @@ impl UffdWorker {
         // Register fd so stop() can shutdown this socket.
         active_conns.lock().unwrap().push(fd);
 
-        let sock_async = AsyncFd::new(stream)
+        // SAFETY: stream owns its socket and is moved into AsyncFd. Its fd stays open
+        // and unchanged while registered; stop() only shuts the socket down.
+        let sock_async = unsafe { AsyncFd::register(stream) }
             .map_err(|e| eother!(format!("Failed to create AsyncFd for sock: {}", e)))?;
 
         let mut receiver = sender.subscribe();
@@ -700,7 +702,9 @@ impl UffdWorker {
         }
 
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        let uffd_async = AsyncFd::new(owned_fd)
+        // SAFETY: owned_fd owns the received fd, and no code closes or replaces it
+        // while it is held by AsyncFd.
+        let uffd_async = unsafe { AsyncFd::register(owned_fd) }
             .map_err(|e| eother!(format!("Failed to create AsyncFd for uffd: {}", e)))?;
         let state = ConnState {
             vma_regions: request.regions.clone(),
@@ -880,7 +884,9 @@ impl UffdWorker {
         stream: StdUnixStream,
         vma_regions: Vec<VmaRegion>,
     ) -> Result<()> {
-        let stream = AsyncFd::new(stream)
+        // SAFETY: stream owns its socket and is moved into AsyncFd. This task only
+        // borrows it for I/O, keeping its fd open and unchanged until AsyncFd drops.
+        let stream = unsafe { AsyncFd::register(stream) }
             .map_err(|e| eother!(format!("Failed to create AsyncFd for pre-fault: {}", e)))?;
         let core = UffdCore::new(device);
         let ranges = core.prefault_ranges(&vma_regions).await?;
@@ -1743,7 +1749,9 @@ mod tests {
     fn test_send_batch_response() {
         tokio_uring::start(async {
             let (sock1, sock2) = std::os::unix::net::UnixStream::pair().unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             // Create a mock batch response
             let batch = vec![
@@ -1778,7 +1786,9 @@ mod tests {
         tokio_uring::start(async {
             let (sock1, sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock2.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let tmpdir = TempDir::new().unwrap();
             let device = create_block_device(tmpdir.as_path().to_path_buf()).unwrap();
@@ -1807,7 +1817,9 @@ mod tests {
         tokio_uring::start(async {
             let (sock1, _sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let tmpdir = TempDir::new().unwrap();
             let device = create_block_device(tmpdir.as_path().to_path_buf()).unwrap();
@@ -1835,7 +1847,9 @@ mod tests {
         tokio_uring::start(async {
             let (sock1, _sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let tmpdir = TempDir::new().unwrap();
             let device = create_block_device(tmpdir.as_path().to_path_buf()).unwrap();
@@ -1844,8 +1858,10 @@ mod tests {
             // Pre-set conn_state to simulate already handshaked
             let (uffd_sock, _) = std::os::unix::net::UnixStream::pair().unwrap();
             uffd_sock.set_nonblocking(true).unwrap();
-            let uffd_fd = unsafe { OwnedFd::from_raw_fd(uffd_sock.as_raw_fd()) };
-            let uffd_async = AsyncFd::new(uffd_fd).unwrap();
+            let uffd_fd: OwnedFd = uffd_sock.into();
+            // SAFETY: uffd_fd uniquely owns its open fd and is held unchanged
+            // until AsyncFd is dropped.
+            let uffd_async = unsafe { AsyncFd::register(uffd_fd) }.unwrap();
             let mut conn_state: Option<ConnState> = Some(ConnState {
                 vma_regions: vec![VmaRegion::new(0x1000, 0x2000, 0, 4096)],
                 policy: FaultPolicy::Zerocopy,
@@ -1874,7 +1890,6 @@ mod tests {
             assert!(res.is_ok()); // double handshake is logged but not an error
                                   // conn_state should remain unchanged
             assert!(conn_state.is_some());
-            std::mem::forget(uffd_sock); // prevent double-close
         });
     }
 
@@ -1885,7 +1900,9 @@ mod tests {
         tokio_uring::start(async {
             let (sock1, sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let res = UffdWorker::handle_stat_request(&sock_async, 1024 * 1024, 4096).await;
             assert!(res.is_ok());
@@ -1918,7 +1935,9 @@ mod tests {
 
             let (sock1, _sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let uffd_fd = create_userfaultfd_for_test().unwrap();
 
@@ -1947,7 +1966,9 @@ mod tests {
 
             let (sock1, _sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let json_val = serde_json::to_value(HandshakeRequest {
                 r#type: MessageType::Handshake,
@@ -1972,7 +1993,9 @@ mod tests {
 
             let (sock1, _sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let uffd_fd = create_userfaultfd_for_test().unwrap();
 
@@ -2019,7 +2042,9 @@ mod tests {
         tokio_uring::start(async {
             let (sock1, sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             let data = b"hello world";
             let res = UffdWorker::async_send_with_fd(&sock_async, data, &[]).await;
@@ -2103,7 +2128,9 @@ mod tests {
             client_sock.set_nonblocking(true).unwrap();
             server_sock.set_nonblocking(true).unwrap();
 
-            let client_async = AsyncFd::new(client_sock).unwrap();
+            // SAFETY: client_sock owns its socket, and only shared references are
+            // used while AsyncFd holds it, keeping the fd open and unchanged.
+            let client_async = unsafe { AsyncFd::register(client_sock) }.unwrap();
 
             let (uffd_fd, addr, mmap_size) = setup_uffd_region(4096).unwrap();
 
@@ -2169,7 +2196,9 @@ mod tests {
             // Create sockets for communication
             let (sock1, _sock2) = std::os::unix::net::UnixStream::pair().unwrap();
             sock1.set_nonblocking(true).unwrap();
-            let sock_async = AsyncFd::new(sock1).unwrap();
+            // SAFETY: sock1 owns its open fd and is moved into AsyncFd. The test
+            // never closes or replaces that fd while registered.
+            let sock_async = unsafe { AsyncFd::register(sock1) }.unwrap();
 
             // Setup uffd region - OwnedFd takes ownership of uffd_fd
             let (uffd_fd, addr, mmap_size) = setup_uffd_region(4096).unwrap();
@@ -2177,7 +2206,9 @@ mod tests {
             let state = ConnState {
                 vma_regions,
                 policy: FaultPolicy::Zerocopy,
-                uffd_async: AsyncFd::new(unsafe { OwnedFd::from_raw_fd(uffd_fd) }).unwrap(),
+                // SAFETY: setup_uffd_region returned an open, exclusively owned fd.
+                // OwnedFd keeps it open and unchanged until AsyncFd drops it.
+                uffd_async: unsafe { AsyncFd::register(OwnedFd::from_raw_fd(uffd_fd)) }.unwrap(),
             };
 
             // Call handle_uffd_event without triggering a page fault.

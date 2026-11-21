@@ -1,15 +1,19 @@
 #!/bin/bash
 
-: ${INSTALL_TARGET_TYPE:="release"}
+set -euo pipefail
+
+: "${INSTALL_TARGET_TYPE:=release}"
+source "$(dirname "${BASH_SOURCE[0]}")/github-release.sh"
 
 SNAPSHOTTER_CONFIG="misc/performance/snapshotter_config.toml"
-if [ "$1" == "takeover_test" ]; then
+if [ "${1:-}" == "takeover_test" ]; then
     sed -i 's/recover_policy = "restart"/recover_policy = "failover"/' "$SNAPSHOTTER_CONFIG"
 fi
 
-readonly SNAPSHOTTER_VERSION=`curl -s https://api.github.com/repos/containerd/nydus-snapshotter/releases/latest | grep tag_name | cut -f4 -d "\""`
-readonly NERDCTL_VERSION=`curl -s https://api.github.com/repos/containerd/nerdctl/releases/latest | grep tag_name | cut -f4 -d "\"" | sed 's/^v//g'`
-readonly CNI_PLUGINS_VERSION=`curl -s https://api.github.com/repos/containernetworking/plugins/releases/latest | grep tag_name | cut -f4 -d "\""`
+SNAPSHOTTER_VERSION=$(github_latest_stable_tag https://github.com/containerd/nydus-snapshotter/releases)
+NERDCTL_VERSION=$(github_latest_stable_tag https://github.com/containerd/nerdctl/releases)
+NERDCTL_VERSION=${NERDCTL_VERSION#v}
+CNI_PLUGINS_VERSION=$(github_latest_stable_tag https://github.com/containernetworking/plugins/releases)
 
 # setup nerdctl and nydusd env
 sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
