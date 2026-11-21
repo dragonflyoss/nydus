@@ -134,6 +134,27 @@ jobs:
           sudo apt-get install -y acl attr erofs-utils fuse3
           sudo modprobe fuse
 
+      # fsck.erofs reads a z_erofs layer on an extra device only since
+      # erofs-utils c65a25f ("add missing device_id derivation for flattened
+      # devices"), which is newer than the 1.9.4 release and the runner's
+      # package, so the build suite checks its images with a pinned snapshot.
+      - name: Install fsck.erofs
+        if: matrix.suite == 'image-tools'
+        env:
+          EROFS_UTILS_COMMIT: 652a204d0ec628c887df88c95f76073502704c52
+        run: |
+          sudo apt-get install -y autoconf automake libtool pkg-config liblz4-dev libzstd-dev
+          git init -q "$RUNNER_TEMP/erofs-utils"
+          cd "$RUNNER_TEMP/erofs-utils"
+          git fetch -q --depth 1 https://github.com/erofs/erofs-utils.git "$EROFS_UTILS_COMMIT"
+          git checkout -q FETCH_HEAD
+          ./autogen.sh
+          ./configure --disable-lzma --without-zlib --without-uuid --without-libcurl \
+            --without-openssl --without-libxml2 --without-json-c --without-libnl3
+          make -j"$(nproc)"
+          sudo install -m 0755 fsck/fsck.erofs /usr/local/bin/fsck.erofs
+          fsck.erofs -V
+
       - name: Run E2E test
         env:
           NYDUS_E2E_SOAK_DURATION: ${{ matrix.soak-duration }}

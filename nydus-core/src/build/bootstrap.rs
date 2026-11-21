@@ -71,7 +71,6 @@ pub fn render_flattened_bootstrap_to(
         device_slots,
         uuid,
         ZErofsComprCfgs::default(),
-        0,
         None,
     )
 }
@@ -91,11 +90,6 @@ pub fn render_z_device_bootstrap(
     device_slots: &[ErofsDeviceSlot],
     packed_index: Option<usize>,
 ) -> Result<Vec<u8>> {
-    let min_total_blocks = device_slots
-        .iter()
-        .map(|slot| slot.mapped_blkaddr() + slot.blocks())
-        .max()
-        .unwrap_or(0);
     let mut bootstrap = Vec::new();
     render_flattened_bootstrap_to_inner(
         &mut bootstrap,
@@ -104,7 +98,6 @@ pub fn render_z_device_bootstrap(
         device_slots,
         uuid,
         z_cfgs,
-        min_total_blocks,
         packed_index,
     )?;
     Ok(bootstrap)
@@ -324,7 +317,6 @@ fn render_flattened_bootstrap_to_inner(
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
     z_cfgs: ZErofsComprCfgs,
-    min_total_blocks: u64,
     packed_index: Option<usize>,
 ) -> Result<u64> {
     let z_erofs = !z_cfgs.is_empty();
@@ -363,7 +355,6 @@ fn render_flattened_bootstrap_to_inner(
         &flattened_slots,
         uuid,
         z_cfgs,
-        min_total_blocks,
         packed_nid,
     )?;
     writer
@@ -670,7 +661,6 @@ fn render_bootstrap_inner(
         device_slots,
         uuid,
         ZErofsComprCfgs::default(),
-        0,
         None,
     )?;
 
@@ -1104,7 +1094,8 @@ mod tests {
             (0, 0, 1, 0, 0, false),
             (u16::MAX as u32 + 1, 0, 1, 0, 0, true),
             (0, u16::MAX as u32 + 1, 1, 0, 0, true),
-            (0, 0, 2, 0, 0, true),
+            (0, 0, 2, 0, 0, false),
+            (0, 0, u16::MAX as u32 + 1, 0, 0, true),
             (0, 0, 1, 1, 0, true),
             (0, 0, 1, 0, 1, true),
         ] {

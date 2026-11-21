@@ -52,7 +52,6 @@ pub(crate) fn write_image(
         device_slots,
         uuid,
         ZErofsComprCfgs::default(),
-        0,
         None,
     )?;
     image.write_all(&head)?;
@@ -72,11 +71,13 @@ pub(crate) fn write_image(
 /// Fill the image head region (superblock, device table, checksum) in place
 /// at the start of `image_buf`, which must hold at least the head region.
 /// `metadata_len` is the size of the metadata area that follows the head
-/// (see [`head_layout`]). When `z_max_pclusterblks` is non-zero, the z_erofs
-/// LZ4 incompat features and compression config are declared and
-/// `min_total_blocks` raises the block count to cover the device data mapped
-/// past the bootstrap. `packed_nid` declares the FRAGMENTS feature and the
-/// packed inode.
+/// (see [`head_layout`]). When `z_cfgs` declares a compressor, the z_erofs
+/// incompat features and compression configs are written. `packed_nid`
+/// declares the FRAGMENTS feature and the packed inode.
+///
+/// The superblock's block count covers the bootstrap alone, as `mkfs.erofs
+/// --blobdev` writes it: the kernel adds every device slot's blocks to it for
+/// `statfs`, so counting the mapped device data here would report it twice.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_image_head(
     image_buf: &mut [u8],
@@ -87,7 +88,6 @@ pub(crate) fn fill_image_head(
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
     z_cfgs: ZErofsComprCfgs,
-    min_total_blocks: u64,
     packed_nid: Option<u64>,
 ) -> Result<()> {
     let z_erofs = !z_cfgs.is_empty();
@@ -96,8 +96,7 @@ pub(crate) fn fill_image_head(
     let meta_blocks = metadata_len.div_ceil(block_size);
     let total_block_count = (meta_blkaddr as u64)
         .checked_add(meta_blocks as u64)
-        .ok_or_else(|| Error::Overflow("bootstrap block count overflow".to_string()))?
-        .max(min_total_blocks);
+        .ok_or_else(|| Error::Overflow("bootstrap block count overflow".to_string()))?;
 
     let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
     let mut feature_incompat =
@@ -252,7 +251,6 @@ mod tests {
             &slots,
             &[0; 16],
             ZErofsComprCfgs::default(),
-            0,
             None,
         )
         .unwrap();
@@ -271,7 +269,6 @@ mod tests {
             &[],
             &[0; 16],
             ZErofsComprCfgs::default(),
-            0,
             None,
         )
         .unwrap();
@@ -285,7 +282,6 @@ mod tests {
             &[],
             &[0; 16],
             ZErofsComprCfgs::default(),
-            0,
             None,
         )
         .is_err());
