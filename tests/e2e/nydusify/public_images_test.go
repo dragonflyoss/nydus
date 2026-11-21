@@ -34,7 +34,7 @@ func TestConvertPublicImages(t *testing.T) {
 	var processed, succeeded atomic.Int64
 
 	for _, image := range images {
-		t.Run(imageBaseName(image), func(t *testing.T) {
+		t.Run(strings.ReplaceAll(imageName(image), "/", "_"), func(t *testing.T) {
 			t.Parallel()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -44,7 +44,7 @@ func TestConvertPublicImages(t *testing.T) {
 					processed.Add(1), total, succeeded.Load())
 			}()
 
-			target := fmt.Sprintf("%s/%s-nydus", cfg.registry, imageBaseName(image))
+			target := fmt.Sprintf("%s/%s-nydus", cfg.registry, imageName(image))
 
 			work := env.WorkDir(t)
 
@@ -155,12 +155,17 @@ func readImageList(t *testing.T, path string) []string {
 	return images
 }
 
-func imageBaseName(image string) string {
-	if i := strings.LastIndex(image, "/"); i >= 0 {
-		return image[i+1:]
+// imageName returns the repository path of image below its registry
+// namespace, so that mirrored images of different Docker Hub namespaces
+// do not collide: ghcr.io/o/r/nginx is nginx and ghcr.io/o/r/grafana/grafana
+// is grafana/grafana.
+func imageName(image string) string {
+	parts := strings.Split(image, "/")
+	if len(parts) > 3 && strings.ContainsAny(parts[0], ".:") {
+		return strings.Join(parts[3:], "/")
 	}
 
-	return image
+	return parts[len(parts)-1]
 }
 
 func isLocalRegistry(registry string) bool {
