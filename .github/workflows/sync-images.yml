@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       images:
-        description: Space-separated subset of Docker Hub images to mirror to GHCR (default all images in the list)
+        description: Space-separated subset of Docker Hub images to mirror to GHCR, official ones by name and others as namespace/name (default all images in the list)
 
 permissions:
   contents: read
@@ -58,7 +58,10 @@ jobs:
           IMAGE: ${{ matrix.image }}
           GHCR_NAMESPACE: ghcr.io/${{ github.repository }}
         run: |
-          src="docker://docker.io/library/${IMAGE}:latest"
+          case "$IMAGE" in
+            */*) src="docker://docker.io/${IMAGE}:latest" ;;
+            *) src="docker://docker.io/library/${IMAGE}:latest" ;;
+          esac
           dst="docker://${GHCR_NAMESPACE}/${IMAGE}:latest"
           wait=60
           while :; do

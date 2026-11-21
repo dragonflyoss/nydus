@@ -21,6 +21,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/static"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
@@ -182,6 +184,125 @@ func TestConvertIndex(t *testing.T) {
 			}
 
 			assert.Equal(t, want.Digest, got.Digest)
+		})
+	}
+}
+
+// TestConvertAttestation converts the index buildx pushes for an image with an
+// SBOM: the image manifest plus an unknown/unknown attestation manifest whose
+// layer is an in-toto document.
+func TestConvertAttestation(t *testing.T) {
+	t.Parallel()
+	mount.FUSE{}.Require(t)
+	reg := registry.Start(t)
+	src := inputTree(t, map[string]string{"data": "image with an sbom\n"})
+	base := reg.PushDirs(t, reg.Ref("attestation", "seed"), src)
+
+	imageDigest, err := base.Digest()
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	attestation := mutate.MediaType(empty.Image, types.OCIManifestSchema1)
+	attestation = mutate.ConfigMediaType(attestation, types.OCIConfigJSON)
+
+	cfg, err := attestation.ConfigFile()
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	cfg = cfg.DeepCopy()
+	cfg.Architecture, cfg.OS = "unknown", "unknown"
+	attestation, err = mutate.ConfigFile(attestation, cfg)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	sbom := static.NewLayer([]byte(`{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"https://spdx.dev/Document"}`), "application/vnd.in-toto+json")
+	attestation, err = mutate.Append(attestation, mutate.Addendum{
+		Layer:       sbom,
+		Annotations: map[string]string{"in-toto.io/predicate-type": "https://spdx.dev/Document"},
+	})
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	attestationDigest, err := attestation.Digest()
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+
+	index := mutate.AppendManifests(empty.Index,
+		mutate.IndexAddendum{Add: base, Descriptor: v1.Descriptor{Platform: &v1.Platform{OS: "linux", Architecture: "amd64"}}},
+		mutate.IndexAddendum{Add: attestation, Descriptor: v1.Descriptor{
+			Platform: &v1.Platform{OS: "unknown", Architecture: "unknown"},
+			Annotations: map[string]string{
+				"vnd.docker.reference.type":   "attestation-manifest",
+				"vnd.docker.reference.digest": imageDigest.String(),
+			},
+		}},
+	)
+
+	source := reg.Ref("attestation", "source")
+	if !assert.NoError(t, remote.WriteIndex(ref(source).parse(t), index)) {
+		t.FailNow()
+	}
+
+	for _, filter := range []string{"all", "linux/amd64"} {
+		t.Run(filter, func(t *testing.T) {
+			t.Parallel()
+			target := reg.Ref("attestation", strings.ReplaceAll(filter, "/", "-"))
+			args := []string{"convert", "--source", source, "--target", target}
+			if filter != "all" {
+				args = append(args, "--platform", filter)
+			}
+
+			nydusify(t, args...)
+			targetRef := ref(target).parse(t)
+			root, err := remote.Get(targetRef)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			var imageRef string
+
+			if filter == "all" {
+				converted, err := root.ImageIndex()
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+
+				manifest, err := converted.IndexManifest()
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				if !assert.Len(t, manifest.Manifests, 2) {
+					t.FailNow()
+				}
+
+				for _, desc := range manifest.Manifests {
+					if desc.Platform != nil && desc.Platform.OS == "unknown" {
+						assert.Equal(t, attestationDigest, desc.Digest)
+						assert.Equal(t, "attestation-manifest", desc.Annotations["vnd.docker.reference.type"])
+
+						continue
+					}
+
+					assert.NotEqual(t, imageDigest, desc.Digest)
+					imageRef = targetRef.Context().Digest(desc.Digest.String()).String()
+				}
+			} else {
+				if !assert.True(t, root.MediaType.IsImage()) {
+					t.FailNow()
+				}
+
+				imageRef = target
+			}
+
+			img := ref(imageRef).pull(t, fstest.ScanSource(t, src))
+			m := mount.Mount(t, mount.FUSE{}, img, mount.Options{})
+			fstest.VerifyMount(t, m.Root, img.Want, img.Compare())
+			nydusify(t, "check", "--source", source, "--target", imageRef)
 		})
 	}
 }
