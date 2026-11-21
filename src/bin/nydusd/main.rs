@@ -58,37 +58,37 @@ fn append_fs_options(app: Command) -> Command {
             .help("Path to the RAFS filesystem metadata file")
             .conflicts_with("shared-dir"),
     )
-    .arg(
-        Arg::new("localfs-dir")
-            .long("localfs-dir")
-            .short('D')
-            .help(
-                "Path to the `localfs` working directory, which also enables the `localfs` storage backend"
-            )
-            .conflicts_with("config"),
-    )
-    .arg(
-        Arg::new("shared-dir")
-            .long("shared-dir")
-            .short('s')
-            .help("Path to the directory to be shared via the `passthroughfs` FUSE driver")
-    )
-    .arg(
-        Arg::new("prefetch-files")
-            .long("prefetch-files")
-            .help("Path to the prefetch configuration file containing a list of directories/files separated by newlines")
-            .required(false)
-            .requires("bootstrap")
-            .num_args(1),
-    )
-    .arg(
-        Arg::new("virtual-mountpoint")
-            .long("virtual-mountpoint")
-            .short('m')
-            .help("Mountpoint within the FUSE/virtiofs device to mount the RAFS/passthroughfs filesystem")
-            .default_value("/")
-            .required(false),
-    );
+        .arg(
+            Arg::new("localfs-dir")
+                .long("localfs-dir")
+                .short('D')
+                .help(
+                    "Path to the `localfs` working directory, which also enables the `localfs` storage backend"
+                )
+                .conflicts_with("config"),
+        )
+        .arg(
+            Arg::new("shared-dir")
+                .long("shared-dir")
+                .short('s')
+                .help("Path to the directory to be shared via the `passthroughfs` FUSE driver")
+        )
+        .arg(
+            Arg::new("prefetch-files")
+                .long("prefetch-files")
+                .help("Path to the prefetch configuration file containing a list of directories/files separated by newlines")
+                .required(false)
+                .requires("bootstrap")
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("virtual-mountpoint")
+                .long("virtual-mountpoint")
+                .short('m')
+                .help("Mountpoint within the FUSE/virtiofs device to mount the RAFS/passthroughfs filesystem")
+                .default_value("/")
+                .required(false),
+        );
 
     #[cfg(feature = "dedup")]
     {
