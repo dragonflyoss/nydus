@@ -262,7 +262,8 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
   whose tests share one Kind cluster.
 - Nothing calls `t.Skip*`. A missing precondition goes through `env.Skipf`
   (or `MustHaveRoot`, `MustHaveKernel`, `LookPath`, ...): locally it skips,
-  under CI it fails.
+  under CI it fails. The one exception is `public_images_test.go`, which calls
+  `t.Skipf` for images missing from their registry, in CI too.
 - Assertions use testify's `assert`, never `require`, in the specific form
   `testifylint` checks.
 - A file is named after what it holds (`cache/peer_test.go`,

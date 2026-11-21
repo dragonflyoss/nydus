@@ -69,7 +69,8 @@ func TestConvertPublicImages(t *testing.T) {
 
 			out, err := cfg.runWithRetry(t, "convert "+image, func() *exec.Cmd { return exec.Command(nydusify, args("convert")...) })
 			if err != nil && isImageNotFound(out) {
-				env.Skipf(t, "%s is not in its registry", image)
+				// Upstream images get delisted; that is not a conversion failure, so skip even under CI.
+				t.Skipf("%s is not in its registry", image)
 			}
 
 			if !assert.NoError(t, err) {
