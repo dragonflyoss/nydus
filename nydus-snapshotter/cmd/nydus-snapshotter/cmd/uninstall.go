@@ -15,11 +15,12 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/installer"
 )
 
-// unlabelCmd represents the unlabel command, the post-delete hook of the
-// chart.
-var unlabelCmd = &cobra.Command{
-	Use:               "unlabel",
-	Short:             "Remove the " + installer.NodeLabel + " label from every node",
+// uninstallCmd represents the uninstall command, the post-delete hook of the
+// chart. It removes what the installers left in the cluster, the node label;
+// a host keeps its snapshotter, which containers still run on.
+var uninstallCmd = &cobra.Command{
+	Use:               "uninstall",
+	Short:             "Remove what the installers left in the cluster: the " + installer.NodeLabel + " label of every node",
 	Args:              cobra.NoArgs,
 	DisableAutoGenTag: true,
 	SilenceUsage:      true,
@@ -29,12 +30,12 @@ var unlabelCmd = &cobra.Command{
 			return err
 		}
 
-		return runUnlabel(cmd.Context(), cfg)
+		return runUninstall(cmd.Context(), cfg)
 	},
 }
 
-// runUnlabel removes the label the installers keep on their nodes from every
-// node, with the service account of the Pod.
-func runUnlabel(ctx context.Context, cfg *config.Config) error {
+// runUninstall removes the label the installers keep on their nodes from
+// every node, with the service account of the Pod.
+func runUninstall(ctx context.Context, cfg *config.Config) error {
 	return installer.New(&installer.Config{InstallerConfig: cfg.Installer}, nil).UnlabelNodes(ctx)
 }

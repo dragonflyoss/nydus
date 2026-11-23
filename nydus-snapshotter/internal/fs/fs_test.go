@@ -1694,6 +1694,7 @@ func newTestFileSystem(t *testing.T, manager systemd.Manager, keychain *authmock
 		newClient: func(string) nydusd.Client { return client },
 		locker:    kmutex.New(),
 		startLock: &sync.Mutex{},
+		preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
 	}
 	f.cfg.Store(cfg)
 

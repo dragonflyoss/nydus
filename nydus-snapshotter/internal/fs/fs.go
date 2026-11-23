@@ -101,10 +101,18 @@ type FileSystem interface {
 	// rest to daemons started later.
 	Reload(ctx context.Context, cfg *config.Config) error
 
-	// Run keeps the registry credentials of the daemons current until ctx is
-	// done: it watches the keychain and pushes a changed credential to the
-	// daemons reading with it.
+	// Run keeps the registry credentials of the daemons current and runs the
+	// preheats until ctx is done: it watches the keychain and pushes a
+	// changed credential to the daemons reading with it.
 	Run(ctx context.Context)
+
+	// Preheat queues the preheat of the image, read with the credential. A
+	// pending or running preheat of the same image is left as it is and the
+	// credential is not used; a finished one is replaced.
+	Preheat(ctx context.Context, image *Image, credential *PreheatCredential) error
+
+	// StatPreheat returns the preheat of the image of a chain ID.
+	StatPreheat(chainID string) (*Preheat, error)
 }
 
 // fileSystem is the Nydus v3 FileSystem: one systemd unit per image, keyed
@@ -146,6 +154,9 @@ type fileSystem struct {
 	// reported once.
 	unresponsive sync.Map
 
+	// preheats holds the pending and running preheats.
+	preheats *preheatQueue
+
 	// limitsMu serializes applyLimits, so the limits of the latest config
 	// are the ones applied last.
 	limitsMu sync.Mutex
@@ -156,14 +167,15 @@ type fileSystem struct {
 }
 
 // New returns the Nydus v3 file system. It starts the daemon slice with its
-// limits and applies the daemon limits to the daemons already running.
+// limits, applies the daemon limits to the daemons already running and
+// recovers the preheats a previous run left.
 func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s store.Store, keychain auth.Keychain, startLock sync.Locker) (FileSystem, error) {
 	driver, err := newDriver(cfg.Nydusd.Driver)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, dir := range []string{cfg.CacheDir(), cfg.DaemonInstancesDir(), cfg.DaemonRuntimesDir(), cfg.Nydusd.LogDir} {
+	for _, dir := range []string{cfg.CacheDir(), cfg.DaemonInstancesDir(), cfg.DaemonRuntimesDir(), cfg.PreheatRuntimesDir(), cfg.Nydusd.LogDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
@@ -178,6 +190,7 @@ func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s sto
 		newClient: nydusd.NewClient,
 		locker:    kmutex.New(),
 		startLock: startLock,
+		preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
 	}
 	f.cfg.Store(cfg)
 
@@ -192,6 +205,9 @@ func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s sto
 		deferred = true
 	}
 	f.limitsDeferred.Store(deferred)
+
+	// Preheats that outlived a restart are watched once Run starts.
+	f.preheats.recovered = f.recoverPreheats(ctx)
 
 	return f, nil
 }

@@ -98,6 +98,20 @@ var (
 		Help:      "Number of running nydus daemons that failed the last health check.",
 	})
 
+	// PreheatsTotal counts finished preheats by result: success or failure.
+	PreheatsTotal = newCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "preheats_total",
+		Help:      "Number of image preheats finished.",
+	}, labelResult, ResultSuccess, ResultFailure)
+
+	// RunningPreheats is the number of preheats downloading blobs.
+	RunningPreheats = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "running_preheats",
+		Help:      "Number of running image preheats.",
+	})
+
 	// AuthUpdatesTotal counts credential pushes to daemons by result:
 	// success, failure or unsupported.
 	AuthUpdatesTotal = newCounterVec(prometheus.CounterOpts{

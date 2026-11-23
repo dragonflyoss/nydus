@@ -33,15 +33,16 @@ const (
 	pusherWorkers = 2
 )
 
-// Run keeps the registry credentials of the daemons current until ctx is
-// done: it watches the keychain and pushes a changed credential to the
-// daemons reading with it.
+// Run keeps the registry credentials of the daemons current and runs the
+// preheats until ctx is done: it watches the keychain and pushes a changed
+// credential to the daemons reading with it.
 func (f *fileSystem) Run(ctx context.Context) {
 	// A start is over, one way or the other, within the bound of a Mount.
 	p := newPusher(f.keychain, f.store, f.newClient, f.mountBound(f.cfg.Load()))
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	wg.Go(func() { f.keychain.Run(ctx, p.enqueue) })
+	wg.Go(func() { f.runPreheats(ctx) })
 	p.run(ctx)
 }
 

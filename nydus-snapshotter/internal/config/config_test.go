@@ -536,6 +536,22 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
+			name:   "preheat containerd addr that is relative",
+			mutate: func(cfg *Config) { cfg.Preheat.ContainerdAddr = "containerd.sock" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `preheat.containerd_addr must be an absolute path, got "containerd.sock"`)
+			},
+		},
+		{
+			name:   "preheat max concurrent images that is not positive",
+			mutate: func(cfg *Config) { cfg.Preheat.MaxConcurrentImages = 0 },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "preheat.max_concurrent_images must be positive")
+			},
+		},
+		{
 			name:   "installer rootfs dir that is relative",
 			mutate: func(cfg *Config) { cfg.Installer.RootfsDir = "host" },
 			expect: func(t *testing.T, err error) {

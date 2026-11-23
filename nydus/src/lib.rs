@@ -29,6 +29,7 @@ pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
 pub mod optimize;
+pub mod preheat;
 #[cfg(any(
     feature = "fanotify",
     feature = "fileio",

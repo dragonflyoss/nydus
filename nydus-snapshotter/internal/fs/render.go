@@ -20,7 +20,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
 )
 
-// renderOptions are the values of a daemon's config.
+// renderOptions are the values of a nydus config, a daemon's or a preheat's.
 type renderOptions struct {
 	// nydusd holds what all daemons share: runtime_dir and the backend,
 	// storage and prefetch sections.
@@ -38,6 +38,9 @@ type renderOptions struct {
 	// auth is the base64 username:password, backend.config.auth.
 	auth string
 
+	// registryToken is the bearer token, backend.config.registry_token.
+	registryToken string
+
 	// skipVerify skips TLS verification, backend.config.http.tls.skip_verify.
 	skipVerify bool
 
@@ -48,8 +51,8 @@ type renderOptions struct {
 	prefetchScope string
 }
 
-// renderConfig renders the daemon's config and writes it into the daemon's
-// runtime dir, on tmpfs because the config holds the credential.
+// renderConfig renders the daemon's config, with the keychain's credential,
+// and writes it into the daemon's runtime dir.
 func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, prefetchScope string) error {
 	endpoint, err := f.hosts.Resolve(ref.Host)
 	if err != nil {
@@ -61,28 +64,33 @@ func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Da
 		return fmt.Errorf("resolve credential of %s: %w", ref.Name, err)
 	}
 
-	caCert, err := f.caBundle(endpoint.CACerts, d.RuntimeDir)
+	return f.writeConfig(cfg, ref, endpoint, d.RuntimeDir, d.ConfigPath, &renderOptions{
+		auth:          credential,
+		prefetchScope: cmp.Or(prefetchScope, cfg.Nydusd.Config.Prefetch.Scope),
+	})
+}
+
+// writeConfig fills in what every nydus process reading the image shares,
+// renders the config and writes it to path in dir, on tmpfs because the
+// config holds the credential.
+func (f *fileSystem) writeConfig(cfg *config.Config, ref *registry.Reference, endpoint *registry.Endpoint, dir, path string, opts *renderOptions) error {
+	caCert, err := f.caBundle(endpoint.CACerts, dir)
 	if err != nil {
 		return err
 	}
 
-	opts := &renderOptions{
-		nydusd:        cfg.Nydusd.Config,
-		cacheDir:      cfg.CacheDir(),
-		addr:          endpoint.Addr,
-		repository:    ref.Repository,
-		auth:          credential,
-		skipVerify:    endpoint.SkipVerify,
-		caCert:        caCert,
-		prefetchScope: cmp.Or(prefetchScope, cfg.Nydusd.Config.Prefetch.Scope),
-	}
-
+	opts.nydusd = cfg.Nydusd.Config
+	opts.cacheDir = cfg.CacheDir()
+	opts.addr = endpoint.Addr
+	opts.repository = ref.Repository
+	opts.skipVerify = endpoint.SkipVerify
+	opts.caCert = caCert
 	data, err := opts.render()
 	if err != nil {
 		return err
 	}
 
-	return continuity.AtomicWriteFile(d.ConfigPath, data, 0o600)
+	return continuity.AtomicWriteFile(path, data, 0o600)
 }
 
 // caBundle returns the one CA file nydus trusts: none, the only one, or a
@@ -113,12 +121,12 @@ func (f *fileSystem) caBundle(cas []string, dir string) (string, error) {
 	return path, nil
 }
 
-// render returns the daemon's config, refer to the Storage config section of
+// render returns the nydus config, refer to the Storage config section of
 // docs/nydus.md.
 //
 //	snapshotter config   nydusd.config, key for key
 //	image reference      backend.config.{addr,repository}
-//	keychain             backend.config.auth
+//	keychain or preheat  backend.config.{auth,registry_token}
 //	certs.d hosts.toml   backend.config.http.tls
 //	nydus-prefetch label prefetch.scope
 func (r *renderOptions) render() ([]byte, error) {
@@ -148,6 +156,10 @@ func (r *renderOptions) render() ([]byte, error) {
 	}
 	if r.auth != "" {
 		registry["auth"] = r.auth
+	}
+
+	if r.registryToken != "" {
+		registry["registry_token"] = r.registryToken
 	}
 
 	if registryConfig.Dragonfly.SchedulerEndpoint != "" {

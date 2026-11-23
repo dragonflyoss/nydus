@@ -15,6 +15,7 @@ import (
 	"github.com/containerd/errdefs"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	nydusfs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
 )
 
 const (
@@ -73,6 +74,16 @@ func (l labels) isNydusBlob() bool {
 // isNydusBootstrap reports whether the labels mark a nydus bootstrap layer.
 func (l labels) isNydusBootstrap() bool {
 	return l[labelNydusBootstrap] == labelTrue
+}
+
+// validateFSVersion returns an error unless the labels name the nydus format
+// this snapshotter serves.
+func (l labels) validateFSVersion() error {
+	if version := l[labelNydusFSVersion]; version != nydusfs.Version {
+		return fmt.Errorf("nydus image format %s=%q is not supported, convert the image with nydusify v3: %w", labelNydusFSVersion, version, errdefs.ErrNotImplemented)
+	}
+
+	return nil
 }
 
 // prefetchScope returns the prefetch scope a bootstrap's labels ask for, ""

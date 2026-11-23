@@ -199,7 +199,8 @@ func (n *node) writeConfig(t *testing.T) {
 			"binary":  nydus,
 			"log_dir": n.daemonLogDir(),
 		},
-		"cgroup": cgroup,
+		"cgroup":  cgroup,
+		"preheat": map[string]any{"containerd_addr": n.containerdAddress()},
 	})
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -271,6 +272,10 @@ func (n *node) serving() bool {
 
 func (n *node) snapshotterAddress() string {
 	return filepath.Join(n.runDir, "snapshotter.sock")
+}
+
+func (n *node) containerdAddress() string {
+	return filepath.Join(n.containerdDir, "containerd.sock")
 }
 
 func (n *node) certsDir() string {
@@ -382,7 +387,7 @@ func (n *node) containerdConfig(t *testing.T, bin string) (path, address string)
 		t.FailNow()
 	}
 
-	address = filepath.Join(n.containerdDir, "containerd.sock")
+	address = n.containerdAddress()
 	disabled := `"io.containerd.grpc.v1.cri", "io.containerd.nri.v1.nri"`
 	if n.pause != "" {
 		disabled = `"io.containerd.nri.v1.nri"`

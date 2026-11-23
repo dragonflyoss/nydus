@@ -133,9 +133,21 @@ func TestRenderOptions_render(t *testing.T) {
 				assert.NoError(err)
 				registry := rendered["backend"].(map[string]any)["config"].(map[string]any)
 				assert.NotContains(registry, "auth")
+				assert.NotContains(registry, "registry_token")
 				assert.NotContains(registry, "dragonfly")
 				assert.NotContains(registry["http"], "proxy")
 				assert.NotContains(registry["http"], "tls")
+			},
+		},
+		{
+			name: "render a bearer token without a basic credential",
+			opts: &renderOptions{nydusd: config.New().Nydusd.Config, addr: "https://registry.example.com", repository: "team/app", registryToken: "token", prefetchScope: "auto"},
+			expect: func(t *testing.T, rendered map[string]any, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				registry := rendered["backend"].(map[string]any)["config"].(map[string]any)
+				assert.Equal("token", registry["registry_token"])
+				assert.NotContains(registry, "auth")
 			},
 		},
 		{

@@ -108,6 +108,27 @@ func (b *BootstrapLayer) linkBootstrap(dst string) error {
 	return b.link(bootstrapFile, dst)
 }
 
+// bootstrap returns the path of the bootstrap within the layer.
+func (b *BootstrapLayer) bootstrap() (string, error) {
+	dir, err := b.imageDir()
+	if err != nil {
+		return "", err
+	}
+
+	// A symlink in the layer would hand the process whatever it names.
+	path := filepath.Join(dir, bootstrapFile)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", path, err)
+	}
+
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("%s is not a regular file: %w", path, errdefs.ErrInvalidArgument)
+	}
+
+	return path, nil
+}
+
 // seedCache links the blob metas into the cache, as nydusify mount does, so a
 // daemon need not fetch them. An existing meta is kept.
 func (b *BootstrapLayer) seedCache(cacheDir string, blobs []string) error {

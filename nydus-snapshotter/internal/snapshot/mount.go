@@ -74,8 +74,8 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 // returns its mountpoint.
 func (s *snapshotter) mountImage(ctx context.Context, bootstrap layer) (string, error) {
 	bootstrapLabels := labels(bootstrap.info.Labels)
-	if version := bootstrapLabels[labelNydusFSVersion]; version != nydusfs.Version {
-		return "", fmt.Errorf("nydus image format %s=%q is not supported, convert the image with nydusify v3: %w", labelNydusFSVersion, version, errdefs.ErrNotImplemented)
+	if err := bootstrapLabels.validateFSVersion(); err != nil {
+		return "", err
 	}
 
 	chainID := bootstrapLabels[labelSnapshotRef]

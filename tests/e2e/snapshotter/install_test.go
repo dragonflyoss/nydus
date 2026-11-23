@@ -390,6 +390,6 @@ func TestInstallNodeLabel(t *testing.T) {
 	assert.Equal(t, "active", n.property(t, serviceUnit, "ActiveState"))
 
 	n.exec(t, "env", "KUBERNETES_SERVICE_HOST="+address, "KUBERNETES_SERVICE_PORT=6443",
-		payloadDir+"/bin/nydus-snapshotter", "unlabel", "--config", payloadConfig)
+		payloadDir+"/bin/nydus-snapshotter", "uninstall", "--config", payloadConfig)
 	assert.False(t, labeled())
 }

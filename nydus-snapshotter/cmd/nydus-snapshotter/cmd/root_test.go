@@ -31,7 +31,7 @@ func executeCommand(t *testing.T, args ...string) (string, error) {
 	rootCmd.SetErr(out)
 	rootCmd.SetArgs(args)
 	t.Cleanup(func() {
-		for _, cmd := range []*cobra.Command{rootCmd, installCmd, unlabelCmd} {
+		for _, cmd := range []*cobra.Command{rootCmd, installCmd, uninstallCmd} {
 			for _, name := range []string{"config", "help", "version"} {
 				if flag := cmd.Flags().Lookup(name); flag != nil {
 					assert.NoError(t, flag.Value.Set(flag.DefValue))

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	nydussnapshotterv1 "d7y.io/api/v2/pkg/apis/nydussnapshotter/v1"
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
 	"github.com/containerd/containerd/v2/contrib/snapshotservice"
 	"github.com/containerd/containerd/v2/defaults"
@@ -36,6 +37,7 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/metrics"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/preheat"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/snapshot"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd"
@@ -201,6 +203,11 @@ func (s *Server) setup(ctx context.Context) error {
 		grpc.WaitForHandlers(true),
 	)
 	snapshotsapi.RegisterSnapshotsServer(s.grpc, snapshotservice.FromSnapshotter(s.snapshotter))
+
+	// The preheat service shares the socket, as containerd serves all its
+	// services on one.
+	resolver := preheat.NewResolver(s.cfg.Preheat.ContainerdAddr, s.snapshotter)
+	nydussnapshotterv1.RegisterNydusSnapshotterServer(s.grpc, preheat.NewService(resolver, s.fileSystem))
 
 	// Health is the gRPC health checking protocol, served as containerd
 	// serves its own, refer to

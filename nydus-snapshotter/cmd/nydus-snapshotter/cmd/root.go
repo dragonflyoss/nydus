@@ -73,7 +73,7 @@ func init() {
 
 	// Add sub command.
 	rootCmd.AddCommand(installCmd)
-	rootCmd.AddCommand(unlabelCmd)
+	rootCmd.AddCommand(uninstallCmd)
 }
 
 // loadConfig loads the config at path. Only a path that was not asked for

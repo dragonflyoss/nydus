@@ -28,6 +28,7 @@ func TestDaemonIDFromUnit(t *testing.T) {
 				assert.True(ok)
 				assert.Equal(mockChainID, id.ChainID())
 				assert.Equal(mockUnit, id.Unit())
+				assert.Equal(mockPreheatUnit, id.PreheatUnit())
 				assert.Equal("abababababab", id.Short())
 				parsed, err := daemonIDFromChainID(mockChainID)
 				assert.NoError(err)

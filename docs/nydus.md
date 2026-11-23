@@ -18,6 +18,7 @@ The user-facing commands are:
 - `nydus check`
 - `nydus merge`
 - `nydus optimize`
+- `nydus preheat`
 - `nydus fuse`
 - `nydus ublk` (with the optional `ublk` feature)
 - `nydus uffd` (with the optional `uffd` feature)
@@ -809,6 +810,88 @@ Current implementation notes:
 	`CHUNK REFS` / `UNIQUE CHUNKS` then count the pclusters addressing that
 	device.
 
+### Preheat
+
+`nydus preheat [OPTIONS]`
+
+The `nydus preheat` command downloads every blob of an image into the local
+cache directory and exits. It mounts nothing: a later `nydus fuse` of the
+image over the same cache directory reads no data from the backend.
+
+```text
+open every blob's cache ──▶ download every blob ──▶ succeeded, exit 0
+       │ fails                    │ first blob fails
+       └──────────────────────────┴───────────────▶ failed, exit 1
+```
+
+Supported form:
+
+```bash
+nydus preheat \
+  --bootstrap /path/to/bootstrap \
+  --config /path/to/config.yaml \
+  --state-file /run/preheat/state.json
+```
+
+Current implementation notes:
+
+- `--config` is the same storage config as `nydus fuse --config`. It names
+	the backend, with its credential, and `storage.dir`, which is required.
+	See [Storage config](#storage-config).
+- The download is the blob prefetch of a mount with `prefetch.scope: all`,
+	whatever scope the config names: `prefetch.concurrent_blob_count` blobs at
+	once, each within `prefetch.request_timeout`. See
+	[Blob prefetch](#blob-prefetch).
+- A blob another process is prefetching into the same cache directory is not
+	fetched twice: the preheat waits for that process, and a mount of the image
+	sees every chunk group the preheat downloads the moment it is ready. See
+	[Cross-process cache sharing and prefetch dedup](#cross-process-cache-sharing-and-prefetch-dedup).
+- The first blob that fails ends the preheat: no further blob is started, and
+	the blobs in flight end with the process. A read the backend refused after
+	its own retries is sent once more at once, not after
+	`prefetch.retry_interval`. What was downloaded stays in the cache, so the
+	next preheat fetches only the rest, and an image whose blobs are all cached
+	succeeds without a data read.
+- A termination signal ends the process. The state file then still says
+	`running`.
+- `--log-level`, `--log-dir`, and `--log-max-files` control logging: like a
+	daemon subcommand, the process logs to a file under `--log-dir`.
+- `--state-file` is one JSON document, replaced through a file next to it and
+	a rename, so a reader never finds a part of one. It is written when the
+	preheat starts, when every blob's cache is open, on every finished blob,
+	every 5 seconds in between, and once with the final state:
+
+	```json
+	{
+	  "state": "running",
+	  "blobs": [
+	    {
+	      "digest": "sha256:c17e…",
+	      "content_length": 1073741824,
+	      "finished_content_length": 1073741824,
+	      "is_finished": true
+	    }
+	  ],
+	  "description": "",
+	  "updated_at": "2026-11-23T08:00:00.123456789Z"
+	}
+	```
+
+	- `state` is `running`, `succeeded` or `failed`.
+	- `blobs` lists every blob of the image: the priority blobs in declared
+		order, then the rest by index. `digest` names the blob as the registry
+		does, and `is_finished` is set once the blob is downloaded completely.
+	- `content_length` and `finished_content_length` of a blob are its
+		uncompressed bytes and the ones the cache holds, as the
+		`nydus_cache_bytes` gauge counts them: a native EROFS layer and an
+		ondemand blob have `0` in both. Both are `0` until every blob's cache
+		is open, which reads the blob's metadata.
+	- `description` is the reason of a failure, empty otherwise: the error
+		with its causes, led by the digest of the blob when a blob failed, at
+		most 4096 bytes. It never holds a credential, and the query of a URL,
+		which signs a redirected blob read, is left out.
+	- `updated_at` is the time the document was written, in RFC 3339.
+
 ### Fuse
 
 `nydus fuse [OPTIONS]`
@@ -1162,8 +1245,9 @@ Fields:
 	once; groups larger than 8 MiB (a quarter of that budget) are not kept.
 	Beyond that, the kernel page cache above the mount is the only reuse
 	layer. Diskless mode applies to `nydus fuse` and `nydus check`; the modes
-	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`)
-	and `nydus optimize` require a directory and reject its absence at startup,
+	that hand the cache file to the kernel (`fanotify`, `nbd`, `ublk`, `uffd`),
+	`nydus optimize` and `nydus preheat` require a directory and reject its
+	absence at startup,
 	except that the kernel modes accept an image whose every blob is a native
 	layer in a `local` store: its store file is handed to the kernel directly.
 - `storage.skip_verify_checksums` (default `false`) skips checking fetched
@@ -1212,7 +1296,8 @@ The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
 override the corresponding config directories. Runtime prefetch applies to
 `nydus fuse`, `nydus uffd`, `nydus nbd`, and `nydus ublk`; static `nydus check`
-does not start it.
+does not start it. `nydus preheat` runs the prefetch of scope `all` in the
+foreground, see [Preheat](#preheat).
 Unknown `backend.type` values and unknown fields are rejected at load time.
 
 Example invocations:

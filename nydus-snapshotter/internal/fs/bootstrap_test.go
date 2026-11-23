@@ -125,6 +125,57 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 	}
 }
 
+func TestBootstrapLayer_bootstrap(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(t *testing.T, fsDir string)
+		expect  func(t *testing.T, fsDir, path string, err error)
+	}{
+		{
+			name: "path of the bootstrap",
+			prepare: func(t *testing.T, fsDir string) {
+				assert.NoError(t, os.MkdirAll(filepath.Join(fsDir, "image"), 0o755))
+				assert.NoError(t, os.WriteFile(filepath.Join(fsDir, "image", bootstrapFile), nil, 0o644))
+			},
+			expect: func(t *testing.T, fsDir, path string, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.Equal(filepath.Join(fsDir, "image", bootstrapFile), path)
+			},
+		},
+		{
+			name:    "layer without a bootstrap",
+			prepare: func(t *testing.T, fsDir string) {},
+			expect: func(t *testing.T, fsDir, path string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.Empty(path)
+			},
+		},
+		{
+			name: "bootstrap that is a symlink",
+			prepare: func(t *testing.T, fsDir string) {
+				assert.NoError(t, os.MkdirAll(filepath.Join(fsDir, "image"), 0o755))
+				assert.NoError(t, os.Symlink("/etc/shadow", filepath.Join(fsDir, "image", bootstrapFile)))
+			},
+			expect: func(t *testing.T, fsDir, path string, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
+				assert.Empty(path)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fsDir := t.TempDir()
+			tc.prepare(t, fsDir)
+			path, err := NewBootstrapLayer(fsDir).bootstrap()
+			tc.expect(t, fsDir, path, err)
+		})
+	}
+}
+
 func TestBootstrapLayer_linkBootstrap(t *testing.T) {
 	tests := []struct {
 		name        string

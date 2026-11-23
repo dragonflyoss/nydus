@@ -63,6 +63,9 @@ type Config struct {
 	// GC is the blob cache GC config.
 	GC GCConfig `yaml:"gc"`
 
+	// Preheat is the image preheat config.
+	Preheat PreheatConfig `yaml:"preheat"`
+
 	// Installer is the installer config, which the snapshotter ignores.
 	Installer InstallerConfig `yaml:"installer"`
 }
@@ -335,6 +338,20 @@ type GCPolicyConfig struct {
 	DiskLowThresholdPercent int `yaml:"disk_low_threshold_percent"`
 }
 
+// PreheatConfig is the image preheat config. A preheat downloads every blob
+// of an image containerd has pulled, refer to the Preheat section of
+// docs/snapshotter.md.
+type PreheatConfig struct {
+	// MaxConcurrentImages is the number of images preheated at once, the
+	// rest wait. It is named as containerd names max_concurrent_downloads,
+	// refer to https://github.com/containerd/containerd/blob/v2.2.10/internal/cri/config/config.go.
+	MaxConcurrentImages int `yaml:"max_concurrent_images"`
+
+	// ContainerdAddr is the socket of containerd, which is asked for the
+	// layers of the image a preheat names.
+	ContainerdAddr string `yaml:"containerd_addr"`
+}
+
 // InstallerConfig is the config of the installer, the DaemonSet Pod that
 // installs the snapshotter onto the host, read once when it starts. It holds
 // what every node shares, as kubelet keeps that in its config file and not
@@ -451,6 +468,10 @@ func New() *Config {
 				DiskLowThresholdPercent:  DefaultGCDiskLowThresholdPercent,
 			},
 		},
+		Preheat: PreheatConfig{
+			MaxConcurrentImages: DefaultPreheatMaxConcurrentImages,
+			ContainerdAddr:      DefaultPreheatContainerdAddr,
+		},
 		Installer: InstallerConfig{
 			RootfsDir:    DefaultInstallerRootfsDir,
 			PayloadDir:   DefaultInstallerPayloadDir,
@@ -515,6 +536,7 @@ func (c *Config) Validate() error {
 		{name: "nydusd.log_dir", path: c.Nydusd.LogDir},
 		{name: "nydusd.config.runtime_dir", path: c.Nydusd.Config.RuntimeDir},
 		{name: "nydusd.config.storage.dir", path: c.Nydusd.Config.Storage.Dir, optional: true},
+		{name: "preheat.containerd_addr", path: c.Preheat.ContainerdAddr},
 		{name: "installer.rootfs_dir", path: c.Installer.RootfsDir},
 		{name: "installer.payload_dir", path: c.Installer.PayloadDir},
 		{name: "installer.token_dir", path: c.Installer.TokenDir},
@@ -658,6 +680,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid gc.policy thresholds: low %d%%, high %d%%", low, high)
 	}
 
+	if c.Preheat.MaxConcurrentImages <= 0 {
+		return errors.New("preheat.max_concurrent_images must be positive")
+	}
+
 	if c.Installer.SyncInterval <= 0 {
 		return errors.New("installer.sync_interval must be positive")
 	}
@@ -708,6 +734,22 @@ func (c *Config) DaemonRuntimeDir(id string) string {
 // DaemonInstanceDir returns the persistent directory of a daemon.
 func (c *Config) DaemonInstanceDir(id string) string {
 	return filepath.Join(c.DaemonInstancesDir(), id)
+}
+
+// PreheatRuntimesDir returns the tmpfs parent of the preheats' directories.
+func (c *Config) PreheatRuntimesDir() string {
+	return filepath.Join(c.RuntimeDir, "preheat")
+}
+
+// PreheatRuntimeDir returns the tmpfs directory of a preheat.
+func (c *Config) PreheatRuntimeDir(id string) string {
+	return filepath.Join(c.PreheatRuntimesDir(), id)
+}
+
+// PreheatLogDir returns the directory every preheat process logs to. Its
+// name is no daemon ID, so no daemon logs there.
+func (c *Config) PreheatLogDir() string {
+	return filepath.Join(c.Nydusd.LogDir, "preheat")
 }
 
 // CacheDir returns the shared blob cache directory.

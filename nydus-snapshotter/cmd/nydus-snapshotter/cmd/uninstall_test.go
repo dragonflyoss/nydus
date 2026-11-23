@@ -15,7 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestUnlabelCmd(t *testing.T) {
+func TestUninstallCmd(t *testing.T) {
 	tests := []struct {
 		name   string
 		config string
@@ -63,7 +63,7 @@ func TestUnlabelCmd(t *testing.T) {
 				assert.NoError(t, os.WriteFile(path, []byte(tc.config), 0o644))
 			}
 
-			_, err := executeCommand(t, append([]string{"unlabel", "--config", path}, tc.args...)...)
+			_, err := executeCommand(t, append([]string{"uninstall", "--config", path}, tc.args...)...)
 			tc.expect(t, err)
 		})
 	}

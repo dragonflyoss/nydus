@@ -53,13 +53,14 @@ Pod, where the DaemonSet mounts the ConfigMap. With
 containerd has loaded it, and removes it after three checks in a row fail;
 select the label with a `nodeSelector` or a RuntimeClass. It needs `get` and
 `patch` on `nodes`. An installer that stops keeps the label, so a rollout
-does not take it from the node; `nydus-snapshotter unlabel` removes it from
-every node, and the chart runs that as a post-delete hook.
+does not take it from the node; `nydus-snapshotter uninstall` removes it from
+every node, and the chart runs that as a post-delete hook. It touches nothing
+on a host.
 
 The installer copies ConfigMap changes to the host every sync interval
 without restarting the snapshotter, which reloads `cgroup` and
 `nydusd.config` itself; other keys apply when the installer Pods restart. An
-invalid `config.yaml` or `hosts.toml` is never copied to the host. Removing the DaemonSet leaves the snapshotter running; uninstalling is manual:
+invalid `config.yaml` or `hosts.toml` is never copied to the host. Removing the DaemonSet leaves the snapshotter running, and so does `nydus-snapshotter uninstall`; removing it from a host is manual:
 `systemctl disable --now nydus-snapshotter.socket nydus-snapshotter.service`,
 then `systemctl stop system-nydusd.slice` once no container runs on a nydus
 image, which also stops the daemons left, and removing the paths listed in the
@@ -68,3 +69,24 @@ design doc.
 Without Kubernetes, copy the binaries, `deploy/systemd/` and
 `deploy/nydus-snapshotter/` to the paths in the design doc and enable both
 units.
+
+## Preheat
+
+A client on the node downloads every blob of an image containerd has pulled
+with the `NydusSnapshotter` gRPC service on the snapshotter's socket
+(`/run/nydus-snapshotter/nydus-snapshotter.sock`). The proto and its Go, Rust
+and Python bindings live in
+[dragonflyoss/api](https://github.com/dragonflyoss/api/tree/main/pkg/apis/nydussnapshotter/v1).
+
+- `PreheatImage` takes the image reference, the containerd namespace
+  (`k8s.io` when empty) and a registry credential, a username and a password
+  or a bearer token, and queues the preheat. The credential is used by that
+  preheat only.
+- `StatImage` takes the image reference and the namespace and returns the
+  state of the image's preheat (`PENDING`, `RUNNING`, `SUCCEEDED` or
+  `FAILED`), every blob of the image with its digest and its progress, and
+  the reason of a failure.
+
+`preheat.max_concurrent_images` in `config.yaml` bounds the images preheated
+at once, and `preheat.containerd_addr` names containerd's socket. See the
+[Preheat](../docs/snapshotter.md#preheat) section of the design doc.

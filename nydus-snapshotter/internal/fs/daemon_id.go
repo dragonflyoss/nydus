@@ -18,11 +18,18 @@ const (
 	// unitPrefix prefixes every daemon unit.
 	unitPrefix = "nydusd-"
 
-	// unitSuffix is the unit type of a daemon.
+	// unitSuffix is the unit type of a daemon and of a preheat.
 	unitSuffix = ".service"
 
 	// unitPattern matches every daemon unit.
 	unitPattern = unitPrefix + "*" + unitSuffix
+
+	// preheatUnitPrefix prefixes every preheat unit. It differs from
+	// unitPrefix, so unitPattern matches no preheat.
+	preheatUnitPrefix = "nydus-preheat-"
+
+	// preheatUnitPattern matches every preheat unit.
+	preheatUnitPattern = preheatUnitPrefix + "*" + unitSuffix
 
 	// shortIDLength is the length of the daemon ID prefix shown in mount
 	// sources.
@@ -30,7 +37,7 @@ const (
 )
 
 // daemonID identifies the daemon of an image: the hex digest of its bootstrap
-// layer's chain ID, which names its unit and directories.
+// layer's chain ID, which names its units and directories.
 type daemonID string
 
 // daemonIDFromChainID returns the daemon ID of the image of a chain ID.
@@ -77,6 +84,11 @@ func (d daemonID) ChainID() string {
 // Unit returns the systemd unit of the daemon.
 func (d daemonID) Unit() string {
 	return unitPrefix + string(d) + unitSuffix
+}
+
+// PreheatUnit returns the systemd unit of the image's preheat.
+func (d daemonID) PreheatUnit() string {
+	return preheatUnitPrefix + string(d) + unitSuffix
 }
 
 // Short returns the ID prefix shown in mount sources.

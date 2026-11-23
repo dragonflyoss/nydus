@@ -460,6 +460,78 @@ The rendered `prefetch.scope` comes from, highest first:
 The other `prefetch` keys come from `nydusd.config.prefetch`. An invalid label
 value fails `Prepare`.
 
+### Preheat
+
+A preheat downloads every blob of an image to the node before a container
+uses it. The client calls the `NydusSnapshotter` gRPC service on the
+snapshotter's socket, where containerd calls the snapshots service; the proto
+lives in [dragonflyoss/api](https://github.com/dragonflyoss/api)
+(`pkg/apis/nydussnapshotter/v1`), with Go, Rust and Python bindings.
+
+| RPC | What it does |
+| --- | --- |
+| `PreheatImage` | Resolves an image containerd has pulled and queues its preheat. A pending or running preheat of the same image keeps going and no second one is started. |
+| `StatImage` | Resolves the image and returns the state of its preheat and of every blob of the image. |
+
+Both name the image and return no ID, as `PreheatImage` and `StatImage` of
+Dragonfly's scheduler do. There is no call to cancel or delete: a preheat
+runs to its result, and the cache is left to its GC.
+
+```text
+client ─ PreheatImage(image, namespace, basic_auth | bearer_token)
+   │
+   ▼
+snapshotter ── containerd: reference ─▶ image ─▶ diff IDs ─▶ chain IDs
+   │           snapshots:  chain IDs ─▶ committed bootstrap layer
+   │           queue:      pending until one of max_concurrent_images slots is free
+   ▼
+systemd ────── nydus-preheat-<chainID>.service, Type=exec, in the daemons' slice
+   │           nydus preheat --bootstrap … --config … --state-file …
+   ▼
+registry or Dragonfly ─▶ the shared blob cache
+```
+
+- **Image.** The request names a reference and a containerd namespace
+  (`k8s.io` when empty). The snapshotter asks containerd for the image's
+  layers, as `Image.IsUnpacked` does, and takes the bootstrap layer it
+  unpacked among them, so any spelling containerd knows the image by works.
+  A preheat is kept by the chain ID of that layer: one image has one
+  preheat, whatever its references, and `StatImage` finds it by any of them.
+- **Credential.** The request must carry one: a username and a password, or a
+  bearer token. It is used by this preheat only. It is rendered into the
+  process's `config.yaml` on tmpfs and removed when the process exits; it
+  never reaches the keychain, a daemon, a unit property, a log or an API
+  answer. A pending or running preheat ignores the credential of a second
+  request.
+- **Process.** One `nydus preheat` process per image, a transient unit with
+  the cgroup limits of one daemon. It shares the cache directory with the
+  daemons: a blob one of them is fetching is not fetched twice, and a running
+  daemon of the image reads what the preheat downloads. It downloads
+  `nydusd.config.prefetch.concurrent_blob_count` blobs at once, each bounded
+  by `request_timeout`.
+- **States.** `PENDING`, `RUNNING`, then `SUCCEEDED` or `FAILED`. The first
+  blob that fails ends the preheat; `description` names the blob and the
+  error. A new `PreheatImage` fetches only what is missing. A result shows
+  once the process is gone and its config removed.
+- **Progress.** `blobs` lists every blob of the image: its `digest`, as the
+  registry and the image manifest name it, its `content_length` and
+  `finished_content_length` in uncompressed bytes, and `is_finished`. An
+  OCI descriptor carries a digest and a size the same way, and Dragonfly's
+  `StatImage` lists its layers with `is_finished`; like it, the answer has
+  no totals, which a client adds up. The list comes from the `state.json`
+  the process rewrites, refer to [Preheat](nydus.md#preheat).
+- **Restart.** Nothing is persisted. A running process outlives the
+  snapshotter and is recovered when it starts; a pending preheat is
+  lost, and a result is kept for 24 hours or until the node reboots.
+- **Cache GC.** No rule is added: a blob being downloaded holds its prefetch
+  lock, and a preheated blob ages from its download like any other.
+
+Errors: `InvalidArgument` (no credential or a bad reference),
+`NotFound` (containerd has no such image, or the image has no preheat: it
+was never preheated or its result expired),
+`FailedPrecondition` (not a nydus image this snapshotter unpacked) and
+`Unavailable` (containerd cannot be reached).
+
 ### Cache GC
 
 The scheme follows Dragonfly's dfdaemon GC (`dragonfly-client/src/gc`). The unit
@@ -675,6 +747,15 @@ gc:
     disk_high_threshold_percent: 80
     disk_low_threshold_percent: 60
 
+# A preheat downloads every blob of an image containerd has pulled, started
+# over the gRPC socket by PreheatImage.
+preheat:
+  # Images preheated at once, the rest wait. Each one downloads
+  # nydusd.config.prefetch.concurrent_blob_count blobs at once.
+  max_concurrent_images: 1
+  # Socket of containerd, asked for the layers of the image a preheat names.
+  containerd_addr: /run/containerd/containerd.sock
+
 # Read only by the installer, nydus-snapshotter install, once when it starts;
 # the snapshotter ignores it.
 installer:
@@ -768,12 +849,15 @@ snapshotter (`/etc/nydus`, `/run/containerd-nydus`, `/var/lib/containerd-nydus`)
 | `/run/nydus-snapshotter/nydus-snapshotter.sock` | gRPC socket | systemd / snapshotter → containerd |
 | `/run/nydus-snapshotter/nydusd/<chainID>.sock` | Daemon API | nydusd → snapshotter |
 | `/run/nydus-snapshotter/nydusd/<chainID>/{config.yaml,ca.pem}` | Rendered daemon config (holds the credential) | snapshotter → nydusd |
+| `/run/nydus-snapshotter/preheat/<chainID>/config.yaml` | Rendered preheat config (holds the credential), removed when the process exits | snapshotter → nydus preheat |
+| `/run/nydus-snapshotter/preheat/<chainID>/{preheat.json,state.json}` | Preheat record; progress and result | snapshotter; nydus preheat → snapshotter |
 | `/var/lib/nydus-snapshotter/metadata.db` | Snapshot metastore (bbolt) | snapshotter |
 | `/var/lib/nydus-snapshotter/nydusd.db` | Instances and blob access times (bbolt) | snapshotter |
 | `/var/lib/nydus-snapshotter/snapshots/<id>/{fs,work}` | Overlay upper and work dirs; bootstrap `fs/image/` | snapshotter, containerd |
 | `/var/lib/nydus-snapshotter/nydusd/<chainID>/{image.boot,mnt/}` | Linked bootstrap, FUSE mountpoint | snapshotter, nydusd |
 | `/var/lib/nydus-snapshotter/cache/` | Shared blob cache | nydusd |
 | `/var/log/nydus-snapshotter/nydusd/<chainID>/` | Daemon file logs, kept a day after a failed start; stderr goes to the journal | nydusd |
+| `/var/log/nydus-snapshotter/nydusd/preheat/` | File logs of every preheat process | nydus preheat |
 | `/opt/nydus-snapshotter/bin/<version>/nydus`, `/opt/nydus-snapshotter/bin/current` | Daemon binaries; a switch keeps the current and previous versions | Installer → systemd |
 | `/run/nydus-snapshotter/restart-pending` | Units due a restart, until they restart | Installer |
 
@@ -849,10 +933,12 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
     variable `NODE_NAME` names, the Pod's `spec.nodeName`,
     `d7y.io/nydus-snapshotter=true` for Pods and RuntimeClasses to select, see
     [Node label](#node-label). A post-delete hook Job then runs
-    `nydus-snapshotter unlabel`, which removes the label from every node, with
-    a ServiceAccount of its own.
-  - Has no `preStop` uninstall: deleting the Pod must never remove the
-    snapshotter. Uninstalling is an explicit operation.
+    `nydus-snapshotter uninstall`, which removes the label from every node,
+    with a ServiceAccount of its own.
+  - Has no `preStop` hook that removes the snapshotter from the host:
+    deleting the Pod must never do that, and `nydus-snapshotter uninstall`
+    does not either, it only removes what the installers left in the
+    cluster. Removing the snapshotter from a host is an explicit operation.
   - A dedicated ServiceAccount; with kube_secret enabled, a ClusterRole with
     `list` and `watch` on `secrets` (no `get`); with the node label, `get`
     and `patch` on `nodes`, and `list` and `patch` on `nodes` for the
@@ -953,13 +1039,13 @@ nodeSelector:
   takes the label over.
 - **`helm uninstall` removes it with a hook**: the installers keep the label
   when they stop, and helm deletes their ClusterRole before that anyway. The
-  chart therefore runs `nydus-snapshotter unlabel` in a post-delete hook Job,
+  chart therefore runs `nydus-snapshotter uninstall` in a post-delete hook Job,
   as node-feature-discovery prunes its labels, which removes the label from
   every node that carries it:
 
   ```text
   installer stops ─▶ label kept, the next installer Pod takes it over
-  helm uninstall ──▶ post-delete hook ─▶ nydus-snapshotter unlabel ─▶ label removed
+  helm uninstall ──▶ post-delete hook ─▶ nydus-snapshotter uninstall ─▶ label removed
   ```
 
   It lists the labeled nodes in pages and patches them at kubelet's default
@@ -971,7 +1057,7 @@ nodeSelector:
   no hook runs then; the same holds for a node the DaemonSet no longer
   covers, and for a DaemonSet deleted without helm. Remove the label with
   `kubectl label nodes --all d7y.io/nydus-snapshotter-`, or by running
-  `nydus-snapshotter unlabel`.
+  `nydus-snapshotter uninstall`.
 
 ## Known risks and limitations
 
@@ -1036,6 +1122,11 @@ nodeSelector:
   `nydusd.config.backend.config.dragonfly` set, requests carry the
   `Authorization` header through the seed peers; use a trusted, TLS-protected
   Dragonfly cluster.
+- **A preheat needs a credential.** `PreheatImage` rejects a request without
+  one, so an image of a registry that takes no credential cannot be
+  preheated. A preheat cannot be cancelled over the API and waits without
+  a bound for a blob a daemon is prefetching; stopping its unit,
+  `nydus-preheat-<chainID>.service`, ends it as failed.
 - **Changing `root_dir` or `runtime_dir`** while daemons run loses track of
   them, as changing containerd's own root does; change them on a drained node.
 - **Toolchain support windows.** The module builds with Go 1.25 against
@@ -1048,11 +1139,12 @@ nodeSelector:
 nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-snapshotter, go 1.25
 ├── cmd/nydus-snapshotter/
 │   ├── main.go                     cmd.Execute()
-│   └── cmd/{root.go,install.go,unlabel.go}  serve; install (DaemonSet entrypoint); unlabel (post-delete hook)
+│   └── cmd/{root.go,install.go,uninstall.go}  serve; install (DaemonSet entrypoint); uninstall (post-delete hook)
 ├── internal/
 │   ├── config/                     config.go (Config, New, Load, Validate), constants.go, types.go, watch.go; testdata/
-│   ├── snapshot/                   snapshots.Snapshotter on core/snapshots/storage: snapshot.go, mount.go, label.go, blobs.go, release.go
-│   ├── fs/                         FileSystem (fs.go), daemon.go, limits.go, pusher.go, render.go, bootstrap.go, gather.go, Driver and fuse
+│   ├── snapshot/                   snapshots.Snapshotter on core/snapshots/storage: snapshot.go, mount.go, label.go, blobs.go, image.go, release.go
+│   ├── fs/                         FileSystem (fs.go), daemon.go, limits.go, pusher.go, preheat.go, render.go, bootstrap.go, gather.go, Driver and fuse
+│   ├── preheat/                    NydusSnapshotter gRPC service (service.go), image resolver over containerd (resolver.go)
 │   ├── systemd/                    Manager (systemd.go), units and slices (unit.go) over systemd's D-Bus API (dbus.go)
 │   ├── nydusd/                     nydus daemon API client
 │   ├── store/                      bbolt instances and blobs
@@ -1104,6 +1196,8 @@ Metrics use the `nydus_snapshotter_` prefix, base units and `_total` counters
 | `nydus_snapshotter_daemon_unexpected_exits_total` | counter | |
 | `nydus_snapshotter_running_daemons` | gauge | |
 | `nydus_snapshotter_unresponsive_daemons` | gauge | |
+| `nydus_snapshotter_preheats_total` | counter | `result`: `success`, `failure` |
+| `nydus_snapshotter_running_preheats` | gauge | |
 | `nydus_snapshotter_auth_updates_total` | counter | `result`: `success`, `failure`, `unsupported` |
 | `nydus_snapshotter_cache_evicted_bytes_total` | counter | `reason`: `orphan`, `ttl`, `watermark` |
 
@@ -1165,7 +1259,10 @@ keeps the first definition read, so one daemon never costs the scrape.
   node image booted as a systemd host, where it installs and starts the
   shipped units, changes nothing on a rerun, survives a reboot, switches the
   nydus version and restarts the service on an upgrade, and keeps the
-  kubeconfig and the service account token in sync. A failed case dumps the daemons'
+  kubeconfig and the service account token in sync. A preheat runs against a
+  private registry the snapshotter has no credential for: a wrong password
+  fails without echoing it, the right one downloads every blob, and the
+  container then starts and reads its files with no request to the registry. A failed case dumps the daemons'
   logs and journal. Do not assert an immediate daemon stop after container
   removal, because backend `Remove` waits for containerd GC.
 
@@ -1200,6 +1297,20 @@ keeps the first definition read, so one daemon never costs the scrape.
   ConfigMap through `--config-dir`), node-feature-discovery, kube-proxy and
   Dragonfly's dfinit (a ConfigMap mounted at the binary's `--config` path),
   node-problem-detector (`NODE_NAME` from the Downward API).
+- Preheat: CRI `PullImage` and dfdaemon (one node-level socket, the
+  request names the image); Dragonfly's Scheduler `PreheatImage` and
+  `StatImage` (the two calls, both by image and without an ID, the first
+  answering `Empty` once the work is queued); containerd `client/image.go`
+  `IsUnpacked` (reference to chain ID) and `images.Dispatch` (the first
+  failure cancels the rest); kubelet `serializeImagePulls` and containerd
+  `max_concurrent_downloads` (the limit and its name); client-go
+  `BearerToken`, Prometheus `BasicAuth` and Envoy `CallCredentials` (the
+  credential `oneof`); containerd's `Descriptor` and content `Info`
+  (`digest`, `size`) and Dragonfly's `Layer` (`is_finished`) for the blob
+  list; runc `state.json` under `/run` and the Kubernetes
+  termination message (exit code plus a file); AIP-216 (state names) and
+  AIP-151 (records expire); Kubernetes mount-utils (`systemd-run --scope`
+  for work that outlives the daemon).
 - gRPC health checking protocol (`grpc.health.v1`) with grpc-go's `health`
   server, as containerd `plugins/services/healthcheck` and BuildKit
   `cmd/buildkitd` register it.

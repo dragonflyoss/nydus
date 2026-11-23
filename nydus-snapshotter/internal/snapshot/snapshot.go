@@ -59,6 +59,11 @@ type Snapshotter interface {
 	// CommittedBlobs returns the IDs of the blobs referenced by committed
 	// bootstrap layers.
 	CommittedBlobs(ctx context.Context) (map[string]struct{}, error)
+
+	// NydusImage returns the nydus image whose committed bootstrap layer has
+	// one of chainIDs, the chain IDs of an image's layers. The caller sets
+	// its reference.
+	NydusImage(ctx context.Context, chainIDs []string) (*nydusfs.Image, error)
 }
 
 // snapshotter is the nydus Snapshotter.

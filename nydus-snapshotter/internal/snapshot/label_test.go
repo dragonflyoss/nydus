@@ -12,6 +12,8 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
+
+	nydusfs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
 )
 
 func TestSnapshotKey_isUnpack(t *testing.T) {
@@ -57,6 +59,46 @@ func TestSnapshotKey_isUnpack(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.expect(t, tc.key.isUnpack())
+		})
+	}
+}
+
+func TestLabels_validateFSVersion(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels labels
+		expect func(t *testing.T, err error)
+	}{
+		{
+			name:   "format this snapshotter serves",
+			labels: labels{labelNydusFSVersion: nydusfs.Version},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+			},
+		},
+		{
+			name:   "another format",
+			labels: labels{labelNydusFSVersion: "6"},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrNotImplemented)
+				assert.ErrorContains(err, `"6"`)
+			},
+		},
+		{
+			name:   "no format",
+			labels: labels{},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, errdefs.ErrNotImplemented)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.expect(t, tc.labels.validateFSVersion())
 		})
 	}
 }

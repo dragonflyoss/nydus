@@ -116,6 +116,15 @@ gc:
     disk_high_threshold_percent: 80
     disk_low_threshold_percent: 60
 
+# A preheat downloads every blob of an image containerd has pulled, started
+# over the gRPC socket by PreheatImage.
+preheat:
+  # Images preheated at once, the rest wait. Each one downloads
+  # nydusd.config.prefetch.concurrent_blob_count blobs at once.
+  max_concurrent_images: 1
+  # Socket of containerd, asked for the layers of the image a preheat names.
+  containerd_addr: /run/containerd/containerd.sock
+
 # Read only by the installer, nydus-snapshotter install, once when it starts;
 # the snapshotter ignores it.
 installer:

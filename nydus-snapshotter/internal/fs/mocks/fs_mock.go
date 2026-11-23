@@ -73,6 +73,20 @@ func (mr *MockFileSystemMockRecorder) Mount(ctx, image any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Mount", reflect.TypeOf((*MockFileSystem)(nil).Mount), ctx, image)
 }
 
+// Preheat mocks base method.
+func (m *MockFileSystem) Preheat(ctx context.Context, image *fs.Image, credential *fs.PreheatCredential) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Preheat", ctx, image, credential)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Preheat indicates an expected call of Preheat.
+func (mr *MockFileSystemMockRecorder) Preheat(ctx, image, credential any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Preheat", reflect.TypeOf((*MockFileSystem)(nil).Preheat), ctx, image, credential)
+}
+
 // Release mocks base method.
 func (m *MockFileSystem) Release(ctx context.Context, used fs.UsedFunc) error {
 	m.ctrl.T.Helper()
@@ -126,4 +140,19 @@ func (m *MockFileSystem) RunningBlobs(ctx context.Context) (map[string]struct{},
 func (mr *MockFileSystemMockRecorder) RunningBlobs(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RunningBlobs", reflect.TypeOf((*MockFileSystem)(nil).RunningBlobs), ctx)
+}
+
+// StatPreheat mocks base method.
+func (m *MockFileSystem) StatPreheat(chainID string) (*fs.Preheat, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StatPreheat", chainID)
+	ret0, _ := ret[0].(*fs.Preheat)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// StatPreheat indicates an expected call of StatPreheat.
+func (mr *MockFileSystemMockRecorder) StatPreheat(chainID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StatPreheat", reflect.TypeOf((*MockFileSystem)(nil).StatPreheat), chainID)
 }

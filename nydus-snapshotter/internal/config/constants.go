@@ -199,6 +199,15 @@ const (
 )
 
 const (
+	// DefaultPreheatMaxConcurrentImages is the number of images preheated at
+	// once by default, as kubelet pulls images one at a time by default.
+	DefaultPreheatMaxConcurrentImages = 1
+
+	// DefaultPreheatContainerdAddr is containerd's own default socket.
+	DefaultPreheatContainerdAddr = defaults.DefaultAddress
+)
+
+const (
 	// DefaultInstallerRootfsDir is where the DaemonSet mounts the root
 	// filesystem of the host.
 	DefaultInstallerRootfsDir = "/host"
