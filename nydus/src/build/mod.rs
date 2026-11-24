@@ -313,8 +313,7 @@ impl BuildImageOptions {
                 base_blkaddr: Z_LAYER_BASE_BLKADDR,
                 fragment_threshold: EROFS_FRAGMENT_THRESHOLD,
                 data_alignment: self.z_data_alignment,
-                // Files strictly larger than the alignment are aligned.
-                data_alignment_threshold: u64::from(self.z_data_alignment).saturating_add(1),
+                data_alignment_threshold: u64::from(self.z_data_alignment),
             },
         )
     }
@@ -326,7 +325,7 @@ impl BuildImageOptions {
         let layout = if self.native == Some(NativeLayout::Plain) {
             BlobLayout::RawDevice {
                 data_alignment: self.z_data_alignment,
-                data_alignment_threshold: u64::from(self.z_data_alignment).saturating_add(1),
+                data_alignment_threshold: u64::from(self.z_data_alignment),
             }
         } else {
             // One knob: a chunk of at least the minimum size stands alone,

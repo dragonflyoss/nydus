@@ -2269,10 +2269,11 @@ Inside the layer data:
 	small files thus share pclusters and one read serves many of them — this is
 	what cuts the request count for `node_modules`-style trees.
 - Empty files are `COMPRESSED_FULL` inodes with no lclusters.
-- With `--erofs-data-alignment N`, a file of at least `N` bytes starts on an
-	`N`-byte boundary **of the layer data** (zero-filled gap, no pcluster
-	references it). Identical large files then occupy identical blocks
-	regardless of their neighbours, so a volume that deduplicates or snapshots
+- With `--erofs-data-alignment N`, a file of at least `N` bytes that is not a
+	fragment starts on an `N`-byte boundary **of the layer data** (zero-filled
+	gap, no pcluster references it). Identical large files then occupy
+	identical blocks regardless of their neighbours, so a volume that
+	deduplicates or snapshots
 	at a fixed granularity (2MiB on common cloud disks) sees stable blocks.
 	Because the alignment is relative to the data file, not to the image
 	address space, `merge` may map the device anywhere. Put the store on a
