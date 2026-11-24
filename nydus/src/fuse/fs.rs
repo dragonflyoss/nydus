@@ -717,7 +717,9 @@ impl Filesystem for ErofsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fuse::test_kernel::*;
     use nydus_core::build::bootstrap::render_bootstrap;
+    use nydus_core::build::inode::InodeData;
     use nydus_core::build::inode::{build_tree, resolve_chunk_addrs};
     use nydus_format::erofs::{
         XattrEntry, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_INODE_FLAT_INLINE,
@@ -726,6 +728,8 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::fs;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::net::UnixListener;
 
     #[test]
     fn erofs_times_before_the_epoch_are_signed() {
@@ -849,6 +853,162 @@ mod tests {
             assert_eq!(filesystem.no_open.load(Ordering::Relaxed), no_open);
             assert_eq!(filesystem.no_opendir.load(Ordering::Relaxed), no_opendir);
         }
+    }
+
+    /// A kernel that negotiates neither FUSE_NO_OPEN_SUPPORT,
+    /// FUSE_NO_OPENDIR_SUPPORT nor readdirplus gets handles from open and
+    /// opendir and lists directories with plain READDIR, which current
+    /// kernels never send.
+    #[test]
+    fn a_kernel_without_the_opt_outs_opens_handles_and_reads_plain_dirents() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        fs::create_dir_all(source.join("dir")).unwrap();
+        fs::write(source.join("file"), b"data").unwrap();
+        std::os::unix::fs::symlink("file", source.join("link")).unwrap();
+        let _socket = UnixListener::bind(source.join("sock")).unwrap();
+        // Device nodes need privileges to create: two of the fifos are
+        // turned into them once the tree is built.
+        for name in ["fifo", "chr", "blk"] {
+            let path =
+                std::ffi::CString::new(source.join(name).into_os_string().into_vec()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        }
+        let mut writer = crate::build::plain_blob_writer(
+            fs::File::create(directory.path().join("data")).unwrap(),
+            EROFS_BLOCK_SIZE,
+        );
+        let mut inodes =
+            build_tree(&source, &mut writer, EROFS_BLOCK_SIZE, &HashSet::new()).unwrap();
+        writer.finish().unwrap();
+        resolve_chunk_addrs(&mut inodes, &writer).unwrap();
+        let mut devices = Vec::new();
+        if let InodeData::Directory { children, .. } = &mut inodes[0].data {
+            for child in children {
+                let (file_type, mode) = match child.name.as_slice() {
+                    b"chr" => (EROFS_FT_CHRDEV, libc::S_IFCHR),
+                    b"blk" => (EROFS_FT_BLKDEV, libc::S_IFBLK),
+                    _ => continue,
+                };
+                child.file_type = file_type;
+                devices.push((child.inode_index, mode));
+            }
+        }
+        assert_eq!(devices.len(), 2);
+        for (index, mode) in devices {
+            inodes[index].mode = (mode | 0o600) as u16;
+            inodes[index].data = InodeData::Device { rdev: 0x103 };
+        }
+        let bootstrap = directory.path().join("bootstrap");
+        fs::write(
+            &bootstrap,
+            render_bootstrap(&mut inodes, 0, &[], &[0; 16]).unwrap(),
+        )
+        .unwrap();
+        let filesystem = ErofsFs::new(Arc::new(
+            ErofsReader::open_metadata_only(&bootstrap).unwrap(),
+        ))
+        .unwrap();
+
+        let (_session, mut kernel) = Kernel::serve(filesystem);
+
+        let types = [
+            ("file", libc::S_IFREG),
+            ("dir", libc::S_IFDIR),
+            ("link", libc::S_IFLNK),
+            ("fifo", libc::S_IFIFO),
+            ("sock", libc::S_IFSOCK),
+            ("chr", libc::S_IFCHR),
+            ("blk", libc::S_IFBLK),
+        ];
+        let mut nodes = std::collections::HashMap::new();
+        for (name, kind) in types {
+            let (nodeid, mode) = kernel.lookup(name);
+            assert_eq!(mode & libc::S_IFMT, kind, "{name}");
+            nodes.insert(name, nodeid);
+        }
+        let (file, dir, link) = (nodes["file"], nodes["dir"], nodes["link"]);
+
+        // opendir hands out a stateless handle the kernel may cache behind.
+        let (error, opened) = kernel.open(Opcode::Opendir, FUSE_ROOT_ID, libc::O_DIRECTORY);
+        assert_eq!(error, 0);
+        assert_eq!(opened.u64_at(0), 0);
+        let open_flags = opened.u32_at(8);
+        assert_eq!(
+            open_flags,
+            (FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR).bits()
+        );
+        assert_eq!(
+            kernel.open(Opcode::Opendir, file, libc::O_DIRECTORY).0,
+            -libc::ENOTDIR
+        );
+        assert_ne!(kernel.open(Opcode::Opendir, u64::MAX / 2, 0).0, 0);
+
+        // READDIR names every entry with the d_type and inode number of its
+        // inode, however small the buffer, resuming from the last cookie.
+        for size in [4096, 96] {
+            let (mut offset, mut listed) = (0, Vec::new());
+            loop {
+                let entries = kernel.readdir(FUSE_ROOT_ID, offset, size);
+                let Some(last) = entries.last() else {
+                    break;
+                };
+                offset = last.3;
+                listed.extend(entries);
+            }
+            let mut names: Vec<_> = listed.iter().map(|entry| entry.0.as_str()).collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                [".", "..", "blk", "chr", "dir", "fifo", "file", "link", "sock"],
+                "size={size}"
+            );
+            for (name, kind, ino, _) in &listed {
+                let want = match name.as_str() {
+                    "." | ".." => (libc::S_IFDIR, FUSE_ROOT_ID),
+                    name => (
+                        types.iter().find(|(known, _)| *known == name).unwrap().1,
+                        nodes[name],
+                    ),
+                };
+                assert_eq!((*kind << 12, *ino), want, "{name}");
+            }
+        }
+        assert_ne!(kernel.request(Opcode::Readdir, u64::MAX / 2, &[0; 40]).0, 0);
+
+        // open hands out a handle for a regular file opened for reading,
+        // and release and access have nothing to do.
+        let (error, opened) = kernel.open(Opcode::Open, file, libc::O_RDONLY);
+        assert_eq!(error, 0);
+        let handle = opened.u64_at(0);
+        assert_eq!(opened.u32_at(8), FopenFlags::FOPEN_KEEP_CACHE.bits());
+        let mut release = vec![0u8; 24];
+        release[..8].copy_from_slice(&handle.to_le_bytes());
+        assert_eq!(
+            kernel.request(Opcode::Release, file, &release),
+            (0, Vec::new())
+        );
+        let access = [libc::R_OK.to_le_bytes(), [0; 4]].concat();
+        assert_eq!(
+            kernel.request(Opcode::Access, file, &access),
+            (0, Vec::new())
+        );
+        for flags in [libc::O_WRONLY, libc::O_RDWR] {
+            assert_eq!(kernel.open(Opcode::Open, file, flags).0, -libc::EROFS);
+        }
+        assert_eq!(
+            kernel.open(Opcode::Open, dir, libc::O_RDONLY).0,
+            -libc::EISDIR
+        );
+        assert_ne!(kernel.open(Opcode::Open, u64::MAX / 2, libc::O_RDONLY).0, 0);
+
+        // A node id that names no inode fails instead of being served.
+        assert_eq!(
+            kernel.request(Opcode::Readlink, link, &[]),
+            (0, b"file".to_vec())
+        );
+        assert_ne!(kernel.request(Opcode::Readlink, u64::MAX / 2, &[]).0, 0);
+        assert_ne!(kernel.request(Opcode::Getattr, u64::MAX / 2, &[0; 16]).0, 0);
     }
 
     #[test]

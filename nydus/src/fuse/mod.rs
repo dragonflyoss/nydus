@@ -5,6 +5,8 @@
 pub mod fs;
 mod mount;
 pub mod service;
+#[cfg(test)]
+pub(crate) mod test_kernel;
 pub mod upgrade;
 
 pub use fs::ErofsFs;

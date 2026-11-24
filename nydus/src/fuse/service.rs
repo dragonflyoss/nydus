@@ -253,6 +253,18 @@ mod tests {
     }
 
     #[test]
+    fn mount_rejects_a_relative_mountpoint_before_mounting() {
+        let err = FuseService::mount(
+            crate::fuse::upgrade::test_support::empty_filesystem(),
+            Path::new("relative/mountpoint"),
+            &fuser::Config::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(err, Error::InvalidParameter(_)), "{err}");
+    }
+
+    #[test]
     fn stop_unpublished_stops_fresh_and_adopted_sessions_without_a_real_mount() {
         for origin in [SessionOrigin::Fresh, SessionOrigin::Adopted] {
             let (service, _kernel) = stub_service(origin);

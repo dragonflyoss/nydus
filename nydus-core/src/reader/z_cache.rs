@@ -87,6 +87,12 @@ mod tests {
         assert_eq!(cache.state.lock().unwrap().bytes, MAX_BYTES);
         cache.insert(key(12288, MAX_BYTES + 1), &vec![0; MAX_BYTES + 1]);
         assert_eq!(cache.state.lock().unwrap().bytes, MAX_BYTES);
+        // A pcluster of exactly the budget is still cached, alone.
+        let whole = key(16384, MAX_BYTES);
+        cache.insert(whole, &vec![7; MAX_BYTES]);
+        assert_eq!(cache.get(whole).unwrap().len(), MAX_BYTES);
+        assert!(cache.get(first).is_none());
+        assert_eq!(cache.state.lock().unwrap().bytes, MAX_BYTES);
     }
 
     #[test]
