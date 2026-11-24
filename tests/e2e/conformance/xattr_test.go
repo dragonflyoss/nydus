@@ -81,7 +81,11 @@ func testXattr(t *testing.T, m *mounted) {
 
 	t.Run("PrivilegedNamespaces", func(t *testing.T) {
 		t.Parallel()
-		if !assert.Equal(t, []byte("trusted_value"), fstest.Xattr(t, m.Path("xattrs/trusted_attr"), "trusted.test")) {
+		if m.Image.Layout.Tar {
+			// The builder drops trusted.* from a layer tarball, as
+			// containerd's Apply does.
+			assert.NotContains(t, fstest.ListXattr(t, m.Path("xattrs/trusted_attr")), "trusted.test")
+		} else if !assert.Equal(t, []byte("trusted_value"), fstest.Xattr(t, m.Path("xattrs/trusted_attr"), "trusted.test")) {
 			t.FailNow()
 		}
 

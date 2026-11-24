@@ -20,7 +20,7 @@ and run through `sudo -E`.
 
 | Package                     | What it proves                                                                                                                          |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `conformance/`              | Filesystem conformance, run against every adapter: `TestFUSE`, `TestFileio`, `TestNBD`, `TestUblk`, `TestFanotify`.              |
+| `conformance/`              | Filesystem conformance, run against every adapter: `TestFUSE`, `TestKernel`, `TestFileio`, `TestNBD`, `TestUblk`, `TestFanotify`. |
 | `api/`                      | Per-daemon metrics/trace isolation, HTTP method/path errors, disconnected clients, shutdown and stale Unix socket replacement.         |
 | `continuity/`               | FUSE hot upgrade with open handles, pre-ready rollback, live-owner exclusion, no-API operation and exact FD transfer.                  |
 | `build/`                    | `nydus build/merge/check/optimize` across every GA layout: output contract, fsck.erofs, reproducibility.                                |
@@ -121,6 +121,7 @@ requests by itself; nothing is called from `ci.yml`.
 | `E2E Test / Build` | Shared GA binaries and coverage tools |
 | `E2E Test / e2e (image-tools)` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
 | `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE conformance run; Fileio semantics and two data-layout groups |
+| `E2E Test / e2e (kernel)` | The conformance cases on native layouts mounted by the kernel EROFS driver alone |
 | `E2E Test / e2e (storage-*)`, `e2e (soak)` | Isolated fault recovery, cache smoke and the two-minute stability soak |
 | `E2E Test With Dragonfly / Test` | Real Dragonfly services, seed-cache reads, origin fallback and `nydusify --dragonfly-scheduler` in one cluster |
 | `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
@@ -253,6 +254,11 @@ test package, as `net/conn_test.go` runs the same checks over every network:
 one `TestXxx` per adapter runs the same cases, so the experimental transports
 keep only their adapters and transport-specific tests;
 `experimental/transport` holds the checks the nbd and fanotify suites share.
+The Semantic cases run on every compressor of the chunked and of the native
+layouts, and on one of each kind built from its layer tarball, so a tarball
+conversion is held to the cases a directory build is. `TestKernel` mounts the
+native layouts over loop devices with no daemon: it runs the same cases but
+those that need a daemon or a layout the kernel cannot decode.
 
 Test kinds follow Go's conventions rather than directories: fuzz targets
 (`FuzzXxx`) sit beside the tests of what they fuzz (`build/fuzz_test.go`,

@@ -13,7 +13,9 @@ func testTree(t *testing.T, m *mounted) {
 		fstest.VerifyMount(t, m.Root, m.Image.Want, m.Image.Compare())
 	})
 
-	if m.Image.Source == "" || m.Image.Merged || m.Image.Corpus != fixture.Stress {
+	// A layer tarball does not carry the whole source directory; Manifest
+	// judges such an image against its tar view.
+	if m.Image.Source == "" || m.Image.Merged || m.Image.Layout.Tar || m.Image.Corpus != fixture.Stress {
 		return
 	}
 

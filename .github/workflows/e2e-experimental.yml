@@ -107,7 +107,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y "${packages[@]}"
           sudo modprobe fuse
-          if [ "${{ matrix.transport }}" = nbd ]; then sudo modprobe nbd; fi
           if [ "${{ matrix.transport }}" = ublk ]; then sudo modprobe ublk_drv; fi
 
       - name: Run E2E test

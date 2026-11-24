@@ -158,6 +158,11 @@ func metadata(t *testing.T, m *mounted) {
 		if !assert.GreaterOrEqual(t, big.Blocks*512, big.Size/2) {
 			t.FailNow()
 		}
+		// Compression only shrinks a file: it never occupies more than
+		// its size rounded up to a block.
+		if !assert.LessOrEqual(t, big.Blocks*512, (big.Size+4095)/4096*4096) {
+			t.FailNow()
+		}
 
 		assert.Positive(t, big.Blksize)
 	})

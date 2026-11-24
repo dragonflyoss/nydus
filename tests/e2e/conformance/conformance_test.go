@@ -49,6 +49,15 @@ type testCase struct {
 	applies func(m *mounted) bool
 }
 
+// semanticLayouts are the layouts the Semantic cases run against: every
+// compressor of chunked nydus data and of native layers, which the readers
+// decode differently, and one of each kind built from its layer tarball.
+var semanticLayouts = []string{
+	semanticLayout, "lz4-64k", "none-4k",
+	"erofs-none", "erofs-lz4", "erofs-zstd",
+	"tar-zstd", "tar-erofs-lz4",
+}
+
 var semanticCases = []testCase{
 	{name: "Tree", test: testTree},
 	{name: "ReadPaths", test: testReadPaths},
@@ -89,19 +98,33 @@ func semanticImage(t *testing.T) fixture.Image {
 func testAdapter(t *testing.T, a mount.Adapter) {
 	a.Require(t)
 
-	t.Run("Semantic", func(t *testing.T) {
-		t.Parallel()
-		runCases(t, semanticCases, &mounted{Mounted: mount.Mount(t, a, semanticImage(t), mount.Options{Mode: mount.Cold}), adapter: a})
-	})
+	for _, name := range semanticLayouts {
+		layout := fixture.MustLayout(t, name)
+		if !mount.Serves(a, layout) {
+			continue
+		}
 
-	for _, c := range ownCases {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run("Semantic/"+name, func(t *testing.T) {
 			t.Parallel()
-			c.test(t, a)
+			img := fixture.Build(t, fixture.Stress, layout)
+			runCases(t, semanticCases, &mounted{Mounted: mount.Mount(t, a, img, mount.Options{Mode: mount.Cold}), adapter: a})
 		})
 	}
 
+	if !mount.TraitsOf(a).Daemonless {
+		for _, c := range ownCases {
+			t.Run(c.name, func(t *testing.T) {
+				t.Parallel()
+				c.test(t, a)
+			})
+		}
+	}
+
 	for _, name := range fixture.Matrix {
+		if !mount.Serves(a, fixture.LayoutOf(t, name)) {
+			continue
+		}
+
 		for _, mode := range mount.Modes {
 			if !a.Supports(mode) || (mode == mount.Blob && strings.HasPrefix(name, fixture.MergedPrefix)) {
 				continue
@@ -193,6 +216,11 @@ func (m *mounted) wantBytes(t *testing.T, rel string) []byte {
 func TestFUSE(t *testing.T) {
 	t.Parallel()
 	testAdapter(t, mount.FUSE{})
+}
+
+func TestKernel(t *testing.T) {
+	t.Parallel()
+	testAdapter(t, mount.Kernel{})
 }
 
 func TestFileio(t *testing.T) {
