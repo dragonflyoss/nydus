@@ -206,7 +206,7 @@ func (i *Installer) configFiles() ([]file, error) {
 // from certs.d stay on the host, so hosts.toml baked into the node image
 // survive.
 func (i *Installer) certsFiles() ([]file, error) {
-	certsDir := i.cfg.Installer.CertsDir
+	certsDir := i.cfg.Installer.RegistryConfigPath
 	if _, err := os.Stat(certsDir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}

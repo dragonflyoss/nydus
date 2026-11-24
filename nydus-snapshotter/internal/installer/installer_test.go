@@ -737,11 +737,11 @@ func newConfig(t *testing.T) *config.Config {
 	cfg := config.New()
 	payloadDir := t.TempDir()
 	cfg.Installer = config.InstallerConfig{
-		RootfsDir:    t.TempDir(),
-		PayloadDir:   payloadDir,
-		TokenDir:     t.TempDir(),
-		CertsDir:     filepath.Join(payloadDir, "config/certs.d"),
-		SyncInterval: config.DefaultInstallerSyncInterval,
+		RootfsDir:          t.TempDir(),
+		PayloadDir:         payloadDir,
+		TokenDir:           t.TempDir(),
+		RegistryConfigPath: filepath.Join(payloadDir, "config/certs.d"),
+		SyncInterval:       config.DefaultInstallerSyncInterval,
 	}
 
 	writeFiles(t, cfg.Installer.PayloadDir, map[string]string{

@@ -368,9 +368,10 @@ type InstallerConfig struct {
 	// TokenDir is the Pod's service account token directory.
 	TokenDir string `yaml:"token_dir"`
 
-	// CertsDir is the certs.d directory to install, where the Pod mounts
-	// the ConfigMap's; nothing is installed from a missing one.
-	CertsDir string `yaml:"certs_dir"`
+	// RegistryConfigPath is the certs.d directory to install, where the Pod
+	// mounts the ConfigMap's, named after registry.config_path, which reads
+	// it on the host; nothing is installed from a missing one.
+	RegistryConfigPath string `yaml:"registry_config_path"`
 
 	// SyncInterval is how often the token and the config are copied to the
 	// host and the node label is checked.
@@ -477,11 +478,11 @@ func New() *Config {
 			ContainerdAddr:      DefaultPreheatContainerdAddr,
 		},
 		Installer: InstallerConfig{
-			RootfsDir:    DefaultInstallerRootfsDir,
-			PayloadDir:   DefaultInstallerPayloadDir,
-			TokenDir:     DefaultInstallerTokenDir,
-			CertsDir:     DefaultInstallerCertsDir,
-			SyncInterval: DefaultInstallerSyncInterval,
+			RootfsDir:          DefaultInstallerRootfsDir,
+			PayloadDir:         DefaultInstallerPayloadDir,
+			TokenDir:           DefaultInstallerTokenDir,
+			RegistryConfigPath: DefaultInstallerRegistryConfigPath,
+			SyncInterval:       DefaultInstallerSyncInterval,
 			NodeLabel: InstallerNodeLabelConfig{
 				ContainerdAddr: DefaultInstallerContainerdAddr,
 			},
@@ -548,7 +549,7 @@ func (c *Config) Validate() error {
 		{name: "installer.rootfs_dir", path: c.Installer.RootfsDir},
 		{name: "installer.payload_dir", path: c.Installer.PayloadDir},
 		{name: "installer.token_dir", path: c.Installer.TokenDir},
-		{name: "installer.certs_dir", path: c.Installer.CertsDir},
+		{name: "installer.registry_config_path", path: c.Installer.RegistryConfigPath},
 		{name: "installer.node_label.containerd_addr", path: c.Installer.NodeLabel.ContainerdAddr},
 	} {
 		if p.optional && p.path == "" {

@@ -765,7 +765,7 @@ installer:
   rootfs_dir: /host
   payload_dir: /opt/nydus-snapshotter/payload
   token_dir: /var/run/secrets/kubernetes.io/serviceaccount
-  certs_dir: /etc/nydus-snapshotter/certs.d
+  registry_config_path: /etc/nydus-snapshotter/certs.d
   # How often the token and the config are copied to the host and the node
   # label is checked.
   sync_interval: 1m
@@ -900,9 +900,10 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
     the DaemonSet mounts the ConfigMap, as the charts of
     node-feature-discovery and Dragonfly's dfinit mount a ConfigMap at their
     binary's default config path. The image carries the default config there.
-    The `certs.d` it installs is the directory `installer.certs_dir` names,
-    where the same mount puts the ConfigMap's, as Istio's CNI installer is
-    told its source and target directories and derives neither.
+    The `certs.d` it installs is the directory
+    `installer.registry_config_path` names, where the same mount puts the
+    ConfigMap's, as Istio's CNI installer is told its source and target
+    directories and derives neither.
     Its own settings are the `installer` section of that file. A file that
     cannot be loaded ends the installer with the error before it writes
     anything to the host, the service account token included.

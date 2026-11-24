@@ -134,7 +134,7 @@ installer:
   rootfs_dir: /host
   payload_dir: /opt/nydus-snapshotter/payload
   token_dir: /var/run/secrets/kubernetes.io/serviceaccount
-  certs_dir: /etc/nydus-snapshotter/certs.d
+  registry_config_path: /etc/nydus-snapshotter/certs.d
   # How often the token and the config are copied to the host and the node
   # label is checked.
   sync_interval: 1m

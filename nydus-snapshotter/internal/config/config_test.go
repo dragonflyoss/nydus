@@ -577,11 +577,11 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:   "installer certs dir that is relative",
-			mutate: func(cfg *Config) { cfg.Installer.CertsDir = "certs.d" },
+			name:   "installer registry config path that is relative",
+			mutate: func(cfg *Config) { cfg.Installer.RegistryConfigPath = "certs.d" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.EqualError(err, `installer.certs_dir must be an absolute path, got "certs.d"`)
+				assert.EqualError(err, `installer.registry_config_path must be an absolute path, got "certs.d"`)
 			},
 		},
 		{
