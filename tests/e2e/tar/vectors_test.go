@@ -77,6 +77,7 @@ func TestVectors(t *testing.T) {
 		{"WriterAddFS", goWriterAddFS(t), nil},
 		{"FileInfoHeader", goFileInfoHeader(t), nil},
 		{"RejectedHeaders", goRejectedHeaders(), nil},
+		{"StarHeaders", starHeaders(), nil},
 		{"ContainerdBreakouts", containerdBreakouts(t), nil},
 		{"ContainerdApply", containerdApplyCases(t), nil},
 		{"Matrix", matrix, nil},

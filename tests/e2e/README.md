@@ -258,7 +258,8 @@ The Semantic cases run on every compressor of the chunked and of the native
 layouts, and on one of each kind built from its layer tarball, so a tarball
 conversion is held to the cases a directory build is. `TestKernel` mounts the
 native layouts over loop devices with no daemon: it runs the same cases but
-those that need a daemon or a layout the kernel cannot decode.
+those that need a daemon or a layout the kernel cannot decode. The tar suite
+mounts each native layer it converts with the kernel as well as through FUSE.
 
 Test kinds follow Go's conventions rather than directories: fuzz targets
 (`FuzzXxx`) sit beside the tests of what they fuzz (`build/fuzz_test.go`,

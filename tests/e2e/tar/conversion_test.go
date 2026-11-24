@@ -35,6 +35,7 @@ var tarLayouts = map[string]tarLayout{
 	"lz4":        {compressor: "lz4"},
 	"zstd-64k":   {chunkSize: 64 << 10},
 	"erofs-none": {compressor: "erofs-none"},
+	"erofs-lz4":  {compressor: "erofs-lz4"},
 	"erofs-zstd": {compressor: "erofs-zstd"},
 }
 
@@ -96,6 +97,14 @@ func (l tarLayout) checkTarConversion(t *testing.T, data []byte) tarOutcome {
 	fstest.DiffTree(t, reference, mnt.Root)
 
 	mnt.Unmount()
+
+	// The kernel reads a native layer by itself, and must find the same tree.
+	if mount.KernelReads(t, img.Layout) {
+		kernel := filepath.Join(work, "kernel")
+		mount.EROFS(t, kernel, img.Bootstrap, img.Blobs)
+		fstest.DiffTree(t, reference, kernel)
+		mount.Unmount(kernel)
+	}
 
 	return tarConverted
 }

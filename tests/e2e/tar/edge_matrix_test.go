@@ -54,6 +54,21 @@ func tarEdgeMatrix() []tarVector {
 
 	vec := func(name string, entries ...tarEntry) tarVector { return tarVector{name, entries} }
 
+	// lstat(2) follows at most 40 symlinks in the leading components of a
+	// path. Resolving a/f looks l02/sub up once a and l01 are read, which
+	// follows l02 to l41: exactly 40, and the builder must not stop short.
+	symlinkChain := []tarEntry{dir("t/", 0o755), dir("t/sub/", 0o755)}
+	for i := 41; i >= 1; i-- {
+		target := "t"
+		if i < 41 {
+			target = fmt.Sprintf("l%02d", i+1)
+		}
+
+		symlinkChain = append(symlinkChain, symlink(fmt.Sprintf("l%02d", i), target))
+	}
+
+	symlinkChain = append(symlinkChain, symlink("a", "l01/sub"), reg("a/f", 3))
+
 	global := func(name string) tarEntry {
 		return tarEntry{hdr: tar.Header{Name: name, Typeflag: tar.TypeXGlobalHeader, PAXRecords: map[string]string{"comment": "g"}}}
 	}
@@ -96,6 +111,8 @@ func tarEdgeMatrix() []tarVector {
 		vec("xattr-newline-name", xattrs(reg("f", 1), "user.a\nb", "v")),
 		vec("xattr-empty-value", xattrs(reg("f", 1), "user.empty", "")),
 		vec("xattr-large-value", xattrs(reg("f", 1), "user.big", sr("x", 3000))),
+		vec("xattr-name-255", xattrs(reg("f", 1), "user."+sr("n", 250), "v")),
+		vec("xattr-name-256", xattrs(reg("f", 1), "user."+sr("n", 251), "v")),
 		vec("xattr-many", xattrs(reg("f", 1), manyXattrs...)),
 		vec("xattr-on-dir", xattrs(dir("d/", 0o755), "user.dir", "v")),
 		vec("xattr-trusted-on-symlink", xattrs(symlink("s", "t"), "trusted.link", "v")),
@@ -122,12 +139,15 @@ func tarEdgeMatrix() []tarVector {
 		vec("parent-symlink", dir("b/", 0o755), symlink("a", "b"), reg("a/f", 3)),
 		vec("parent-symlink-absolute", dir("b/", 0o755), symlink("a", "/b"), reg("a/f", 3)),
 		vec("parent-symlink-escaping", symlink("a", "../../.."), reg("a/f", 3)),
+		vec("parent-symlink-follows-40", symlinkChain...),
 		vec("parent-regular-file", reg("x", 1), reg("x/y", 1)),
 		vec("override-file", reg("f", 3), with(reg("f", 5), func(h *tar.Header) { h.Mode = 0o600 })),
 		vec("override-file-with-dir", reg("x", 3), dir("x/", 0o750), reg("x/y", 1)),
 		vec("override-dir-with-file", dir("x/", 0o755), reg("x/y", 1), reg("x", 3)),
 		vec("override-symlink-with-file", reg("t", 1), symlink("s", "t"), reg("s", 3)),
 		vec("override-dir-mode", dir("d/", 0o700), reg("d/f", 1), dir("d/", 0o751)),
+		vec("setgid-dir-group", with(dir("s/", 0o2755), func(h *tar.Header) { h.Gid = 7 }),
+			with(reg("s/f", 1), func(h *tar.Header) { h.Gid = -1 }), dir("s/d/", 0o755)),
 		vec("child-before-parent", reg("p/c", 1), dir("p/", 0o700)),
 		vec("root-member", xattrs(dir("./", 0o700), "user.root", "v"), reg("f", 1)),
 		vec("whiteouts", reg(".wh.gone", 0), dir("d/", 0o755), reg("d/.wh..wh..opq", 0)),

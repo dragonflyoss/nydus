@@ -248,7 +248,8 @@ func newBlob(t testing.TB, blobDir string, before map[string]bool, layout Layout
 // PackTar streams the tar at r through `nydus build --source-type tar` into
 // dir/layer.blob with the arguments nydusify passes, and returns the blob as
 // an image to mount in Blob mode; an empty compressor is zstd and a zero
-// chunk size 2 MiB.
+// chunk size 2 MiB. A native layer also gets its bootstrap, dir/layer.boot,
+// which the kernel mounts it through.
 func PackTar(t testing.TB, r io.Reader, dir, compressor string, chunkSize uint32) (Image, error) {
 	t.Helper()
 	if compressor == "" {
@@ -261,9 +262,17 @@ func PackTar(t testing.TB, r io.Reader, dir, compressor string, chunkSize uint32
 
 	blob := filepath.Join(dir, "layer.blob")
 
-	cmd := env.Command(t, env.Nydus(t), "build", "/dev/stdin", "--source-type", "tar", "--blob", blob,
-		"--chunk-size", strconv.FormatUint(uint64(chunkSize), 10), "--compressor", compressor, "--log-level", "warn")
+	args := []string{"build", "/dev/stdin", "--source-type", "tar", "--blob", blob,
+		"--chunk-size", strconv.FormatUint(uint64(chunkSize), 10), "--compressor", compressor, "--log-level", "warn"}
+	layout := Layout{Name: compressor, Native: strings.HasPrefix(compressor, "erofs-"), Args: []string{"--compressor", compressor}}
 
+	var bootstrap string
+	if layout.Native {
+		bootstrap = filepath.Join(dir, "layer.boot")
+		args = append(args, "--bootstrap", bootstrap)
+	}
+
+	cmd := env.Command(t, env.Nydus(t), args...)
 	cmd.Stdin = r
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -271,7 +280,7 @@ func PackTar(t testing.TB, r io.Reader, dir, compressor string, chunkSize uint32
 		return Image{}, fmt.Errorf("nydus build: %w: %s", err, stderr.Bytes())
 	}
 
-	return Image{Name: "tar-layer", BlobDir: dir, Blobs: []string{blob}}, nil
+	return Image{Name: "tar-layer", Layout: layout, Bootstrap: bootstrap, BlobDir: dir, Blobs: []string{blob}}, nil
 }
 
 func blobsIn(t testing.TB, dir string) []string {
