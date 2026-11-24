@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -145,4 +146,29 @@ func DropPageCache(t testing.TB, path string) {
 
 	defer func() { _ = f.Close() }()
 	assert.NoError(t, unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED))
+}
+
+// ReadMapped runs read, which reads memory mapped from a file of a mount, and
+// fails t when a page cannot be read. A filesystem that fails to supply a
+// mapped page raises SIGBUS, which otherwise ends the test binary and every
+// test still running in it.
+func ReadMapped(t testing.TB, read func()) {
+	t.Helper()
+
+	defer debug.SetPanicOnFault(debug.SetPanicOnFault(true))
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+
+		fault, ok := r.(interface{ Addr() uintptr })
+		if !ok {
+			panic(r)
+		}
+
+		t.Fatalf("the mount failed to supply the mapped page at %#x: %v", fault.Addr(), r)
+	}()
+
+	read()
 }
