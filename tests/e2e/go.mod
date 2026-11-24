@@ -1,6 +1,6 @@
 module github.com/dragonflyoss/nydus/tests/e2e
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/containerd/containerd/v2 v2.0.13
@@ -9,7 +9,7 @@ require (
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/sys v0.34.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
