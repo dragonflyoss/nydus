@@ -258,8 +258,9 @@ Test kinds follow Go's conventions rather than directories: fuzz targets
 (`FuzzXxx`) sit beside the tests of what they fuzz (`build/fuzz_test.go`,
 `tar/fuzz_test.go`), benchmarks (`BenchmarkXxx`) run only under `-bench`, and
 opt-in heavy tests carry `//go:build manual` in the package they test:
-`tar/huge_test.go` (`make e2e-hugetar`) and `nydusify/public_images_test.go`
-(`make e2e-convert`).
+`tar/huge_test.go` (`make e2e-hugetar`), `nydusify/public_images_test.go`
+(`make e2e-convert`) and `nydusify/huge_image_test.go` (`make e2e-hugeimage`,
+run by hand only).
 
 ## Conventions
 
@@ -319,6 +320,10 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
 | `NYDUS_E2E_CONVERT_CONCURRENCY` | Images converted at once (default 5). |
 | `NYDUS_E2E_CONVERT_RETRIES` | Retries of a transient registry failure (default 5). |
 | `NYDUS_E2E_CONVERT_RETRY_INTERVAL` | Base delay between retries (default 30s). |
+| `NYDUS_E2E_HUGE_IMAGE_GIB` | Size of the image `TestHugeImage` generates, in GiB (default 100). |
+| `NYDUS_E2E_HUGE_IMAGE_DENSITY` | Percentage of that image holding data rather than zeros (default 100). Checking against the source and reading a chunk-based mount each need that much scratch disk. |
+| `NYDUS_E2E_HUGE_IMAGE_COMPRESSORS` | Space-separated compressors to convert to (default `zstd erofs-lz4`). |
+| `NYDUS_E2E_HUGE_IMAGE_CHECK_SOURCE` | Run `nydusify check` against the source too, which extracts it (default true). |
 | `NYDUS_E2E_BENCH_WARM` | Add the warm fio and metadata metrics. |
 | `NYDUS_E2E_BENCH_FILEIO_NOWARM` | Add the `fileio-nowarm` mode. |
 | `NYDUS_E2E_BENCH_EROFSFUSE` | `erofsfuse` binary for the `erofsfuse` mode. |
