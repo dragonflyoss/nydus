@@ -521,6 +521,8 @@ fn merge_z_sources_to_bootstrap_writer(
     drop(layers);
     release_freed_heap();
 
+    // Same epoch rule as merge_sources_to_bootstrap_writer.
+    let epoch = choose_epoch(&inodes);
     let packed_index = if packed_size > 0 {
         let packed_blocks = u32::try_from(packed_blocks).map_err(|_| {
             Error::Overflow("merged packed inode block count exceeds u32".to_string())
@@ -530,14 +532,13 @@ fn merge_z_sources_to_bootstrap_writer(
             packed_tail,
             packed_blocks,
             packed_size,
+            epoch,
         ));
         Some(inodes.len() - 1)
     } else {
         None
     };
 
-    // See merge_sources_to_bootstrap_writer: the root mtime is always 0.
-    let epoch = 0;
     let uuid = [0u8; 16];
     fit_z_devices_past_bootstrap(&mut inodes, epoch, &mut device_slots)?;
     let bootstrap = render_z_device_bootstrap(
@@ -662,6 +663,7 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
                 reader.read_z_inode_tail(nid, &packed)?.to_vec(),
                 packed.i_u(),
                 packed.size(),
+                epoch,
             ));
             Some(inodes.len() - 1)
         } else {
@@ -1083,7 +1085,17 @@ mod tests {
 
     #[test]
     fn build_merge_and_optimize_choose_epoch_from_visible_compact_candidates() {
-        use crate::build::{build_image, BuildImageOptions};
+        use nydus_format::erofs::ZErofsCompressor;
+
+        for algorithm in [None, Some(ZErofsCompressor::Lz4)] {
+            assert_epoch_from_visible_compact_candidates(algorithm);
+        }
+    }
+
+    fn assert_epoch_from_visible_compact_candidates(
+        algorithm: Option<nydus_format::erofs::ZErofsCompressor>,
+    ) {
+        use crate::build::{build_image, BuildImageOptions, NativeLayout};
         use nydus_format::blob::BlobMetadataCompressor;
         use nydus_format::erofs::EROFS_INODE_COMPACT_SIZE;
         use std::collections::HashSet;
@@ -1119,6 +1131,16 @@ mod tests {
                 .map_or(0, |(seconds, _)| seconds);
             let reader = ErofsReader::open_metadata_only(path).unwrap();
             assert_eq!(reader.superblock().epoch(), epoch, "{}", path.display());
+            // The block count covers the bootstrap alone, as mkfs.erofs
+            // writes it: the kernel adds the device blocks itself.
+            if BlobFooter::from_blob_path(path).is_err() {
+                assert_eq!(
+                    reader.superblock().blocks() * EROFS_BLOCK_SIZE as u64,
+                    fs::metadata(path).unwrap().len(),
+                    "{}",
+                    path.display()
+                );
+            }
             let root_nid = reader.superblock().root_nid();
             let root = reader.inode(root_nid).unwrap();
             assert_eq!(root.mtime(epoch), 0);
@@ -1181,18 +1203,20 @@ mod tests {
                 layer_expected.insert("linked-alias", layer_expected["linked"]);
             }
             let blob = directory.path().join(format!("layer-{index}"));
-            let image = build_image(
-                &BuildImageOptions::new(
-                    source.to_path_buf(),
-                    EROFS_BLOCK_SIZE,
-                    BlobMetadataCompressor::None,
-                    HashSet::new(),
-                    true,
-                )
-                .unwrap(),
-                fs::File::create(&blob).unwrap(),
+            let mut options = BuildImageOptions::new(
+                source.to_path_buf(),
+                EROFS_BLOCK_SIZE,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                true,
             )
             .unwrap();
+            if let Some(algorithm) = algorithm {
+                options = options
+                    .with_native(NativeLayout::Compressed(algorithm), 0)
+                    .unwrap();
+            }
+            let image = build_image(&options, fs::File::create(&blob).unwrap()).unwrap();
             let standalone = directory.path().join(format!("standalone-{index}"));
             fs::write(&standalone, image.standalone_bootstrap.unwrap()).unwrap();
             verify(&blob, &layer_expected);

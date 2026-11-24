@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -12,20 +13,37 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// fsckVersion returns the major and minor version of the fsck.erofs on
-// PATH, probed once per process.
-var fsckVersion = sync.OnceValues(func() (major, minor int) {
+// fsckVersion returns the version of the fsck.erofs on PATH, probed once per
+// process: as printed, and as {major, minor, patch, snapshot} so that builds
+// compare in order. erofs-utils appends "-g<commit>" to the version of a
+// development snapshot past a release, which sets snapshot to 1.
+var fsckVersion = sync.OnceValues(func() (text string, version [4]int) {
 	out, _ := exec.Command("fsck.erofs", "-V").CombinedOutput()
-	if m := regexp.MustCompile(`(\d+)\.(\d+)`).FindStringSubmatch(string(out)); m != nil {
-		major, _ = strconv.Atoi(m[1])
-		minor, _ = strconv.Atoi(m[2])
+
+	m := regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?(-g[0-9a-f]+)?`).FindStringSubmatch(string(out))
+	if m == nil {
+		return "", version
 	}
 
-	return major, minor
+	for i := range 3 {
+		version[i], _ = strconv.Atoi(m[i+1])
+	}
+
+	if m[4] != "" {
+		version[3] = 1
+	}
+
+	return m[0], version
 })
 
 // FsckDecodes reports whether the installed fsck.erofs can decode images
-// compressed with compressor: in-EROFS LZ4 and zstd need erofs-utils 1.8.
+// compressed with compressor. In-EROFS LZ4 and zstd pclusters live on an
+// extra device and are addressed in the mapped block space; fsck.erofs
+// resolves such an address to its device only since erofs-utils c65a25f
+// ("add missing device_id derivation for flattened devices"), which follows
+// the 1.9.4 release: earlier versions read the bootstrap instead and report
+// corruption. Without such a fsck.erofs the check is left out locally, and
+// the test fails under CI.
 func FsckDecodes(t testing.TB, compressor string) bool {
 	t.Helper()
 	if compressor != "erofs-lz4" && compressor != "erofs-zstd" {
@@ -34,12 +52,12 @@ func FsckDecodes(t testing.TB, compressor string) bool {
 
 	env.LookPath(t, "fsck.erofs")
 
-	major, minor := fsckVersion()
-	if major > 1 || (major == 1 && minor >= 8) {
+	text, version := fsckVersion()
+	if slices.Compare(version[:], []int{1, 9, 4, 0}) > 0 {
 		return true
 	}
 
-	t.Logf("fsck.erofs %d.%d cannot decode %s images", major, minor, compressor)
+	env.Omitf(t, "fsck.erofs %s cannot decode %s images, erofs-utils newer than 1.9.4 is required", text, compressor)
 
 	return false
 }

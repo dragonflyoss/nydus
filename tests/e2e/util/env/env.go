@@ -23,6 +23,17 @@ func Skipf(t testing.TB, format string, args ...any) {
 	t.Skipf(format, args...)
 }
 
+// Omitf logs the formatted reason t leaves one of its checks out, or fails t
+// under CI.
+func Omitf(t testing.TB, format string, args ...any) {
+	t.Helper()
+	if CI() {
+		t.Fatalf(format, args...)
+	}
+
+	t.Logf(format, args...)
+}
+
 // MustHaveRoot skips t unless it runs as root.
 func MustHaveRoot(t testing.TB) {
 	t.Helper()
