@@ -543,8 +543,6 @@ func goParsePAXTime() []tarCase {
 		archives = append(archives, rawPAXArchive(paxRecords(map[string]string{"mtime": in}), "f", nil))
 	}
 
-	// Go parses atime and ctime as well, and rejects the header when either
-	// is malformed, although neither reaches the filesystem.
 	for _, key := range []string{"atime", "ctime"} {
 		for _, in := range []string{"1350244992.023960108", "-1.5", "foo", "1.-1", "-"} {
 			archives = append(archives, rawPAXArchive(paxRecords(map[string]string{key: in}), "f", nil))
@@ -866,9 +864,6 @@ func goFileInfoHeader(t *testing.T) []tarCase {
 	return []tarCase{{"LocalFiles", buf.Bytes()}}
 }
 
-// starHeaders are members in the star format, which Go's writer does not
-// emit: a ustar header ending in "tar\0", whose prefix field gives way to
-// atime and ctime after 131 bytes.
 func starHeaders() []tarCase {
 	star := func(prefix string) []byte {
 		out := rawTarHeader("f", tar.TypeReg, 3, false, func(blk []byte) {
@@ -902,7 +897,6 @@ func goRejectedHeaders() []tarCase {
 		return append(out, make([]byte, 2*512)...)
 	}
 
-	// A PAX header of exactly the limit is still read whole.
 	atLimit := paxRecord("GOLANG.x", string(long[:maxSpecialFileSize-len("1048576 GOLANG.x=\n")]))
 
 	return []tarCase{

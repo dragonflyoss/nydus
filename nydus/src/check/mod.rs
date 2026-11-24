@@ -47,38 +47,45 @@ pub struct CheckReport {
     pub lz4_max_pclusterblks: Option<u16>,
 }
 
+/// Implements the verdict of a check report.
 impl CheckReport {
-    /// Why a mount cannot read every file of the image, if anything: the
-    /// first of the defects the walk counted.
-    pub fn defect(&self) -> Option<String> {
+    /// Fails when a mount cannot read every file of the image.
+    pub fn validate(&self) -> Result<()> {
         let stats = &self.stats;
         if !stats.inline_overflows.is_empty() {
-            return Some(format!(
+            return Err(Error::InvalidImage(format!(
                 "{} inode(s) have inline data crossing a metadata block (the kernel cannot read them)",
                 stats.inline_overflows.len()
-            ));
+            )));
         }
         if stats.other_layout_files != 0 {
-            return Some(format!(
+            return Err(Error::InvalidImage(format!(
                 "{} file(s) use a data layout nydus cannot read, such as compact compressed indexes",
                 stats.other_layout_files
-            ));
+            )));
         }
         if stats.z_pclusters_out_of_range != 0 {
-            return Some(format!(
+            return Err(Error::InvalidImage(format!(
                 "{} compressed cluster(s) reference blocks outside the image devices",
                 stats.z_pclusters_out_of_range
-            ));
+            )));
         }
-        // The kernel sizes its decompression buffers by the limit and reads
-        // 0 as one block.
-        let limit = u64::from(self.lz4_max_pclusterblks?.max(1));
-        (stats.z_lz4_largest_pcluster_blocks > limit).then(|| {
-            format!(
+
+        // The kernel reads a limit of 0 as one block.
+        let Some(limit) = self
+            .lz4_max_pclusterblks
+            .map(|limit| u64::from(limit.max(1)))
+        else {
+            return Ok(());
+        };
+        if stats.z_lz4_largest_pcluster_blocks > limit {
+            return Err(Error::InvalidImage(format!(
                 "an LZ4 compressed cluster spans {} blocks, the superblock allows {limit}",
                 stats.z_lz4_largest_pcluster_blocks
-            )
-        })
+            )));
+        }
+
+        Ok(())
     }
 }
 
@@ -495,8 +502,7 @@ fn account_z_pclusters(
             continue;
         }
         if lz4 && lcluster.lcluster_type() == Z_EROFS_LCLUSTER_TYPE_HEAD1 {
-            // A pcluster of several blocks holds their count in the NONHEAD
-            // index behind its head.
+            // A pcluster of several blocks holds their count in the next index.
             let blocks = indexes
                 .get((i + 1) * Z_EROFS_LCLUSTER_INDEX_SIZE..)
                 .map(ZErofsLclusterIndex::from_bytes)
@@ -777,18 +783,14 @@ mod tests {
         assert!(check_inline_fit(2557, 32, 0, EROFS_BLOCK_SIZE as u64).is_none());
     }
 
-    /// A sound erofs-lz4 image has no defect; one whose pclusters outgrow
-    /// the superblock's LZ4 limit, or with a file in a layout the reader
-    /// does not decode, has one, as a mount of it fails or misbehaves.
     #[test]
-    fn check_names_the_defect_of_an_image_no_mount_reads_whole() {
+    fn validate_rejects_an_image_no_mount_reads_whole() {
         use crate::build::{build_image, BuildImageOptions, NativeLayout};
         use nydus_format::erofs::{ZErofsComprCfgs, EROFS_SB_BASE_SIZE, EROFS_SUPER_OFFSET};
 
         let dir = tempdir().unwrap();
         let source = dir.path().join("source");
         fs::create_dir(&source).unwrap();
-        // Half noise, half zeros: pclusters of several blocks.
         let content: Vec<u8> = (0..300_000u32)
             .map(|i| match i % 4096 {
                 0..2048 => (i.wrapping_mul(2_654_435_761) >> 13) as u8,
@@ -817,13 +819,11 @@ mod tests {
         };
 
         let sound = check(&bootstrap);
-        assert_eq!(sound.defect(), None);
+        sound.validate().unwrap();
         let limit = sound.lz4_max_pclusterblks.unwrap();
         let largest = sound.stats.z_lz4_largest_pcluster_blocks;
         assert!(largest > 1 && largest <= u64::from(limit), "{largest}");
 
-        // The LZ4 record follows the superblock: its size, the match
-        // distance, then the limit.
         let limit_at = EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE + 4;
         assert!(
             limit_at + 2
@@ -841,15 +841,13 @@ mod tests {
             assert_eq!(report.lz4_max_pclusterblks, Some(declared));
             let allowed = declared.max(1);
             assert_eq!(
-                report.defect(),
+                report.validate().err().map(|err| err.to_string()),
                 defect.then(|| format!(
                     "an LZ4 compressed cluster spans {largest} blocks, the superblock allows {allowed}"
                 )),
             );
         }
 
-        // The data layout is bits 1 to 3 of the inode's first word; 3 is
-        // the compact index layout of mkfs.erofs.
         let reader = ErofsReader::open_metadata_only(&path).unwrap();
         let root = reader.superblock().root_nid();
         let nid = reader
@@ -868,8 +866,9 @@ mod tests {
         let report = check(&image);
         assert_eq!(report.stats.other_layout_files, 1);
         assert!(report
-            .defect()
-            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
             .contains("1 file(s) use a data layout"));
     }
 

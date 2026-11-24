@@ -291,70 +291,44 @@ mod tests {
     use super::*;
     use crate::build::{build_image, BuildImageOptions};
     use crate::fileio::warm_bootstrap;
-    use crate::fuse::test_kernel::*;
+    use crate::fuse::test_support::{Kernel, Opcode};
     use nydus_format::blob::BlobMetadataCompressor;
+    use nydus_format::utils::bytes::{read_u32_at, read_u64_at};
     use std::collections::HashSet;
 
-    /// A one-file image in a local store, flattened.
-    struct Export {
-        _directory: tempfile::TempDir,
-        image: Arc<FlatImage>,
-        /// The bytes of the flattened view.
-        flattened: Vec<u8>,
-        bootstrap_size: u64,
-    }
-
-    impl Export {
-        fn build() -> Self {
-            let directory = tempfile::tempdir().unwrap();
-            let store = directory.path();
-            let source = store.join("source");
-            std::fs::create_dir(&source).unwrap();
-            let content: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
-            std::fs::write(source.join("file"), content).unwrap();
-            let blob = store.join("staging");
-            let options = BuildImageOptions::new(
-                source,
-                EROFS_BLOCK_SIZE,
-                BlobMetadataCompressor::None,
-                HashSet::new(),
-                true,
-            )
-            .unwrap();
-            let layer = build_image(&options, std::fs::File::create(&blob).unwrap()).unwrap();
-            std::fs::rename(blob, store.join(hex::encode(layer.full_blob_digest))).unwrap();
-            let bootstrap = layer.standalone_bootstrap.unwrap();
-            let path = store.join("image.boot");
-            std::fs::write(&path, &bootstrap).unwrap();
-            let config = serde_yaml::from_str(&format!(
-                "backend:\n  type: local\n  config:\n    dir: {0}\nstorage:\n  dir: {0}/cache\nprefetch:\n  scope: none\n",
-                store.display(),
-            ))
-            .unwrap();
-            let image = Arc::new(FlatImage::open(&path, config, BLOCK_SIZE, None).unwrap());
-            let mut flattened = vec![0u8; image.size() as usize];
-            image.read_at(0, &mut flattened).unwrap();
-            Self {
-                _directory: directory,
-                image,
-                flattened,
-                bootstrap_size: bootstrap.len() as u64,
-            }
-        }
-
-        fn filesystem(&self) -> FlatImageFs {
-            FlatImageFs::new(self.image.clone())
-        }
-    }
-
-    /// The export holds the image file alone: it reads back the flattened
-    /// view at any offset, and every other node, name or attribute misses.
     #[test]
     fn the_export_is_one_read_only_file_holding_the_flattened_image() {
-        let export = Export::build();
-        let (size, flattened) = (export.image.size(), &export.flattened);
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let source = store.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let content: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(source.join("file"), content).unwrap();
+        let blob = store.join("staging");
+        let options = BuildImageOptions::new(
+            source,
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::None,
+            HashSet::new(),
+            true,
+        )
+        .unwrap();
+        let layer = build_image(&options, std::fs::File::create(&blob).unwrap()).unwrap();
+        std::fs::rename(blob, store.join(hex::encode(layer.full_blob_digest))).unwrap();
+        let bootstrap = layer.standalone_bootstrap.unwrap();
+        let path = store.join("image.boot");
+        std::fs::write(&path, &bootstrap).unwrap();
+        let config = serde_yaml::from_str(&format!(
+            "backend:\n  type: local\n  config:\n    dir: {0}\nstorage:\n  dir: {0}/cache\nprefetch:\n  scope: none\n",
+            store.display(),
+        ))
+        .unwrap();
+        let image = Arc::new(FlatImage::open(&path, config, BLOCK_SIZE, None).unwrap());
+        let mut flattened = vec![0u8; image.size() as usize];
+        image.read_at(0, &mut flattened).unwrap();
+        let size = image.size();
         assert!(size > 2 * BLOCK_SIZE);
-        let (_session, mut kernel) = Kernel::serve(export.filesystem());
+        let (_session, mut kernel) = Kernel::serve(FlatImageFs::new(image));
         let unknown = IMAGE_INO + 1;
 
         assert_eq!(
@@ -369,8 +343,6 @@ mod tests {
             );
         }
 
-        // fuse_attr follows 16 bytes of validity: ino, size and blocks, then
-        // mode and nlink after the timestamps.
         for (ino, mode, nlink, bytes) in [
             (ROOT_INO, libc::S_IFDIR | 0o555, 2, 0),
             (IMAGE_INO, libc::S_IFREG | 0o444, 1, size),
@@ -378,26 +350,31 @@ mod tests {
             let (error, attr) = kernel.request(Opcode::Getattr, ino, &[0; 16]);
             assert_eq!(error, 0);
             assert_eq!(
-                (attr.u64_at(16), attr.u64_at(24), attr.u64_at(32)),
+                (
+                    read_u64_at(&attr, 16),
+                    read_u64_at(&attr, 24),
+                    read_u64_at(&attr, 32)
+                ),
                 (ino, bytes, bytes.div_ceil(512))
             );
-            assert_eq!((attr.u32_at(76), attr.u32_at(80)), (mode, nlink));
+            assert_eq!(
+                (read_u32_at(&attr, 76), read_u32_at(&attr, 80)),
+                (mode, nlink)
+            );
         }
         assert_eq!(
             kernel.request(Opcode::Getattr, unknown, &[0; 16]).0,
             -libc::ENOENT
         );
 
-        // The image stays in the page cache across opens.
         let (error, opened) = kernel.open(Opcode::Open, IMAGE_INO, libc::O_RDONLY);
         assert_eq!(error, 0);
-        assert_eq!(opened.u32_at(8), FopenFlags::FOPEN_KEEP_CACHE.bits());
+        assert_eq!(read_u32_at(&opened, 8), FopenFlags::FOPEN_KEEP_CACHE.bits());
         assert_eq!(
             kernel.open(Opcode::Open, ROOT_INO, libc::O_RDONLY).0,
             -libc::ENOENT
         );
 
-        // Reads need not be block-aligned and stop at the end of the image.
         let slices = (0..size).step_by(16 * BLOCK_SIZE as usize);
         for (offset, len) in slices.map(|offset| (offset, 16 * BLOCK_SIZE)).chain([
             (BLOCK_SIZE, BLOCK_SIZE),
@@ -418,7 +395,6 @@ mod tests {
         }
         assert_eq!(kernel.read(ROOT_INO, 0, 1).0, -libc::ENOENT);
 
-        // The root lists the image, from any cookie and into any buffer.
         assert_eq!(kernel.open(Opcode::Opendir, ROOT_INO, 0).0, 0);
         assert_eq!(kernel.open(Opcode::Opendir, IMAGE_INO, 0).0, -libc::ENOTDIR);
         let entries = [
@@ -428,7 +404,6 @@ mod tests {
         ];
         assert_eq!(kernel.readdir(ROOT_INO, 0, 4096), entries);
         for (offset, entry) in entries.iter().enumerate() {
-            // A buffer of 32 bytes holds one entry.
             assert_eq!(kernel.readdir(ROOT_INO, offset as u64, 32), [entry.clone()]);
         }
         assert_eq!(kernel.readdir(ROOT_INO, 3, 4096), []);
@@ -437,19 +412,17 @@ mod tests {
             -libc::ENOTDIR
         );
 
-        // fuse_kstatfs: blocks, bfree, bavail, files, ffree, bsize, namelen.
         let (error, statfs) = kernel.request(Opcode::Statfs, ROOT_INO, &[]);
         assert_eq!(error, 0);
         assert_eq!(
-            [0, 8, 16, 24, 32].map(|at| statfs.u64_at(at)),
+            [0, 8, 16, 24, 32].map(|at| read_u64_at(&statfs, at)),
             [size / BLOCK_SIZE, 0, 0, 2, 0]
         );
         assert_eq!(
-            (statfs.u32_at(40), statfs.u32_at(44)),
+            (read_u32_at(&statfs, 40), read_u32_at(&statfs, 44)),
             (EROFS_BLOCK_SIZE, IMAGE_NAME.len() as u32)
         );
 
-        // No node has an extended attribute, which is not an error.
         let sized = |size: u32| [size.to_le_bytes(), [0; 4]].concat();
         for ino in [ROOT_INO, IMAGE_INO] {
             assert_eq!(
@@ -477,24 +450,52 @@ mod tests {
         );
     }
 
-    /// Warming stores the bootstrap, and no more, in the page cache of the
-    /// image file; a kernel that takes no notification is left alone.
     #[test]
     fn warming_stores_the_bootstrap_in_the_page_cache_of_the_image() {
         const FUSE_NOTIFY_STORE: i32 = 4;
 
-        let export = Export::build();
-        let (bootstrap_size, flattened) = (export.bootstrap_size, &export.flattened);
-        assert!(bootstrap_size < export.image.size());
-        let filesystem = export.filesystem();
-        let (session, mut kernel) = Kernel::serve(export.filesystem());
+        let directory = tempfile::tempdir().unwrap();
+        let store = directory.path();
+        let source = store.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let content: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(source.join("file"), content).unwrap();
+        let blob = store.join("staging");
+        let options = BuildImageOptions::new(
+            source,
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::None,
+            HashSet::new(),
+            true,
+        )
+        .unwrap();
+        let layer = build_image(&options, std::fs::File::create(&blob).unwrap()).unwrap();
+        std::fs::rename(blob, store.join(hex::encode(layer.full_blob_digest))).unwrap();
+        let bootstrap = layer.standalone_bootstrap.unwrap();
+        let path = store.join("image.boot");
+        std::fs::write(&path, &bootstrap).unwrap();
+        let config = serde_yaml::from_str(&format!(
+            "backend:\n  type: local\n  config:\n    dir: {0}\nstorage:\n  dir: {0}/cache\nprefetch:\n  scope: none\n",
+            store.display(),
+        ))
+        .unwrap();
+        let image = Arc::new(FlatImage::open(&path, config, BLOCK_SIZE, None).unwrap());
+        let mut flattened = vec![0u8; image.size() as usize];
+        image.read_at(0, &mut flattened).unwrap();
+        let bootstrap_size = bootstrap.len() as u64;
+        assert!(bootstrap_size < image.size());
+        let filesystem = FlatImageFs::new(image.clone());
+        let (session, mut kernel) = Kernel::serve(FlatImageFs::new(image));
 
         warm_bootstrap(&filesystem, &session.notifier(), bootstrap_size);
-        // fuse_notify_store_out: nodeid, offset and size, then the bytes.
         let (code, unique, stored) = kernel.message();
         assert_eq!((code, unique), (FUSE_NOTIFY_STORE, 0));
         assert_eq!(
-            (stored.u64_at(0), stored.u64_at(8), stored.u32_at(16)),
+            (
+                read_u64_at(&stored, 0),
+                read_u64_at(&stored, 8),
+                read_u32_at(&stored, 16)
+            ),
             (IMAGE_INO, 0, bootstrap_size as u32)
         );
         assert_eq!(stored[24..], flattened[..bootstrap_size as usize]);

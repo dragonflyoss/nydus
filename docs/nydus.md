@@ -793,8 +793,7 @@ Current implementation notes:
 - Every blob entry carries a `VERIFIED` row: `yes` when the resolved file
 	reproduces the slot id, `no` when it was resolved by name only, and
 	`<unresolved>` when no candidate matched.
-- z_erofs images (the `compr_cfgs` incompat feature with a non-zero
-	superblock `COMPR OR DISTANCE`) are checked as
+- z_erofs images (the `compr_cfgs` incompat feature) are checked as
 	such: the incompat dump names `zero_padding`, `big_pcluster+compr_cfgs` and
 	`fragments`; the summary counts `Z_EROFS FILES`, `Z_EROFS FRAGMENT FILES`
 	and `Z_EROFS PCLUSTERS OUT OF RANGE` (HEAD/PLAIN lcluster addresses that no

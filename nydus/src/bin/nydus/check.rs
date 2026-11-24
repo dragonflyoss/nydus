@@ -130,9 +130,7 @@ impl CheckCommand {
             print_inline_across_blocks(&report.stats)?;
         }
 
-        if let Some(defect) = report.defect() {
-            return Err(Error::InvalidImage(defect));
-        }
+        report.validate()?;
         let unverified = report
             .blobs
             .values()

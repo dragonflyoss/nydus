@@ -49,15 +49,15 @@ func TestBuild(t *testing.T) {
 			if !assert.Equal(t, []string{filepath.Base(blob)}, tags) {
 				t.FailNow()
 			}
-			if erofs.FsckDecodes(t, layout.Compressor()) {
+
+			t.Run("Fsck", func(t *testing.T) {
+				erofs.MustHaveFsck(t, layout.Compressor())
 				erofs.Fsck(t, bootstrap, blobDir)
-			}
+			})
 
 			if c := layout.Compressor(); c == "erofs-lz4" || c == "erofs-zstd" {
-				// A layer that stores every pcluster raw is still a valid
-				// image: only its size shows that compression took place.
-				plain := fixture.Get(t, "erofs-none").Blob(t)
-				assert.Less(t, 2*fileSize(t, blob), fileSize(t, plain))
+				plain := blobFile(fixture.Get(t, "erofs-none").Blob(t)).footer(t)
+				assert.Less(t, 2*f.dataSize, plain.dataSize)
 			}
 
 			requireVerified(t, bootstrap, blobDir, []string{blob})
@@ -122,21 +122,6 @@ func TestBuildExclude(t *testing.T) {
 	assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, "keep/a.bin")), fstest.FileSHA256(t, filepath.Join(m.Root, "keep/a.bin")))
 }
 
-func fileSize(t testing.TB, path string) int64 {
-	t.Helper()
-	info, err := os.Stat(path)
-	if !assert.NoError(t, err) {
-		t.FailNow()
-	}
-
-	return info.Size()
-}
-
-// TestDataAlignment builds native layers with --erofs-data-alignment, which
-// volumes that deduplicate fixed-size blocks rely on: a file of at least the
-// alignment starts on its boundary in the layer data. The files hold
-// incompressible content, which every native layout stores as it is, so each
-// can be found in the blob.
 func TestDataAlignment(t *testing.T) {
 	t.Parallel()
 	mount.FUSE{}.Require(t)
@@ -185,18 +170,17 @@ func TestDataAlignment(t *testing.T) {
 				t.FailNow()
 			}
 
-			// The padding costs less than one alignment per aligned file.
 			budget := 0
 
 			for i, f := range files {
 				at := bytes.Index(data, contents[i])
-				if !assert.GreaterOrEqual(t, at, 0, "%s is not stored as it is", f.name) {
+				if !assert.GreaterOrEqual(t, at, 0) {
 					t.FailNow()
 				}
 
 				budget += f.size
 				if f.size >= align {
-					assert.Zero(t, at%align, "%s starts at %d", f.name, at)
+					assert.Zero(t, at%align)
 					budget += align
 				}
 			}
@@ -205,14 +189,15 @@ func TestDataAlignment(t *testing.T) {
 
 			m := mount.Mount(t, mount.FUSE{}, fixture.Image{Layout: layout, Bootstrap: bootstrap, BlobDir: blobDir, Blobs: []string{blob}}, mount.Options{})
 			for _, f := range files {
-				assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, f.name)), fstest.FileSHA256(t, m.Path(f.name)), f.name)
+				assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, f.name)), fstest.FileSHA256(t, m.Path(f.name)))
 			}
 
 			m.Unmount()
 
-			if erofs.FsckDecodes(t, compressor) {
+			t.Run("Fsck", func(t *testing.T) {
+				erofs.MustHaveFsck(t, compressor)
 				erofs.Fsck(t, bootstrap, blobDir)
-			}
+			})
 		})
 	}
 }

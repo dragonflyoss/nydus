@@ -75,9 +75,8 @@ pub(crate) fn write_image(
 /// incompat features and compression configs are written. `packed_nid`
 /// declares the FRAGMENTS feature and the packed inode.
 ///
-/// The superblock's block count covers the bootstrap alone, as `mkfs.erofs
-/// --blobdev` writes it: the kernel adds every device slot's blocks to it for
-/// `statfs`, so counting the mapped device data here would report it twice.
+/// The block count covers the bootstrap alone, as `mkfs.erofs --blobdev`
+/// writes it: the kernel adds the blocks of every device slot for `statfs`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_image_head(
     image_buf: &mut [u8],

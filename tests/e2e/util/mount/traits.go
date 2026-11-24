@@ -1,7 +1,5 @@
 package mount
 
-import "github.com/dragonflyoss/nydus/tests/e2e/util/fixture"
-
 // Traits describe how an adapter's daemon relates to what it serves, so
 // conformance cases can hold each adapter to what it promises.
 type Traits struct {
@@ -11,8 +9,8 @@ type Traits struct {
 	// it unmounts on SIGTERM and exits once the mount is gone. A daemon
 	// that only exports a device leaves mounting to its caller.
 	OwnsMount bool
-	// Daemonless reports that no nydus process serves the mount, so there
-	// is nothing to signal, fail or query.
+	// Daemonless reports that the kernel reads the image by itself: there
+	// is no daemon to signal, fail or query, and only native layouts mount.
 	Daemonless bool
 }
 
@@ -20,20 +18,6 @@ type Traits struct {
 // (FUSE and fileio: both traits set).
 type Traited interface {
 	Traits() Traits
-}
-
-// Selective is implemented by adapters that serve only some layouts.
-type Selective interface {
-	Serves(fixture.Layout) bool
-}
-
-// Serves reports whether a can serve images of layout.
-func Serves(a Adapter, layout fixture.Layout) bool {
-	if sa, ok := a.(Selective); ok {
-		return sa.Serves(layout)
-	}
-
-	return true
 }
 
 // TraitsOf returns the traits of a.

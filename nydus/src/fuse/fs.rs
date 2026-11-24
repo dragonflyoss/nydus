@@ -717,7 +717,7 @@ impl Filesystem for ErofsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fuse::test_kernel::*;
+    use crate::fuse::test_support::{Kernel, Opcode};
     use nydus_core::build::bootstrap::render_bootstrap;
     use nydus_core::build::inode::InodeData;
     use nydus_core::build::inode::{build_tree, resolve_chunk_addrs};
@@ -726,6 +726,7 @@ mod tests {
         EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_INDEX_TRUSTED, EROFS_XATTR_INDEX_USER,
         NYDUS_XATTR_SUFFIX_NO_XATTR,
     };
+    use nydus_format::utils::bytes::{read_u32_at, read_u64_at};
     use std::collections::HashSet;
     use std::fs;
     use std::os::unix::ffi::OsStringExt;
@@ -855,10 +856,6 @@ mod tests {
         }
     }
 
-    /// A kernel that negotiates neither FUSE_NO_OPEN_SUPPORT,
-    /// FUSE_NO_OPENDIR_SUPPORT nor readdirplus gets handles from open and
-    /// opendir and lists directories with plain READDIR, which current
-    /// kernels never send.
     #[test]
     fn a_kernel_without_the_opt_outs_opens_handles_and_reads_plain_dirents() {
         let directory = tempfile::tempdir().unwrap();
@@ -867,8 +864,6 @@ mod tests {
         fs::write(source.join("file"), b"data").unwrap();
         std::os::unix::fs::symlink("file", source.join("link")).unwrap();
         let _socket = UnixListener::bind(source.join("sock")).unwrap();
-        // Device nodes need privileges to create: two of the fifos are
-        // turned into them once the tree is built.
         for name in ["fifo", "chr", "blk"] {
             let path =
                 std::ffi::CString::new(source.join(name).into_os_string().into_vec()).unwrap();
@@ -929,11 +924,10 @@ mod tests {
         }
         let (file, dir, link) = (nodes["file"], nodes["dir"], nodes["link"]);
 
-        // opendir hands out a stateless handle the kernel may cache behind.
         let (error, opened) = kernel.open(Opcode::Opendir, FUSE_ROOT_ID, libc::O_DIRECTORY);
         assert_eq!(error, 0);
-        assert_eq!(opened.u64_at(0), 0);
-        let open_flags = opened.u32_at(8);
+        assert_eq!(read_u64_at(&opened, 0), 0);
+        let open_flags = read_u32_at(&opened, 8);
         assert_eq!(
             open_flags,
             (FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR).bits()
@@ -944,8 +938,6 @@ mod tests {
         );
         assert_ne!(kernel.open(Opcode::Opendir, u64::MAX / 2, 0).0, 0);
 
-        // READDIR names every entry with the d_type and inode number of its
-        // inode, however small the buffer, resuming from the last cookie.
         for size in [4096, 96] {
             let (mut offset, mut listed) = (0, Vec::new());
             loop {
@@ -976,12 +968,10 @@ mod tests {
         }
         assert_ne!(kernel.request(Opcode::Readdir, u64::MAX / 2, &[0; 40]).0, 0);
 
-        // open hands out a handle for a regular file opened for reading,
-        // and release and access have nothing to do.
         let (error, opened) = kernel.open(Opcode::Open, file, libc::O_RDONLY);
         assert_eq!(error, 0);
-        let handle = opened.u64_at(0);
-        assert_eq!(opened.u32_at(8), FopenFlags::FOPEN_KEEP_CACHE.bits());
+        let handle = read_u64_at(&opened, 0);
+        assert_eq!(read_u32_at(&opened, 8), FopenFlags::FOPEN_KEEP_CACHE.bits());
         let mut release = vec![0u8; 24];
         release[..8].copy_from_slice(&handle.to_le_bytes());
         assert_eq!(
@@ -1002,7 +992,6 @@ mod tests {
         );
         assert_ne!(kernel.open(Opcode::Open, u64::MAX / 2, libc::O_RDONLY).0, 0);
 
-        // A node id that names no inode fails instead of being served.
         assert_eq!(
             kernel.request(Opcode::Readlink, link, &[]),
             (0, b"file".to_vec())

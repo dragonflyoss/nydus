@@ -430,8 +430,6 @@ mod tests {
         assert_eq!(NBD_SET_FLAGS, (0xab << 8) | 10);
     }
 
-    /// A writer that takes at most `limit` bytes per call, as a socket with
-    /// a full buffer does.
     struct ShortWriter {
         written: Vec<u8>,
         limit: usize,
@@ -460,8 +458,6 @@ mod tests {
     #[test]
     fn a_reply_is_written_whole_however_short_each_write_is() {
         let (header, data) = (b"header".as_slice(), b"payload-of-the-reply".as_slice());
-        // Writes that end inside the header, at its end, inside the data
-        // and past both.
         for limit in [1, 4, header.len(), header.len() + 3, 64] {
             for (mut a, mut b) in [(header, data), (header, &[][..]), (&[][..], data)] {
                 let want = [a, b].concat();

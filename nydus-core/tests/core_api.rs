@@ -75,7 +75,6 @@ fn a_flat_image_pads_its_view_to_the_alignment_with_zeros() {
     assert!(size > flat_size);
     assert_eq!(flat.block_count(), flat.size() / BLOCK_SIZE);
     assert_eq!(flat.zero_fd(), core.zero_fd());
-    // A window running past the padded view is served whole.
     let mut view = vec![0xaa; size + BLOCK_SIZE as usize];
     flat.read_at(0, &mut view).unwrap();
     assert!(view[..flat_size] == device[..]);

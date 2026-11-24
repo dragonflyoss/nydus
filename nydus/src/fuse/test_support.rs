@@ -1,11 +1,11 @@
-//! The kernel end of a FUSE session over a socketpair, for tests of
-//! filesystems that must answer requests no mounted kernel sends them.
+//! The kernel end of a FUSE session over a socketpair, for tests of requests
+//! no mounted kernel sends.
 
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 
-const FUSE_ROOT_ID: u64 = 1;
+use nydus_format::utils::bytes::{read_u32_at, read_u64_at};
 
 /// The requests a test sends.
 #[derive(Clone, Copy)]
@@ -25,23 +25,7 @@ pub(crate) enum Opcode {
     Access = 34,
 }
 
-/// The little-endian fields of a reply.
-pub(crate) trait Fields {
-    fn u32_at(&self, at: usize) -> u32;
-    fn u64_at(&self, at: usize) -> u64;
-}
-
-impl Fields for [u8] {
-    fn u32_at(&self, at: usize) -> u32 {
-        u32::from_le_bytes(self[at..at + 4].try_into().unwrap())
-    }
-
-    fn u64_at(&self, at: usize) -> u64 {
-        u64::from_le_bytes(self[at..at + 8].try_into().unwrap())
-    }
-}
-
-/// It sends raw FUSE requests and returns each reply's errno and payload.
+/// Sends raw FUSE requests and returns each reply's errno and payload.
 pub(crate) struct Kernel {
     stream: UnixStream,
     unique: u64,
@@ -96,20 +80,24 @@ impl Kernel {
     pub(crate) fn message(&mut self) -> (i32, u64, Vec<u8>) {
         let mut header = [0u8; 16];
         self.stream.read_exact(&mut header).unwrap();
-        let mut payload = vec![0; header.u32_at(0) as usize - header.len()];
+        let mut payload = vec![0; read_u32_at(&header, 0) as usize - header.len()];
         self.stream.read_exact(&mut payload).unwrap();
-        (header.u32_at(4) as i32, header.u64_at(8), payload)
+        (
+            read_u32_at(&header, 4) as i32,
+            read_u64_at(&header, 8),
+            payload,
+        )
     }
 
     /// Looks `name` up in the root and returns its node id and mode.
     pub(crate) fn lookup(&mut self, name: &str) -> (u64, u32) {
         let (error, entry) = self.request(
             Opcode::Lookup,
-            FUSE_ROOT_ID,
+            fuser::INodeNo::ROOT.0,
             &[name.as_bytes(), b"\0"].concat(),
         );
         assert_eq!(error, 0, "{name}");
-        (entry.u64_at(0), entry.u32_at(100))
+        (read_u64_at(&entry, 0), read_u32_at(&entry, 100))
     }
 
     pub(crate) fn open(&mut self, opcode: Opcode, nodeid: u64, flags: i32) -> (i32, Vec<u8>) {
@@ -132,8 +120,8 @@ impl Kernel {
         assert!(reply.len() <= size as usize);
         let mut entries = Vec::new();
         while !reply.is_empty() {
-            let (ino, next) = (reply.u64_at(0), reply.u64_at(8));
-            let (name_len, kind) = (reply.u32_at(16) as usize, reply.u32_at(20));
+            let (ino, next) = (read_u64_at(&reply, 0), read_u64_at(&reply, 8));
+            let (name_len, kind) = (read_u32_at(&reply, 16) as usize, read_u32_at(&reply, 20));
             let name = String::from_utf8(reply[24..24 + name_len].to_vec()).unwrap();
             entries.push((name, kind, ino, next));
             reply.drain(..(24 + name_len).next_multiple_of(8));

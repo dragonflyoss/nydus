@@ -49,9 +49,6 @@ type testCase struct {
 	applies func(m *mounted) bool
 }
 
-// semanticLayouts are the layouts the Semantic cases run against: every
-// compressor of chunked nydus data and of native layers, which the readers
-// decode differently, and one of each kind built from its layer tarball.
 var semanticLayouts = []string{
 	semanticLayout, "lz4-64k", "none-4k",
 	"erofs-none", "erofs-lz4", "erofs-zstd",
@@ -97,10 +94,11 @@ func semanticImage(t *testing.T) fixture.Image {
 
 func testAdapter(t *testing.T, a mount.Adapter) {
 	a.Require(t)
+	daemonless := mount.TraitsOf(a).Daemonless
 
 	for _, name := range semanticLayouts {
 		layout := fixture.MustLayout(t, name)
-		if !mount.Serves(a, layout) {
+		if daemonless && !layout.Native {
 			continue
 		}
 
@@ -111,7 +109,7 @@ func testAdapter(t *testing.T, a mount.Adapter) {
 		})
 	}
 
-	if !mount.TraitsOf(a).Daemonless {
+	if !daemonless {
 		for _, c := range ownCases {
 			t.Run(c.name, func(t *testing.T) {
 				t.Parallel()
@@ -121,7 +119,7 @@ func testAdapter(t *testing.T, a mount.Adapter) {
 	}
 
 	for _, name := range fixture.Matrix {
-		if !mount.Serves(a, fixture.LayoutOf(t, name)) {
+		if daemonless && !fixture.LayoutOf(t, name).Native {
 			continue
 		}
 

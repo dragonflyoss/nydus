@@ -367,10 +367,9 @@ impl ErofsReader {
     /// superblock), or `None` for images without compressed data.
     pub fn z_compr_cfgs(&self) -> io::Result<Option<ZErofsComprCfgs>> {
         let sb = self.superblock();
-        let algs = sb.available_compr_algs();
-        if algs == 0 {
+        let Some(algs) = sb.available_compr_algs() else {
             return Ok(None);
-        }
+        };
         let bytes = self.mmap_slice(
             EROFS_SUPER_OFFSET as usize + sb.size(),
             ZErofsComprCfgs::MAX_SIZE,

@@ -98,12 +98,13 @@ func (l tarLayout) checkTarConversion(t *testing.T, data []byte) tarOutcome {
 
 	mnt.Unmount()
 
-	// The kernel reads a native layer by itself, and must find the same tree.
-	if mount.KernelReads(t, img.Layout) {
-		kernel := filepath.Join(work, "kernel")
-		mount.EROFS(t, kernel, img.Bootstrap, img.Blobs)
-		fstest.DiffTree(t, reference, kernel)
-		mount.Unmount(kernel)
+	if img.Layout.Native {
+		t.Run("Kernel", func(t *testing.T) {
+			mount.MustHaveEROFS(t, img.Layout)
+			kernel := filepath.Join(work, "kernel")
+			mount.EROFS(t, kernel, img.Bootstrap, img.Blobs)
+			fstest.DiffTree(t, reference, kernel)
+		})
 	}
 
 	return tarConverted

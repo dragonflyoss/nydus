@@ -75,20 +75,24 @@ pub(super) struct MountTable(String);
 /// The mount on top of a path.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct MountEntry {
-    /// Its `major:minor` device.
+    /// The `major:minor` device.
     pub(super) device: String,
+    /// The filesystem type.
     fstype: String,
 }
 
+/// Implements the mount entry.
 impl MountEntry {
+    /// Returns whether the mount is a FUSE filesystem.
     pub(super) fn is_fuse(&self) -> bool {
         self.fstype == "fuse" || self.fstype.starts_with("fuse.")
     }
 }
 
+/// Implements the mount table.
 impl MountTable {
-    /// Readings of a table that keeps changing before the last one is used.
-    const READ_ATTEMPTS: usize = 32;
+    /// The readings of a table that keeps changing before the last one is used.
+    const MAX_READ_ATTEMPTS: usize = 32;
 
     /// Reads the mount table, again while it changed during the reading.
     pub(super) fn read() -> std::io::Result<Self> {
@@ -101,18 +105,16 @@ impl MountTable {
         let mut attempts = 1;
         loop {
             let (mountinfo, changed) = read()?;
-            if !changed || attempts == Self::READ_ATTEMPTS {
+            if !changed || attempts == Self::MAX_READ_ATTEMPTS {
                 return Ok(Self(mountinfo));
             }
             attempts += 1;
         }
     }
 
-    /// Reads the mount table and reports whether it changed meanwhile. The
-    /// kernel hands the table out in pieces and, before 5.8, resumes by entry
-    /// index: an unmount between two pieces shifts the entries and skips one,
-    /// which may be the mount just made. The file polls as changed once the
-    /// table differs from the one it was opened on.
+    /// Reads the mount table and reports whether it changed meanwhile: the
+    /// file then polls as changed. Before 5.8 the kernel resumes a partial
+    /// read by entry index, so an unmount in between skips an entry.
     fn read_once() -> std::io::Result<(String, bool)> {
         let mut file = File::open("/proc/self/mountinfo")?;
         let mut mountinfo = String::new();
@@ -178,7 +180,9 @@ mod tests {
 
     #[test]
     fn a_table_that_changed_while_it_was_read_is_read_again() {
-        for (changes, expected_reads) in [(0, 1), (2, 3), (usize::MAX, MountTable::READ_ATTEMPTS)] {
+        for (changes, expected_reads) in
+            [(0, 1), (2, 3), (usize::MAX, MountTable::MAX_READ_ATTEMPTS)]
+        {
             let mut reads = 0;
             let table = MountTable::settled(|| {
                 reads += 1;

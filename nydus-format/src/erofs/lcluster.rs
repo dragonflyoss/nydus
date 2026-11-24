@@ -102,9 +102,8 @@ impl ZErofsLclusterIndex {
         [read_u16_at(&self.di_u, 0), read_u16_at(&self.di_u, 2)]
     }
 
-    /// The pcluster's block count, for a NONHEAD index whose `delta[0]`
-    /// holds it (`Z_EROFS_LI_D0_CBLKCNT`) instead of the distance to its
-    /// head: the first one behind the head of a pcluster of several blocks.
+    /// The pcluster's block count, for the NONHEAD index behind a head whose
+    /// `delta[0]` holds it (`Z_EROFS_LI_D0_CBLKCNT`) instead of a distance.
     pub fn pcluster_blocks(&self) -> Option<u16> {
         let delta0 = self.delta()[0];
         (delta0 & Z_EROFS_LI_D0_CBLKCNT != 0).then_some(delta0 & !Z_EROFS_LI_D0_CBLKCNT)

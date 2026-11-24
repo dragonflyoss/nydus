@@ -86,10 +86,9 @@ func (NBD) Start(t testing.TB, req mount.Request) (string, *mount.Daemon, func()
 	}
 }
 
-// loadModule loads the nbd module unless its devices already exist. It asks
-// for more than the default 16 devices: every mount a suite holds takes one,
-// and a test waiting for a device keeps a parallel slot from the subtests
-// whose end would free one.
+// loadModule loads the nbd module unless its devices already exist, with
+// more than the default 16 devices: a test waiting for one would hold the
+// parallel slot of the mounted tests that free it.
 func loadModule() bool {
 	if _, err := os.Stat("/sys/block/nbd0"); err == nil {
 		return true

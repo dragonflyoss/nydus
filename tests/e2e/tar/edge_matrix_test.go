@@ -54,9 +54,6 @@ func tarEdgeMatrix() []tarVector {
 
 	vec := func(name string, entries ...tarEntry) tarVector { return tarVector{name, entries} }
 
-	// lstat(2) follows at most 40 symlinks in the leading components of a
-	// path. Resolving a/f looks l02/sub up once a and l01 are read, which
-	// follows l02 to l41: exactly 40, and the builder must not stop short.
 	symlinkChain := []tarEntry{dir("t/", 0o755), dir("t/sub/", 0o755)}
 	for i := 41; i >= 1; i-- {
 		target := "t"

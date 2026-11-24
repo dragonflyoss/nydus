@@ -356,8 +356,7 @@ fn finish_z_image<W: Write>(
     mut blob_writer: BlobWriter<ZDataWriter<W>>,
     options: &BuildImageOptions,
 ) -> Result<Image> {
-    // Same epoch rule as finish_image: the mtime most inodes that can stay
-    // compact share. The packed inode takes it too.
+    // Same epoch rule as finish_image; the packed inode takes it too.
     let epoch = choose_epoch(&inodes);
     // The packed inode is a regular compressed file outside the directory
     // tree, reachable only through the superblock's packed_nid.
@@ -820,7 +819,7 @@ mod tests {
         assert!(cfgs.contains(algorithm));
         assert_eq!(
             reader.superblock().available_compr_algs(),
-            1 << algorithm.code()
+            Some(1 << algorithm.code())
         );
         let [device] = reader.blob_infos().unwrap() else {
             panic!("one device");

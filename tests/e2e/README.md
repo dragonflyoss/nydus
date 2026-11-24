@@ -226,10 +226,10 @@ without compiling as root; netns tests are `#[ignore]` and run with
 `--include-ignored`. The Go suites carry no known-issue markers: a
 reproduced bug is a red check until it is fixed.
 
-The build suite judges every layout with `fsck.erofs`. For `erofs-lz4` and
-`erofs-zstd` that takes an erofs-utils newer than 1.9.4 (see `FsckDecodes`):
-the `image-tools` job builds a pinned snapshot, and with an older `fsck.erofs`
-the check is left out locally and fails under CI.
+The build suite judges every layout with `fsck.erofs` in a `Fsck` subtest.
+For `erofs-lz4` and `erofs-zstd` that takes an erofs-utils newer than 1.9.4
+(see `erofs.MustHaveFsck`): the e2e jobs build a pinned snapshot, and with
+an older `fsck.erofs` the subtest skips locally and fails under CI.
 
 Runner provisioning and the historical release binary remain external
 prerequisites, not successful tests when absent; see the soak and

@@ -23,7 +23,7 @@ func TestNativeMount(t *testing.T) {
 
 		t.Run(layout.Name, func(t *testing.T) {
 			t.Parallel()
-			mount.RequireEROFS(t, layout)
+			mount.MustHaveEROFS(t, layout)
 			img := fixture.Get(t, layout.Name)
 			mnt := mountEROFS(t, img.Bootstrap, mount.DeviceFiles(t, img.Bootstrap, img.BlobDir, ""))
 			fstest.VerifyMount(t, mnt, img.Want, img.Compare())
@@ -38,7 +38,7 @@ func TestNativeMount(t *testing.T) {
 
 		t.Run(fixture.MergedPrefix+name, func(t *testing.T) {
 			t.Parallel()
-			mount.RequireEROFS(t, layout)
+			mount.MustHaveEROFS(t, layout)
 			img := fixture.Merged(t, layout)
 			mnt := mountEROFS(t, img.Bootstrap, mount.DeviceFiles(t, img.Bootstrap, img.BlobDir, ""))
 			fstest.VerifyMount(t, mnt, img.Want, img.Compare())
@@ -48,7 +48,7 @@ func TestNativeMount(t *testing.T) {
 	t.Run("Decoded", func(t *testing.T) {
 		t.Parallel()
 		layout := fixture.MustLayout(t, "none-4k")
-		mount.RequireEROFS(t, layout)
+		mount.MustHaveEROFS(t, layout)
 		img := fixture.Get(t, layout.Name)
 		dir := env.WorkDir(t)
 		device := filepath.Join(dir, filepath.Base(img.Blob(t)))
@@ -71,7 +71,7 @@ func TestFUSEVsKernel(t *testing.T) {
 
 		t.Run(fixture.MergedPrefix+name, func(t *testing.T) {
 			t.Parallel()
-			mount.RequireEROFS(t, layout)
+			mount.MustHaveEROFS(t, layout)
 			img := fixture.Merged(t, layout)
 
 			var fuse *mount.Mounted

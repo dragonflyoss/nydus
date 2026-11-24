@@ -361,7 +361,6 @@ mod tests {
             assert!(err.report().to_string().contains(reason), "{path}: {err}");
         }
 
-        // The mountpoint names the session, so it must be text.
         let binary = root.join(OsStr::from_bytes(b"mnt-\xff"));
         assert!(ownership_state_base(&default_runtime_dir(), &binary).is_err());
         let err = Startup::new(
@@ -404,7 +403,6 @@ mod tests {
             let err = frontend(mountpoint).validate_fresh(None).unwrap_err();
             assert!(err.report().to_string().contains(reason), "{err}");
         }
-        // Another filesystem at the mountpoint is never taken for a session.
         let err = frontend(Path::new("/proc")).inspect().unwrap_err();
         assert!(err.to_string().contains("another filesystem"), "{err}");
 
@@ -417,7 +415,6 @@ mod tests {
         };
         let err = adopting.open(adopt).err().unwrap();
         assert!(err.to_string().contains("Session Transfer"), "{err}");
-        // The filesystem is handed to one session only.
         let err = adopting.open(Open::Fresh).err().unwrap();
         assert!(err.to_string().contains("already opened"), "{err}");
     }

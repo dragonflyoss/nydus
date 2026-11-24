@@ -31,23 +31,10 @@ import (
 )
 
 const (
-	// hugeExtent is the unit a generated file picks its content by.
-	hugeExtent = 1 << 20
-	// hugeSmallFile is the mean size of the files of the small-file layer.
-	hugeSmallFile = 40 << 10
+	hugeExtentSize    = 1 << 20
+	hugeSmallFileSize = 40 << 10
 )
 
-// TestHugeImage converts a generated OCI image of NYDUS_E2E_HUGE_IMAGE_GIB
-// (default 100) to each compressor, checks it with nydusify, mounts it and
-// compares every file with the digest taken while generating it.
-//
-// The image is streamed into the registry and never staged, and its content
-// compresses well, so the source and the converted images take little disk.
-// What takes disk is reading it back: `nydusify check --source` extracts the
-// OCI image, and a chunk-based mount caches every chunk it decodes. Both
-// need about the size of the image's data that is not zero;
-// NYDUS_E2E_HUGE_IMAGE_DENSITY (percent, default 100) lowers that share and
-// NYDUS_E2E_HUGE_IMAGE_CHECK_SOURCE=false leaves the source out of the check.
 func TestHugeImage(t *testing.T) {
 	t.Parallel()
 	env.MustHaveRoot(t)
@@ -71,7 +58,6 @@ func TestHugeImage(t *testing.T) {
 	image.push(t, reg, source)
 	t.Logf("pushed %d files in %s", len(image.sums), time.Since(start).Round(time.Second))
 
-	// One compressor at a time: each holds its scratch data until it ends.
 	for _, compressor := range strings.Fields(compressors) {
 		t.Run(compressor, func(t *testing.T) {
 			target := reg.Ref("huge", compressor)
@@ -91,8 +77,6 @@ func TestHugeImage(t *testing.T) {
 
 			step("check", check...)
 
-			// The blobs are served from a local directory: a registry
-			// backend does not serve the native erofs-* layers.
 			start := time.Now()
 			mnt := mount.Mount(t, mount.FUSE{}, ref(target).pull(t, nil), mount.Options{})
 			image.verify(t, mnt.Root)
@@ -101,44 +85,33 @@ func TestHugeImage(t *testing.T) {
 	}
 }
 
-// hugeImage generates the layers of the image and remembers what it wrote.
 type hugeImage struct {
-	size int64
-	// density is the percentage of extents that hold data; the rest are
-	// zeros, which a chunk-based layer stores as holes.
+	size    int64
 	density uint64
-
-	mu sync.Mutex
-	// sums holds the hex SHA-256 of every generated file by its path.
-	sums map[string]string
+	mu      sync.Mutex
+	sums    map[string]string
 }
 
-// push streams the image to ref as three gzip layers: one file of 48% of
-// the size, far past every 32-bit offset; 48 files of 1% each; and the
-// remaining 4% as small files, a thousand per directory.
-func (g *hugeImage) push(t *testing.T, reg *registry.Registry, ref string) {
+func (h *hugeImage) push(t *testing.T, reg *registry.Registry, ref string) {
 	t.Helper()
-
 	sizes := rand.New(rand.NewPCG(1, 2))
 
 	reg.PushLayers(t, ref,
-		g.layer("huge", 1, func(int) string { return "huge/one" }, func(int) int64 { return g.size / 100 * 48 }),
-		g.layer("mid", 48, func(i int) string { return fmt.Sprintf("mid/%02d", i) }, func(int) int64 { return g.size / 100 }),
-		g.layer("small", int(g.size/100*4/hugeSmallFile),
+		h.layer("huge", 1, func(int) string { return "huge/one" }, func(int) int64 { return h.size / 100 * 48 }),
+		h.layer("mid", 48, func(i int) string { return fmt.Sprintf("mid/%02d", i) }, func(int) int64 { return h.size / 100 }),
+		h.layer("small", int(h.size/100*4/hugeSmallFileSize),
 			func(i int) string { return fmt.Sprintf("small/%04d/%03d", i/1000, i%1000) },
-			func(int) int64 { return sizes.Int64N(2 * hugeSmallFile) }),
+			func(int) int64 { return sizes.Int64N(2 * hugeSmallFileSize) }),
 	)
 }
 
-// layer returns a layer of the directory dir and count files below it, whose
-// tar stream is generated as it is uploaded.
-func (g *hugeImage) layer(dir string, count int, path func(int) string, size func(int) int64) v1.Layer {
+func (h *hugeImage) layer(dir string, count int, path func(int) string, size func(int) int64) v1.Layer {
 	pr, pw := io.Pipe()
 
 	go func() {
 		tw := tar.NewWriter(pw)
 
-		err := g.writeFiles(tw, dir, count, path, size)
+		err := h.writeFiles(tw, dir, count, path, size)
 		if err == nil {
 			err = tw.Close()
 		}
@@ -149,11 +122,9 @@ func (g *hugeImage) layer(dir string, count int, path func(int) string, size fun
 	return stream.NewLayer(pr, stream.WithCompressionLevel(gzip.BestSpeed))
 }
 
-// writeFiles writes the directory dir and count files below it. Every
-// directory of a path is written before its first file.
-func (g *hugeImage) writeFiles(tw *tar.Writer, dir string, count int, path func(int) string, size func(int) int64) error {
+func (h *hugeImage) writeFiles(tw *tar.Writer, dir string, count int, path func(int) string, size func(int) int64) error {
 	modTime := time.Unix(1700000000, 0)
-	buf := make([]byte, hugeExtent)
+	buf := make([]byte, hugeExtentSize)
 	dirs := map[string]bool{}
 
 	mkdir := func(dir string) error {
@@ -185,9 +156,9 @@ func (g *hugeImage) writeFiles(tw *tar.Writer, dir string, count int, path func(
 		_, _ = seed.Write([]byte(name))
 		sum := sha256.New()
 
-		for off := int64(0); off < size; off += hugeExtent {
-			data := buf[:min(size-off, hugeExtent)]
-			g.fill(data, seed.Sum64(), uint64(off/hugeExtent))
+		for off := int64(0); off < size; off += hugeExtentSize {
+			data := buf[:min(size-off, hugeExtentSize)]
+			h.fill(data, seed.Sum64(), uint64(off/hugeExtentSize))
 			_, _ = sum.Write(data)
 
 			if _, err := tw.Write(data); err != nil {
@@ -195,23 +166,19 @@ func (g *hugeImage) writeFiles(tw *tar.Writer, dir string, count int, path func(
 			}
 		}
 
-		g.mu.Lock()
-		g.sums[name] = hex.EncodeToString(sum.Sum(nil))
-		g.mu.Unlock()
+		h.mu.Lock()
+		h.sums[name] = hex.EncodeToString(sum.Sum(nil))
+		h.mu.Unlock()
 	}
 
 	return nil
 }
 
-// fill writes extent index of the file of seed into data: zeros outside the
-// density, else random bytes for one extent in 512 and for the others 4KiB
-// blocks of a repeated 16-byte stamp of the seed and the block's position,
-// so that data read from the wrong file or offset differs.
-func (g *hugeImage) fill(data []byte, seed, index uint64) {
+func (h *hugeImage) fill(data []byte, seed, index uint64) {
 	pick := rand.New(rand.NewPCG(seed, index))
 
 	switch {
-	case pick.Uint64N(100) >= g.density:
+	case pick.Uint64N(100) >= h.density:
 		clear(data)
 	case pick.Uint64N(512) == 0:
 		copy(data, corpus.Bytes(seed+index, len(data)))
@@ -233,11 +200,8 @@ func (g *hugeImage) fill(data []byte, seed, index uint64) {
 	}
 }
 
-// verify reads every regular file below root and compares its digest with
-// the generated one.
-func (g *hugeImage) verify(t *testing.T, root string) {
+func (h *hugeImage) verify(t *testing.T, root string) {
 	t.Helper()
-
 	seen := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -254,7 +218,7 @@ func (g *hugeImage) verify(t *testing.T, root string) {
 		if err != nil {
 			return err
 		}
-		if sum != g.sums[rel] {
+		if sum != h.sums[rel] {
 			return fmt.Errorf("%s differs from the generated file", rel)
 		}
 
@@ -264,5 +228,5 @@ func (g *hugeImage) verify(t *testing.T, root string) {
 	})
 
 	assert.NoError(t, err)
-	assert.Len(t, g.sums, seen)
+	assert.Len(t, h.sums, seen)
 }

@@ -69,7 +69,6 @@ func TestConvertPublicImages(t *testing.T) {
 
 			out, err := cfg.runWithRetry(t, "convert "+image, func() *exec.Cmd { return exec.Command(nydusify, args("convert")...) })
 			if err != nil && isImageNotFound(out) {
-				// Upstream images get delisted; that is not a conversion failure, so skip even under CI.
 				t.Skipf("%s is not in its registry", image)
 			}
 
@@ -155,10 +154,6 @@ func readImageList(t *testing.T, path string) []string {
 	return images
 }
 
-// imageName returns the repository path of image below its registry
-// namespace, so that mirrored images of different Docker Hub namespaces
-// do not collide: ghcr.io/o/r/nginx is nginx and ghcr.io/o/r/grafana/grafana
-// is grafana/grafana.
 func imageName(image string) string {
 	parts := strings.Split(image, "/")
 	if len(parts) > 3 && strings.ContainsAny(parts[0], ".:") {

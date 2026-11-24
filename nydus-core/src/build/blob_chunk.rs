@@ -3185,8 +3185,6 @@ mod tests {
             "compressed to less than half"
         );
         assert_eq!(decode_z_file(&data, &meta.tail, src.len()), src);
-        // The superblock declares the largest LZ4 pcluster a reader has to
-        // buffer: the configured 16 blocks, which no pcluster exceeds.
         assert_eq!(
             cfgs,
             ZErofsComprCfgs {

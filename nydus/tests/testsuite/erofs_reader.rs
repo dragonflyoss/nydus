@@ -66,8 +66,6 @@ fn build_flat_inline_reader() -> (TempDir, ErofsReader) {
     (dir, reader)
 }
 
-/// A reader opened without its blobs still serves metadata, and fails a data
-/// read instead of returning bytes it does not have.
 #[test]
 fn a_metadata_only_reader_fails_data_reads_as_not_found() {
     let dir = tempdir().unwrap();

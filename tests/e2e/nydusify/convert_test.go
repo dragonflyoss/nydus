@@ -188,9 +188,6 @@ func TestConvertIndex(t *testing.T) {
 	}
 }
 
-// TestConvertAttestation converts the index buildx pushes for an image with an
-// SBOM: the image manifest plus an unknown/unknown attestation manifest whose
-// layer is an in-toto document.
 func TestConvertAttestation(t *testing.T) {
 	t.Parallel()
 	mount.FUSE{}.Require(t)
@@ -277,7 +274,6 @@ func TestConvertAttestation(t *testing.T) {
 					t.FailNow()
 				}
 
-				// The image is converted, the attestation is kept as it is.
 				image, kept := manifest.Manifests[0], manifest.Manifests[1]
 				assert.NotEqual(t, imageDigest, image.Digest)
 				assert.Equal(t, attestationDigest, kept.Digest)
@@ -286,7 +282,6 @@ func TestConvertAttestation(t *testing.T) {
 				assert.True(t, root.MediaType.IsImage())
 			}
 
-			// Both pull and check resolve an index to its linux/amd64 image.
 			img := ref(target).pull(t, fstest.ScanSource(t, src))
 			m := mount.Mount(t, mount.FUSE{}, img, mount.Options{})
 			fstest.VerifyMount(t, m.Root, img.Want, img.Compare())
