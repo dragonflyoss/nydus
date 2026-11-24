@@ -20,7 +20,7 @@ and run through `sudo -E`.
 
 | Package                     | What it proves                                                                                                                          |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `conformance/`              | Filesystem conformance, run against every adapter: `TestFUSE`, `TestFileio`, `TestNBD`, `TestUblk`, `TestFanotify`.              |
+| `conformance/`              | Filesystem conformance, run against every adapter: `TestFUSE`, `TestKernel`, `TestFileio`, `TestNBD`, `TestUblk`, `TestFanotify`. |
 | `api/`                      | Per-daemon metrics/trace isolation, HTTP method/path errors, disconnected clients, shutdown and stale Unix socket replacement.         |
 | `continuity/`               | FUSE hot upgrade with open handles, pre-ready rollback, live-owner exclusion, no-API operation and exact FD transfer.                  |
 | `build/`                    | `nydus build/merge/check/optimize` across every GA layout: output contract, fsck.erofs, reproducibility.                                |
@@ -121,6 +121,7 @@ requests by itself; nothing is called from `ci.yml`.
 | `E2E Test / Build` | Shared GA binaries and coverage tools |
 | `E2E Test / e2e (image-tools)` | Build, tar, export, kernel, nydusify, API, registry and FUSE hot upgrade |
 | `E2E Test / e2e (fuse)`, `e2e (fileio-*)` | One complete FUSE conformance run; Fileio semantics and two data-layout groups |
+| `E2E Test / e2e (kernel)` | The conformance cases on native layouts mounted by the kernel EROFS driver alone |
 | `E2E Test / e2e (storage-*)`, `e2e (soak)` | Isolated fault recovery, cache smoke and the two-minute stability soak |
 | `E2E Test With Dragonfly / Test` | Real Dragonfly services, seed-cache reads, origin fallback and `nydusify --dragonfly-scheduler` in one cluster |
 | `E2E Test With Experimental Transports / test (*)` | One shared experimental-feature build and four transports |
@@ -225,6 +226,11 @@ without compiling as root; netns tests are `#[ignore]` and run with
 `--include-ignored`. The Go suites carry no known-issue markers: a
 reproduced bug is a red check until it is fixed.
 
+The build suite judges every layout with `fsck.erofs` in a `Fsck` subtest.
+For `erofs-lz4` and `erofs-zstd` that takes an erofs-utils newer than 1.9.4
+(see `erofs.MustHaveFsck`): the e2e jobs build a pinned snapshot, and with
+an older `fsck.erofs` the subtest skips locally and fails under CI.
+
 Runner provisioning and the historical release binary remain external
 prerequisites, not successful tests when absent; see the soak and
 compatibility sections below.
@@ -248,13 +254,20 @@ test package, as `net/conn_test.go` runs the same checks over every network:
 one `TestXxx` per adapter runs the same cases, so the experimental transports
 keep only their adapters and transport-specific tests;
 `experimental/transport` holds the checks the nbd and fanotify suites share.
+The Semantic cases run on every compressor of the chunked and of the native
+layouts, and on one of each kind built from its layer tarball, so a tarball
+conversion is held to the cases a directory build is. `TestKernel` mounts the
+native layouts over loop devices with no daemon: it runs the same cases but
+those that need a daemon or a layout the kernel cannot decode. The tar suite
+mounts each native layer it converts with the kernel as well as through FUSE.
 
 Test kinds follow Go's conventions rather than directories: fuzz targets
 (`FuzzXxx`) sit beside the tests of what they fuzz (`build/fuzz_test.go`,
 `tar/fuzz_test.go`), benchmarks (`BenchmarkXxx`) run only under `-bench`, and
 opt-in heavy tests carry `//go:build manual` in the package they test:
-`tar/huge_test.go` (`make e2e-hugetar`) and `nydusify/public_images_test.go`
-(`make e2e-convert`).
+`tar/huge_test.go` (`make e2e-hugetar`), `nydusify/public_images_test.go`
+(`make e2e-convert`) and `nydusify/huge_image_test.go` (`make e2e-hugeimage`,
+run by hand only).
 
 ## Conventions
 
@@ -262,7 +275,8 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
   whose tests share one Kind cluster.
 - Nothing calls `t.Skip*`. A missing precondition goes through `env.Skipf`
   (or `MustHaveRoot`, `MustHaveKernel`, `LookPath`, ...): locally it skips,
-  under CI it fails.
+  under CI it fails. The one exception is `public_images_test.go`, which calls
+  `t.Skipf` for images missing from their registry, in CI too.
 - Assertions use testify's `assert`, never `require`, in the specific form
   `testifylint` checks.
 - A file is named after what it holds (`cache/peer_test.go`,
@@ -313,6 +327,10 @@ opt-in heavy tests carry `//go:build manual` in the package they test:
 | `NYDUS_E2E_CONVERT_CONCURRENCY` | Images converted at once (default 5). |
 | `NYDUS_E2E_CONVERT_RETRIES` | Retries of a transient registry failure (default 5). |
 | `NYDUS_E2E_CONVERT_RETRY_INTERVAL` | Base delay between retries (default 30s). |
+| `NYDUS_E2E_HUGE_IMAGE_GIB` | Size of the image `TestHugeImage` generates, in GiB (default 100). |
+| `NYDUS_E2E_HUGE_IMAGE_DENSITY` | Percentage of that image holding data rather than zeros (default 100). Checking against the source and reading a chunk-based mount each need that much scratch disk. |
+| `NYDUS_E2E_HUGE_IMAGE_COMPRESSORS` | Space-separated compressors to convert to (default `zstd erofs-lz4`). |
+| `NYDUS_E2E_HUGE_IMAGE_CHECK_SOURCE` | Run `nydusify check` against the source too, which extracts it (default true). |
 | `NYDUS_E2E_BENCH_WARM` | Add the warm fio and metadata metrics. |
 | `NYDUS_E2E_BENCH_FILEIO_NOWARM` | Add the `fileio-nowarm` mode. |
 | `NYDUS_E2E_BENCH_EROFSFUSE` | `erofsfuse` binary for the `erofsfuse` mode. |

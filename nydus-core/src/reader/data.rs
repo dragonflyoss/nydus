@@ -8,7 +8,7 @@ use nydus_format::erofs::{
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
     Z_EROFS_ADVISE_FRAGMENT_PCLUSTER, Z_EROFS_FRAGMENT_INODE_FLAG, Z_EROFS_LCLUSTER_INDEX_SIZE,
     Z_EROFS_LCLUSTER_TYPE_HEAD1, Z_EROFS_LCLUSTER_TYPE_NONHEAD, Z_EROFS_LCLUSTER_TYPE_PLAIN,
-    Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_MAP_HEADER_SIZE,
+    Z_EROFS_MAP_HEADER_SIZE,
 };
 use nydus_format::utils::align_up_usize;
 
@@ -468,11 +468,10 @@ impl ErofsReader {
             i -= 1;
         }
         while index_at(i)?.lcluster_type() == Z_EROFS_LCLUSTER_TYPE_NONHEAD {
-            let delta0 = index_at(i)?.delta()[0];
-            let distance = if delta0 & Z_EROFS_LI_D0_CBLKCNT != 0 {
-                1
-            } else {
-                usize::from(delta0)
+            let index = index_at(i)?;
+            let distance = match index.pcluster_blocks() {
+                Some(_) => 1,
+                None => usize::from(index.delta()[0]),
             };
             if distance == 0 || distance > i {
                 return Err(io::Error::new(
@@ -534,14 +533,12 @@ impl ErofsReader {
                 let phys_blocks = match kind {
                     Z_EROFS_LCLUSTER_TYPE_PLAIN => 1usize,
                     Z_EROFS_LCLUSTER_TYPE_HEAD1 if j - i >= 2 => {
-                        let delta0 = index_at(i + 1)?.delta()[0];
-                        if delta0 & Z_EROFS_LI_D0_CBLKCNT == 0 {
-                            return Err(io::Error::new(
+                        usize::from(index_at(i + 1)?.pcluster_blocks().ok_or_else(|| {
+                            io::Error::new(
                                 io::ErrorKind::InvalidData,
                                 "z_erofs pcluster without CBLKCNT",
-                            ));
-                        }
-                        (delta0 & !Z_EROFS_LI_D0_CBLKCNT) as usize
+                            )
+                        })?)
                     }
                     Z_EROFS_LCLUSTER_TYPE_HEAD1 => 1,
                     other => {

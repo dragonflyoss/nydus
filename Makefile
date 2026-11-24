@@ -139,6 +139,11 @@ e2e-hugetar: build-ci build-nydusify
 	$(MAKE) e2e-run PKG=./tar/ E2E_TAGS=manual E2E_RUN='^TestHugeSparseCorpus$$$$' E2E_TIMEOUT=80m
 .PHONY: e2e-hugetar
 
+e2e-hugeimage: FEATURES = cli,fuse
+e2e-hugeimage: build-ci build-nydusify
+	$(MAKE) e2e-run PKG=./nydusify/ E2E_TAGS=manual E2E_RUN='^TestHugeImage$$$$' E2E_TIMEOUT=24h
+.PHONY: e2e-hugeimage
+
 e2e-convert: FEATURES = cli,fuse
 e2e-convert: build-ci build-nydusify
 	$(MAKE) e2e-run PKG=./nydusify/ E2E_TAGS=manual E2E_RUN='^TestConvertPublicImages$$$$' E2E_TIMEOUT=140m

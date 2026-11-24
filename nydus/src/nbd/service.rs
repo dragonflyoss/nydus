@@ -429,4 +429,53 @@ mod tests {
         assert_eq!(NBD_SET_TIMEOUT, (0xab << 8) | 9);
         assert_eq!(NBD_SET_FLAGS, (0xab << 8) | 10);
     }
+
+    struct ShortWriter {
+        written: Vec<u8>,
+        limit: usize,
+    }
+
+    impl Write for ShortWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.write_vectored(&[IoSlice::new(buf)])
+        }
+
+        fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> std::io::Result<usize> {
+            let mut left = self.limit;
+            for buf in bufs {
+                let taken = left.min(buf.len());
+                self.written.extend_from_slice(&buf[..taken]);
+                left -= taken;
+            }
+            Ok(self.limit - left)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_reply_is_written_whole_however_short_each_write_is() {
+        let (header, data) = (b"header".as_slice(), b"payload-of-the-reply".as_slice());
+        for limit in [1, 4, header.len(), header.len() + 3, 64] {
+            for (mut a, mut b) in [(header, data), (header, &[][..]), (&[][..], data)] {
+                let want = [a, b].concat();
+                let mut writer = ShortWriter {
+                    written: Vec::new(),
+                    limit,
+                };
+                writev_all(&mut writer, &mut a, &mut b).unwrap();
+                assert_eq!(writer.written, want, "limit={limit}");
+                assert!(a.is_empty() && b.is_empty());
+            }
+        }
+
+        let mut closed = ShortWriter {
+            written: Vec::new(),
+            limit: 0,
+        };
+        let err = writev_all(&mut closed, &mut &header[..], &mut &data[..]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+    }
 }

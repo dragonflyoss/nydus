@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
@@ -15,7 +16,7 @@ func testMmap(t *testing.T, m *mounted) {
 		for _, rel := range []string{"files/ten_blocks", "files/sparse_hole", "files/large_256k"} {
 			want := m.wantBytes(t, rel)
 			data := mapFile(t, m.Path(rel), len(want), unix.PROT_READ, unix.MAP_SHARED)
-			assert.True(t, bytes.Equal(want, data))
+			fstest.ReadMapped(t, func() { assert.True(t, bytes.Equal(want, data)) })
 		}
 	})
 
@@ -37,9 +38,11 @@ func testMmap(t *testing.T, m *mounted) {
 
 		defer func() { _ = unix.Munmap(data) }()
 
-		for i := len(data) - page; i >= 0; i -= page {
-			assert.True(t, bytes.Equal(want[page+i:page+i+page], data[i:i+page]))
-		}
+		fstest.ReadMapped(t, func() {
+			for i := len(data) - page; i >= 0; i -= page {
+				assert.True(t, bytes.Equal(want[page+i:page+i+page], data[i:i+page]))
+			}
+		})
 	})
 
 	t.Run("TailPageIsZeroPadded", func(t *testing.T) {
@@ -49,11 +52,13 @@ func testMmap(t *testing.T, m *mounted) {
 		page := os.Getpagesize()
 		mapped := (len(want) + page - 1) / page * page
 		data := mapFile(t, m.Path(rel), mapped, unix.PROT_READ, unix.MAP_PRIVATE)
-		if !assert.True(t, bytes.Equal(want, data[:len(want)])) {
-			t.FailNow()
-		}
+		fstest.ReadMapped(t, func() {
+			if !assert.True(t, bytes.Equal(want, data[:len(want)])) {
+				t.FailNow()
+			}
 
-		assert.True(t, bytes.Equal(make([]byte, mapped-len(want)), data[len(want):]))
+			assert.True(t, bytes.Equal(make([]byte, mapped-len(want)), data[len(want):]))
+		})
 	})
 
 	t.Run("PrivateWriteIsCopyOnWrite", func(t *testing.T) {
@@ -66,10 +71,12 @@ func testMmap(t *testing.T, m *mounted) {
 			t.FailNow()
 		}
 
-		data[0] ^= 0xff
-		if !assert.NotEqual(t, want[0], data[0]) {
-			t.FailNow()
-		}
+		fstest.ReadMapped(t, func() {
+			data[0] ^= 0xff
+			if !assert.NotEqual(t, want[0], data[0]) {
+				t.FailNow()
+			}
+		})
 		if !assert.NoError(t, unix.Munmap(data)) {
 			t.FailNow()
 		}
@@ -83,7 +90,7 @@ func testMmap(t *testing.T, m *mounted) {
 		}
 
 		again := mapFile(t, m.Path(rel), len(want), unix.PROT_READ, unix.MAP_SHARED)
-		assert.True(t, bytes.Equal(want, again))
+		fstest.ReadMapped(t, func() { assert.True(t, bytes.Equal(want, again)) })
 	})
 
 	t.Run("SharedWriteMappingRejected", func(t *testing.T) {

@@ -226,7 +226,7 @@ func compareProbes(t testing.TB, mntPath string, want []byte) {
 	}
 
 	defer func() { _ = unix.Munmap(mapped) }()
-	assert.True(t, bytes.Equal(want, mapped))
+	ReadMapped(t, func() { assert.True(t, bytes.Equal(want, mapped)) })
 }
 
 // walkPairs calls fn for every path in src along with its counterpart in mnt.

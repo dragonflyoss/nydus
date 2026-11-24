@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -12,36 +13,45 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// fsckVersion returns the major and minor version of the fsck.erofs on
-// PATH, probed once per process.
-var fsckVersion = sync.OnceValues(func() (major, minor int) {
+// fsckVersion returns the version of the fsck.erofs on PATH, probed once per
+// process: as printed, and as {major, minor, patch, snapshot}, where snapshot
+// is 1 for a "-g<commit>" build past that release.
+var fsckVersion = sync.OnceValues(func() (text string, version [4]int) {
 	out, _ := exec.Command("fsck.erofs", "-V").CombinedOutput()
-	if m := regexp.MustCompile(`(\d+)\.(\d+)`).FindStringSubmatch(string(out)); m != nil {
-		major, _ = strconv.Atoi(m[1])
-		minor, _ = strconv.Atoi(m[2])
+
+	m := regexp.MustCompile(`(\d+)\.(\d+)(?:\.(\d+))?(-g[0-9a-f]+)?`).FindStringSubmatch(string(out))
+	if m == nil {
+		return "", version
 	}
 
-	return major, minor
+	for i := range 3 {
+		version[i], _ = strconv.Atoi(m[i+1])
+	}
+
+	if m[4] != "" {
+		version[3] = 1
+	}
+
+	return m[0], version
 })
 
-// FsckDecodes reports whether the installed fsck.erofs can decode images
-// compressed with compressor: in-EROFS LZ4 and zstd need erofs-utils 1.8.
-func FsckDecodes(t testing.TB, compressor string) bool {
+// MustHaveFsck skips t unless the installed fsck.erofs decodes images
+// compressed with compressor. In-EROFS LZ4 and zstd pclusters live on an
+// extra device, which fsck.erofs resolves only since erofs-utils c65a25f
+// ("add missing device_id derivation for flattened devices"), past the 1.9.4
+// release.
+func MustHaveFsck(t testing.TB, compressor string) {
 	t.Helper()
-	if compressor != "erofs-lz4" && compressor != "erofs-zstd" {
-		return true
-	}
-
 	env.LookPath(t, "fsck.erofs")
 
-	major, minor := fsckVersion()
-	if major > 1 || (major == 1 && minor >= 8) {
-		return true
+	if compressor != "erofs-lz4" && compressor != "erofs-zstd" {
+		return
 	}
 
-	t.Logf("fsck.erofs %d.%d cannot decode %s images", major, minor, compressor)
-
-	return false
+	text, version := fsckVersion()
+	if slices.Compare(version[:], []int{1, 9, 4, 0}) <= 0 {
+		env.Skipf(t, "fsck.erofs %s cannot decode %s images, erofs-utils newer than 1.9.4 is required", text, compressor)
+	}
 }
 
 // Fsck validates a bootstrap with erofs-utils. A nydus image is plain

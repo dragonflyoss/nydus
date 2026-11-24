@@ -313,8 +313,7 @@ impl BuildImageOptions {
                 base_blkaddr: Z_LAYER_BASE_BLKADDR,
                 fragment_threshold: EROFS_FRAGMENT_THRESHOLD,
                 data_alignment: self.z_data_alignment,
-                // Files strictly larger than the alignment are aligned.
-                data_alignment_threshold: u64::from(self.z_data_alignment).saturating_add(1),
+                data_alignment_threshold: u64::from(self.z_data_alignment),
             },
         )
     }
@@ -326,7 +325,7 @@ impl BuildImageOptions {
         let layout = if self.native == Some(NativeLayout::Plain) {
             BlobLayout::RawDevice {
                 data_alignment: self.z_data_alignment,
-                data_alignment_threshold: u64::from(self.z_data_alignment).saturating_add(1),
+                data_alignment_threshold: u64::from(self.z_data_alignment),
             }
         } else {
             // One knob: a chunk of at least the minimum size stands alone,
@@ -357,20 +356,14 @@ fn finish_z_image<W: Write>(
     mut blob_writer: BlobWriter<ZDataWriter<W>>,
     options: &BuildImageOptions,
 ) -> Result<Image> {
-    // Same epoch rule as finish_image: the root's mtime is 0, and so is the
-    // packed inode's, so neither takes part.
-    let epoch = inodes
-        .iter()
-        .skip(1)
-        .map(|inode| inode.mtime)
-        .min()
-        .unwrap_or(0);
+    // Same epoch rule as finish_image; the packed inode takes it too.
+    let epoch = choose_epoch(&inodes);
     // The packed inode is a regular compressed file outside the directory
     // tree, reachable only through the superblock's packed_nid.
     let packed_index = match blob_writer.finish_z_packed()? {
         Some((meta, size)) => {
-            let mut packed = inode::packed_inode(&inodes, meta.tail, meta.compressed_blocks, size);
-            packed.mtime = epoch;
+            let packed =
+                inode::packed_inode(&inodes, meta.tail, meta.compressed_blocks, size, epoch);
             inodes.push(packed);
             Some(inodes.len() - 1)
         }
@@ -826,7 +819,7 @@ mod tests {
         assert!(cfgs.contains(algorithm));
         assert_eq!(
             reader.superblock().available_compr_algs(),
-            1 << algorithm.code()
+            Some(1 << algorithm.code())
         );
         let [device] = reader.blob_infos().unwrap() else {
             panic!("one device");

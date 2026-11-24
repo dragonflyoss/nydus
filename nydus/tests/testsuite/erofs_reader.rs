@@ -66,6 +66,47 @@ fn build_flat_inline_reader() -> (TempDir, ErofsReader) {
     (dir, reader)
 }
 
+#[test]
+fn a_metadata_only_reader_fails_data_reads_as_not_found() {
+    let dir = tempdir().unwrap();
+    let source = dir.path().join("source");
+    fs::create_dir(&source).unwrap();
+    let size = 3 * EROFS_BLOCK_SIZE;
+    fs::write(source.join("data"), vec![7u8; size as usize]).unwrap();
+    let image = build_image(
+        &BuildImageOptions::new(
+            source,
+            EROFS_BLOCK_SIZE,
+            BlobMetadataCompressor::None,
+            HashSet::new(),
+            true,
+        )
+        .unwrap(),
+        Vec::new(),
+    )
+    .unwrap();
+    let bootstrap = dir.path().join("image.boot");
+    fs::write(&bootstrap, image.standalone_bootstrap.unwrap()).unwrap();
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
+    let root_nid = reader.superblock().root_nid();
+    let root = reader.inode(root_nid).unwrap();
+    let nid = reader
+        .lookup_dir_entry(root_nid, &root, b"data")
+        .unwrap()
+        .unwrap();
+    let inode = reader.inode(nid).unwrap();
+    assert_eq!(inode.size(), size as u64);
+
+    let err = reader.read_file_data(nid, &inode, 0, size).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    let mut output = Vec::new();
+    let err = reader
+        .write_file_data_to(nid, &inode, 0, size, &mut output)
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    assert!(output.is_empty());
+}
+
 struct FailingWriter {
     writes_left: usize,
     output: Vec<u8>,
@@ -1123,8 +1164,9 @@ fn optimize_preserves_dense_files_and_refuses_native_layers() {
         }
         assert_eq!(reader.blob_infos().unwrap().len(), 2);
         assert_eq!(reader.read_prefetch_order()[0], 2);
+        assert!(reader.is_ondemand(2).unwrap());
+        assert!(!reader.is_ondemand(1).unwrap());
         reader
-            .blob_caches()
             .prefetch_blob(2, 2, std::time::Duration::from_secs(10))
             .unwrap();
         backend.fail_next.store(true, Ordering::Relaxed);

@@ -1,9 +1,11 @@
 package build
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,8 +49,15 @@ func TestBuild(t *testing.T) {
 			if !assert.Equal(t, []string{filepath.Base(blob)}, tags) {
 				t.FailNow()
 			}
-			if erofs.FsckDecodes(t, layout.Compressor()) {
+
+			t.Run("Fsck", func(t *testing.T) {
+				erofs.MustHaveFsck(t, layout.Compressor())
 				erofs.Fsck(t, bootstrap, blobDir)
+			})
+
+			if c := layout.Compressor(); c == "erofs-lz4" || c == "erofs-zstd" {
+				plain := blobFile(fixture.Get(t, "erofs-none").Blob(t)).footer(t)
+				assert.Less(t, 2*f.dataSize, plain.dataSize)
 			}
 
 			requireVerified(t, bootstrap, blobDir, []string{blob})
@@ -111,6 +120,86 @@ func TestBuildExclude(t *testing.T) {
 	}
 
 	assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, "keep/a.bin")), fstest.FileSHA256(t, filepath.Join(m.Root, "keep/a.bin")))
+}
+
+func TestDataAlignment(t *testing.T) {
+	t.Parallel()
+	mount.FUSE{}.Require(t)
+
+	const align = 1 << 20
+
+	files := []struct {
+		name string
+		size int
+	}{
+		{"a-small", 300 << 10},
+		{"b-large", align + 4096},
+		{"c-small", 70 << 10},
+		{"d-exact", align},
+		{"e-small", 4096},
+		{"f-large", 2*align + 12345},
+		{"g-small", 8192},
+		{"h-large", 3 * align},
+	}
+
+	source := filepath.Join(env.WorkDir(t), "source")
+	if !assert.NoError(t, os.Mkdir(source, 0o755)) {
+		t.FailNow()
+	}
+
+	contents := make([][]byte, len(files))
+
+	for i, f := range files {
+		contents[i] = corpus.Bytes(uint64(1000+i), f.size)
+		if !assert.NoError(t, os.WriteFile(filepath.Join(source, f.name), contents[i], 0o644)) {
+			t.FailNow()
+		}
+	}
+
+	for _, compressor := range []string{"erofs-none", "erofs-lz4", "erofs-zstd"} {
+		t.Run(compressor, func(t *testing.T) {
+			t.Parallel()
+			layout := fixture.Layout{Name: compressor + "-align", Native: true,
+				Args: []string{"--compressor", compressor, "--erofs-data-alignment", strconv.Itoa(align)}}
+			dir := env.WorkDir(t)
+			blobDir, bootstrap := filepath.Join(dir, "blobs"), filepath.Join(dir, "image.boot")
+			blob, _ := fixture.BuildInto(t, blobDir, bootstrap, source, layout)
+
+			data, err := os.ReadFile(blob)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+
+			budget := 0
+
+			for i, f := range files {
+				at := bytes.Index(data, contents[i])
+				if !assert.GreaterOrEqual(t, at, 0) {
+					t.FailNow()
+				}
+
+				budget += f.size
+				if f.size >= align {
+					assert.Zero(t, at%align)
+					budget += align
+				}
+			}
+
+			assert.Less(t, len(data), budget)
+
+			m := mount.Mount(t, mount.FUSE{}, fixture.Image{Layout: layout, Bootstrap: bootstrap, BlobDir: blobDir, Blobs: []string{blob}}, mount.Options{})
+			for _, f := range files {
+				assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, f.name)), fstest.FileSHA256(t, m.Path(f.name)))
+			}
+
+			m.Unmount()
+
+			t.Run("Fsck", func(t *testing.T) {
+				erofs.MustHaveFsck(t, compressor)
+				erofs.Fsck(t, bootstrap, blobDir)
+			})
+		})
+	}
 }
 
 func TestReproducibleBuild(t *testing.T) {

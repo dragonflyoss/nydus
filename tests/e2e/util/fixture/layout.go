@@ -1,6 +1,9 @@
 package fixture
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Layout is one `nydus build` configuration.
 type Layout struct {
@@ -57,7 +60,19 @@ var MergeLayouts = []string{"zstd-4k", "erofs-lz4", "tar-zstd"}
 
 // Matrix names the images, as Get takes them, that the contract Data cases
 // run against.
-var Matrix = []string{"zstd-4k", "erofs-lz4", "tar-zstd", MergedPrefix + "zstd-4k", HugePrefix + "zstd"}
+var Matrix = []string{
+	"zstd-4k", "lz4-64k", "none-4k",
+	"erofs-none", "erofs-lz4", "erofs-zstd",
+	"tar-zstd", "tar-erofs-lz4",
+	MergedPrefix + "zstd-4k", MergedPrefix + "erofs-lz4",
+	HugePrefix + "zstd",
+}
+
+// LayoutOf returns the layout of the image called name, as Get takes it.
+func LayoutOf(t testing.TB, name string) Layout {
+	t.Helper()
+	return MustLayout(t, strings.TrimPrefix(strings.TrimPrefix(name, MergedPrefix), HugePrefix))
+}
 
 // MustLayout returns the GA layout called name, failing t when there is none.
 func MustLayout(t testing.TB, name string) Layout {

@@ -130,18 +130,7 @@ impl CheckCommand {
             print_inline_across_blocks(&report.stats)?;
         }
 
-        if !report.stats.inline_overflows.is_empty() {
-            return Err(Error::InvalidImage(format!(
-                "{} inode(s) have inline data crossing a metadata block (the kernel cannot read them)",
-                report.stats.inline_overflows.len()
-            )));
-        }
-        if report.stats.z_pclusters_out_of_range != 0 {
-            return Err(Error::InvalidImage(format!(
-                "{} compressed cluster(s) reference blocks outside the image devices",
-                report.stats.z_pclusters_out_of_range
-            )));
-        }
+        report.validate()?;
         let unverified = report
             .blobs
             .values()

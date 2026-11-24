@@ -14,7 +14,7 @@ use super::lifecycle::SessionRuntimeHandle;
 use super::ownership::{OwnerRecord, SessionOwner};
 use super::transfer::SessionTransfer;
 use crate::continuity::startup::{self, Frontend, Open};
-use crate::fuse::mount::{is_fuse_fstype, mount_entry_of};
+use crate::fuse::mount::MountTable;
 use crate::fuse::{ErofsFs, FuseService};
 
 /// The maximum number of final-component symlinks explicitly expanded during resolution.
@@ -106,8 +106,8 @@ impl Frontend for FuseFrontend {
     }
 
     fn inspect(&self) -> Result<Option<String>> {
-        match mount_entry_of(&self.mountpoint)? {
-            Some((device, kind)) if is_fuse_fstype(&kind) => Ok(Some(device)),
+        match MountTable::read()?.entry_of(&self.mountpoint) {
+            Some(entry) if entry.is_fuse() => Ok(Some(entry.device)),
             Some(_) => Err(Error::Runtime(
                 "another filesystem occupies the FUSE mountpoint; refusing startup".into(),
             )),
@@ -328,6 +328,95 @@ mod tests {
             ondemand()
         )
         .is_err());
+    }
+
+    #[test]
+    fn mountpoint_aliases_resolve_to_one_path_or_are_rejected() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = resolve_directory_path(dir.path()).unwrap();
+        std::fs::create_dir(root.join("mnt")).unwrap();
+        symlink("mnt", root.join("alias")).unwrap();
+        symlink("alias", root.join("alias-of-alias")).unwrap();
+        symlink(&root, root.join("mnt/up")).unwrap();
+        symlink("loop", root.join("loop")).unwrap();
+
+        for alias in ["mnt", "alias", "alias-of-alias", "mnt/up/alias"] {
+            assert_eq!(
+                normalize_mountpoint(&root.join(alias)).unwrap(),
+                root.join("mnt"),
+                "{alias}"
+            );
+        }
+        let rejected = [
+            ("loop", "too many levels of symbolic links"),
+            ("absent/mnt", "failed to resolve mountpoint directory"),
+            (&"n".repeat(256), "failed to resolve mountpoint /"),
+        ];
+        for (path, reason) in rejected {
+            let err = normalize_mountpoint(&root.join(path)).unwrap_err();
+            assert!(err.report().to_string().contains(reason), "{path}: {err}");
+        }
+
+        let binary = root.join(OsStr::from_bytes(b"mnt-\xff"));
+        assert!(ownership_state_base(&default_runtime_dir(), &binary).is_err());
+        let err = Startup::new(
+            &binary,
+            &default_runtime_dir(),
+            None,
+            None,
+            metrics(),
+            ondemand(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("valid UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn a_fresh_start_needs_a_free_directory_and_an_adoption_a_transfer() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let frontend = |mountpoint: &Path| FuseFrontend {
+            mountpoint: mountpoint.to_path_buf(),
+            info: InstanceInfo::new(mountpoint.to_str().unwrap(), None),
+            fs: Some(empty_filesystem()),
+            config: Config::default(),
+            shutdown: Arc::default(),
+        };
+
+        let free = frontend(dir.path());
+        assert_eq!(free.inspect().unwrap(), None);
+        free.validate_fresh(None).unwrap();
+        free.check_cancelled().unwrap();
+        free.shutdown.store(true, Ordering::Relaxed);
+        assert!(free.check_cancelled().is_err());
+
+        for (mountpoint, reason) in [
+            (file.as_path(), "must be a directory"),
+            (&dir.path().join("absent"), "failed to inspect"),
+        ] {
+            let err = frontend(mountpoint).validate_fresh(None).unwrap_err();
+            assert!(err.report().to_string().contains(reason), "{err}");
+        }
+        let err = frontend(Path::new("/proc")).inspect().unwrap_err();
+        assert!(err.to_string().contains("another filesystem"), "{err}");
+
+        let mut adopting = frontend(dir.path());
+        let adopt = Open::Adopt {
+            transfer: None,
+            record: None,
+            session_id: None,
+            timeout: std::time::Duration::ZERO,
+        };
+        let err = adopting.open(adopt).err().unwrap();
+        assert!(err.to_string().contains("Session Transfer"), "{err}");
+        let err = adopting.open(Open::Fresh).err().unwrap();
+        assert!(err.to_string().contains("already opened"), "{err}");
     }
 
     #[test]

@@ -2,8 +2,10 @@ mod common;
 
 use std::fs;
 use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 
 use common::{read_flat, Image, CHUNK_SIZE, FILE_NAME};
+use nydus_core::flat::{FlatImage, BLOCK_SIZE};
 use nydus_core::BlobId;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_storage::cache::is_chunk_group_crc_mismatch;
@@ -19,6 +21,9 @@ fn prepare_all_maps_the_one_blob_after_the_bootstrap() {
 
     assert_eq!(blobs.len(), 1);
     assert_eq!(blobs[0].id, BlobId::from(image.blob_id));
+    assert_eq!(blobs[0].id.as_bytes(), &image.blob_id);
+    assert_eq!(blobs[0].id.to_hex(), hex::encode(image.blob_id));
+    assert_eq!(<[u8; 32]>::from(blobs[0].id), image.blob_id);
     assert_eq!(blobs[0].cache_size, image.dense.len() as u64);
     assert_eq!(
         core.flat_size(),
@@ -52,6 +57,32 @@ fn fetch_flat_ranges_serves_the_bootstrap_then_zeros_then_the_dense_blob() {
     assert!(device[mapped..] == image.dense[..]);
     assert!(core.blobs.is_all_ready(&blob.id).unwrap());
     assert_eq!(fs::read(&blob.cache_path).unwrap(), image.dense);
+}
+
+#[test]
+fn a_flat_image_pads_its_view_to_the_alignment_with_zeros() {
+    let image = Image::build();
+    let cache_dir = tempdir().unwrap();
+    let core = Arc::new(image.core(cache_dir.path(), &[]));
+    let flat_size = core.flat_size() as usize;
+    let device = read_flat(&core, 0, flat_size as u64).unwrap();
+    let align = 1 << 20;
+
+    let flat = FlatImage::with_core(Arc::clone(&core), align).unwrap();
+
+    let size = flat.size() as usize;
+    assert_eq!(size, flat_size.next_multiple_of(align as usize));
+    assert!(size > flat_size);
+    assert_eq!(flat.block_count(), flat.size() / BLOCK_SIZE);
+    assert_eq!(flat.zero_fd(), core.zero_fd());
+    let mut view = vec![0xaa; size + BLOCK_SIZE as usize];
+    flat.read_at(0, &mut view).unwrap();
+    assert!(view[..flat_size] == device[..]);
+    assert!(view[flat_size..].iter().all(|byte| *byte == 0));
+    let mut past = vec![0xaa; BLOCK_SIZE as usize];
+    flat.read_at(flat.size(), &mut past).unwrap();
+    assert!(past.iter().all(|byte| *byte == 0));
+    flat.read_at(0, &mut []).unwrap();
 }
 
 #[test]

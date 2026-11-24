@@ -49,9 +49,10 @@ func TestMerge(t *testing.T) {
 
 			assert.Equal(t, want, tags)
 
-			if erofs.FsckDecodes(t, layout.Compressor()) {
+			t.Run("Fsck", func(t *testing.T) {
+				erofs.MustHaveFsck(t, layout.Compressor())
 				erofs.Fsck(t, merged, blobDir)
-			}
+			})
 
 			requireVerified(t, merged, blobDir, blobs)
 
