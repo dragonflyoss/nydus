@@ -510,7 +510,7 @@ func TestFileSystem_Run(t *testing.T) {
 			pushed := make(chan string, 2)
 			tc.mock(keychain.EXPECT(), client.EXPECT(), pushed)
 
-			f, _ := newTestFileSystem(t, systemdmocks.NewMockManager(ctl), keychain, NewMockDriver(ctl), client)
+			f, _ := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), keychain, NewMockDriver(ctl), client)
 			assert.NoError(t, f.store.PutInstance(mockInstance))
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan struct{})

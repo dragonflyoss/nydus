@@ -51,6 +51,67 @@ type renderOptions struct {
 	prefetchScope string
 }
 
+// render returns the nydus config, refer to the Storage config section of
+// docs/nydus.md.
+//
+//	snapshotter config   nydusd.config, key for key
+//	image reference      backend.config.{addr,repository}
+//	keychain or preheat  backend.config.{auth,registry_token}
+//	certs.d hosts.toml   backend.config.http.tls
+//	nydus-prefetch label prefetch.scope
+func (r *renderOptions) render() ([]byte, error) {
+	registryConfig := r.nydusd.Backend.Config
+	httpConfig := map[string]any{
+		"request_timeout":      registryConfig.HTTP.RequestTimeout,
+		"request_read_timeout": registryConfig.HTTP.RequestReadTimeout,
+		"max_retries":          registryConfig.HTTP.MaxRetries,
+	}
+	if registryConfig.HTTP.Proxy.Addr != "" {
+		httpConfig["proxy"] = registryConfig.HTTP.Proxy
+	}
+
+	if r.skipVerify || r.caCert != "" {
+		tls := map[string]any{"skip_verify": r.skipVerify}
+		if r.caCert != "" {
+			tls["ca_cert"] = r.caCert
+		}
+		httpConfig["tls"] = tls
+	}
+
+	registry := map[string]any{
+		"addr":       r.addr,
+		"repository": r.repository,
+		"http":       httpConfig,
+		"fallback":   registryConfig.Fallback,
+	}
+	if r.auth != "" {
+		registry["auth"] = r.auth
+	}
+
+	if r.registryToken != "" {
+		registry["registry_token"] = r.registryToken
+	}
+
+	if registryConfig.Dragonfly.SchedulerEndpoint != "" {
+		registry["dragonfly"] = registryConfig.Dragonfly
+	}
+
+	storage, prefetch := r.nydusd.Storage, r.nydusd.Prefetch
+	storage.Dir, prefetch.Scope = r.cacheDir, r.prefetchScope
+
+	data, err := yaml.Marshal(map[string]any{
+		"runtime_dir": r.nydusd.RuntimeDir,
+		"backend":     map[string]any{"type": "registry", "config": registry},
+		"storage":     storage,
+		"prefetch":    prefetch,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode nydusd config: %w", err)
+	}
+
+	return data, nil
+}
+
 // renderConfig renders the daemon's config, with the keychain's credential,
 // and writes it into the daemon's runtime dir.
 func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, prefetchScope string) error {
@@ -119,65 +180,4 @@ func (f *fileSystem) caBundle(cas []string, dir string) (string, error) {
 	}
 
 	return path, nil
-}
-
-// render returns the nydus config, refer to the Storage config section of
-// docs/nydus.md.
-//
-//	snapshotter config   nydusd.config, key for key
-//	image reference      backend.config.{addr,repository}
-//	keychain or preheat  backend.config.{auth,registry_token}
-//	certs.d hosts.toml   backend.config.http.tls
-//	nydus-prefetch label prefetch.scope
-func (r *renderOptions) render() ([]byte, error) {
-	registryConfig := r.nydusd.Backend.Config
-	httpConfig := map[string]any{
-		"request_timeout":      registryConfig.HTTP.RequestTimeout,
-		"request_read_timeout": registryConfig.HTTP.RequestReadTimeout,
-		"max_retries":          registryConfig.HTTP.MaxRetries,
-	}
-	if registryConfig.HTTP.Proxy.Addr != "" {
-		httpConfig["proxy"] = registryConfig.HTTP.Proxy
-	}
-
-	if r.skipVerify || r.caCert != "" {
-		tls := map[string]any{"skip_verify": r.skipVerify}
-		if r.caCert != "" {
-			tls["ca_cert"] = r.caCert
-		}
-		httpConfig["tls"] = tls
-	}
-
-	registry := map[string]any{
-		"addr":       r.addr,
-		"repository": r.repository,
-		"http":       httpConfig,
-		"fallback":   registryConfig.Fallback,
-	}
-	if r.auth != "" {
-		registry["auth"] = r.auth
-	}
-
-	if r.registryToken != "" {
-		registry["registry_token"] = r.registryToken
-	}
-
-	if registryConfig.Dragonfly.SchedulerEndpoint != "" {
-		registry["dragonfly"] = registryConfig.Dragonfly
-	}
-
-	storage, prefetch := r.nydusd.Storage, r.nydusd.Prefetch
-	storage.Dir, prefetch.Scope = r.cacheDir, r.prefetchScope
-
-	data, err := yaml.Marshal(map[string]any{
-		"runtime_dir": r.nydusd.RuntimeDir,
-		"backend":     map[string]any{"type": "registry", "config": registry},
-		"storage":     storage,
-		"prefetch":    prefetch,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("encode nydusd config: %w", err)
-	}
-
-	return data, nil
 }

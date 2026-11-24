@@ -485,7 +485,7 @@ snapshotter ── containerd: reference ─▶ image ─▶ diff IDs ─▶ cha
    │           snapshots:  chain IDs ─▶ committed bootstrap layer
    │           queue:      pending until one of max_concurrent_images slots is free
    ▼
-systemd ────── nydus-preheat-<chainID>.service, Type=exec, in the daemons' slice
+systemd ────── nydusd-preheat-<chainID>.service, Type=exec, in the daemons' slice
    │           nydus preheat --bootstrap … --config … --state-file …
    ▼
 registry or Dragonfly ─▶ the shared blob cache
@@ -622,11 +622,11 @@ change log a warning and need a restart.
 
 The file below states the built-in defaults, which a missing key falls back
 to, as containerd's `config default` prints its own; a test keeps the shipped
-`config.yaml` equal to them. A missing file falls back to them only at the
-default path: a path given with `--config`, as the shipped unit gives it, must
-exist, as containerd's does. That includes the cgroup limits: a
+`config.yaml` equal to them. That includes the cgroup limits: a
 daemon without a CPU quota sizes its thread pools by the CPUs of the node, so
-running unlimited takes an explicit `0`.
+running unlimited takes an explicit `0`. The file itself must exist and load:
+every command ends with the error on a missing or invalid `config.yaml`, at
+the default path too.
 
 ```yaml
 # Persistent data: snapshots, the blob cache and daemon instances.
@@ -900,11 +900,11 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
     node-feature-discovery and Dragonfly's dfinit mount a ConfigMap at their
     binary's default config path. The image carries the default config there.
     Its own settings are the `installer` section of that file. A file that
-    cannot be used keeps the installer settings of the config installed on
-    the host, so the token rotation goes on while the install rejects it.
-  - The installer checks that the host's systemd answers
-    and is 240 or newer before it writes anything to the host, as kubeadm runs
-    its preflight checks first; validates `config.yaml` and every
+    cannot be loaded ends the installer with the error before it writes
+    anything to the host, the service account token included.
+  - The installer checks that the host's systemd answers before it writes
+    anything to the host, as kubeadm runs its preflight checks first;
+    validates `config.yaml` and every
     `hosts.toml` by the rules a daemon start applies, rejects a config whose
     `grpc.addr`, `nydusd.binary`, kubeconfig or certs.d directory is not the
     path it sets up, copies binaries, units and config from its image and
@@ -1007,8 +1007,8 @@ nodeSelector:
 
 - **The snapshotter serves**: its gRPC health check answers `SERVING`
   through the host socket, so with kube_secret the secrets are listed. The
-  socket is the `grpc.addr` of the config installed on the host, read once
-  when the installer starts.
+  socket is the `grpc.addr` of the config the installer loaded when it
+  started, the one it installs.
 - **containerd has loaded it**: the installer never edits containerd's config,
   so a node is only usable once its containerd was restarted with the proxy
   plugin. containerd reads its config only when it starts, and the file a
@@ -1085,9 +1085,10 @@ nodeSelector:
   a node holding the token can list every secret, and a tenant able to create a
   secret carrying the selected label can shadow another's credential. The role
   grants `list` and `watch` only and should be audited.
-- **systemd 240 or newer.** The snapshotter refuses to start against an older
-  systemd instead of failing every daemon start, and the installer fails
-  before it enables the units.
+- **systemd 240 or newer.** Nothing checks the version. An older systemd
+  rejects a unit carrying a property it does not know, and that start fails
+  with systemd's error: `Type=exec` of a preheat before 240, `CollectMode` and
+  `LogExtraFields` of every unit before 236.
 - **nydus of the same release.** Daemon units are `Type=notify`, so a `nydus`
   that sends no `READY=1` fails every start after `mount_timeout`. The image
   and the installer ship both binaries together.
@@ -1126,7 +1127,7 @@ nodeSelector:
   one, so an image of a registry that takes no credential cannot be
   preheated. A preheat cannot be cancelled over the API and waits without
   a bound for a blob a daemon is prefetching; stopping its unit,
-  `nydus-preheat-<chainID>.service`, ends it as failed.
+  `nydusd-preheat-<chainID>.service`, ends it as failed.
 - **Changing `root_dir` or `runtime_dir`** while daemons run loses track of
   them, as changing containerd's own root does; change them on a drained node.
 - **Toolchain support windows.** The module builds with Go 1.25 against

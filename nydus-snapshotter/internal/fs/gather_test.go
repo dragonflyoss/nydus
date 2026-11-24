@@ -136,7 +136,7 @@ func TestFileSystem_Gather(t *testing.T) {
 			other := nydusdmocks.NewMockClient(ctl)
 			tc.mock(client.EXPECT(), other.EXPECT())
 
-			f, _ := newTestFileSystem(t, systemdmocks.NewMockManager(ctl), authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), client)
+			f, _ := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), client)
 			f.newClient = func(socket string) nydusd.Client {
 				if socket == mockOtherInstance.APISocket {
 					return other

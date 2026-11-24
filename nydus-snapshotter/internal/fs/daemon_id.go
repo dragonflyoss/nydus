@@ -21,12 +21,12 @@ const (
 	// unitSuffix is the unit type of a daemon and of a preheat.
 	unitSuffix = ".service"
 
-	// unitPattern matches every daemon unit.
+	// unitPattern matches every daemon unit. It matches the preheat units
+	// too, which daemonIDFromUnit rejects: their names hold no daemon ID.
 	unitPattern = unitPrefix + "*" + unitSuffix
 
-	// preheatUnitPrefix prefixes every preheat unit. It differs from
-	// unitPrefix, so unitPattern matches no preheat.
-	preheatUnitPrefix = "nydus-preheat-"
+	// preheatUnitPrefix prefixes every preheat unit.
+	preheatUnitPrefix = unitPrefix + "preheat-"
 
 	// preheatUnitPattern matches every preheat unit.
 	preheatUnitPattern = preheatUnitPrefix + "*" + unitSuffix

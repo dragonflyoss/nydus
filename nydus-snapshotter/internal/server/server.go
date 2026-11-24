@@ -52,10 +52,6 @@ const (
 	// dialTimeout bounds probing an existing socket for a live server.
 	dialTimeout = time.Second
 
-	// jobTimeoutMargin pads the systemd job timeout over the daemon's stop
-	// timeout.
-	jobTimeoutMargin = 5 * time.Second
-
 	// reloadTimeout bounds applying a reloaded config.
 	reloadTimeout = time.Minute
 
@@ -74,7 +70,7 @@ type Server struct {
 	store store.Store
 
 	// systemd manages daemon units.
-	systemd systemd.Manager
+	systemd systemd.Systemd
 
 	// keychain resolves registry credentials.
 	keychain auth.Keychain
@@ -116,6 +112,14 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 		}
 	}
 
+	// A Pod that mounts runtime_dir before the snapshotter is installed has
+	// kubelet create it 0755: set the mode as containerd does for its own
+	// directories, refer to
+	// https://github.com/containerd/containerd/blob/v2.2.10/cmd/containerd/server/server.go.
+	if err := os.Chmod(cfg.RuntimeDir, 0o700); err != nil {
+		return nil, fmt.Errorf("chmod %s: %w", cfg.RuntimeDir, err)
+	}
+
 	// Rendered daemon configs hold credentials, which stay off persistent
 	// disk only on tmpfs; a failed statfs is caught by the first daemon.
 	var stat unix.Statfs_t
@@ -123,12 +127,9 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 		log.G(ctx).WithField("path", cfg.RuntimeDir).Warn("runtime_dir is not on tmpfs, so rendered daemon configs keep credentials on disk")
 	}
 
-	// A stop job takes up to twice TimeoutStopSec, SIGTERM then SIGKILL,
-	// refer to https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html.
-	jobTimeout := 2*time.Duration(cfg.Nydusd.MountTimeout) + jobTimeoutMargin
 	s := &Server{
 		cfg:     cfg,
-		systemd: systemd.New(jobTimeout),
+		systemd: systemd.New(),
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)

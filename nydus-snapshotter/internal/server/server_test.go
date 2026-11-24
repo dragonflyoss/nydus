@@ -72,6 +72,24 @@ func TestNew(t *testing.T) {
 			},
 		},
 		{
+			name: "runtime dir that exists with another mode",
+			prepare: func(t *testing.T, cfg *config.Config) {
+				assert.NoError(t, os.MkdirAll(cfg.RuntimeDir, 0o755))
+				assert.NoError(t, os.Chmod(cfg.RuntimeDir, 0o755))
+			},
+			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
+				assert := assert.New(t)
+				if !assert.NoError(err) {
+					return
+				}
+
+				defer s.Stop()
+				info, err := os.Stat(cfg.RuntimeDir)
+				assert.NoError(err)
+				assert.Equal(os.FileMode(0o700), info.Mode().Perm())
+			},
+		},
+		{
 			name: "root that cannot be created",
 			prepare: func(t *testing.T, cfg *config.Config) {
 				assert.NoError(t, os.WriteFile(cfg.RootDir, nil, 0o644))

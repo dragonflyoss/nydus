@@ -29,6 +29,18 @@ import (
 // data owner when transform sees the secret again.
 var dataOwnerFields = &metav1.FieldsV1{Raw: []byte(`{"f:data":{}}`)}
 
+// secret is a parsed dockerconfigjson secret.
+type secret struct {
+	// name is the secret's namespace/name.
+	name string
+
+	// updatedAt is when the secret last changed.
+	updatedAt time.Time
+
+	// auths holds the credentials by registry.
+	auths map[string]authConfig
+}
+
 // kubeSecretProvider provides the credentials of the
 // kubernetes.io/dockerconfigjson secrets of every namespace.
 type kubeSecretProvider struct {
@@ -50,18 +62,6 @@ type kubeSecretProvider struct {
 
 	// keyring indexes secrets, nil until a lookup rebuilds it.
 	keyring *keyring
-}
-
-// secret is a parsed dockerconfigjson secret.
-type secret struct {
-	// name is the secret's namespace/name.
-	name string
-
-	// updatedAt is when the secret last changed.
-	updatedAt time.Time
-
-	// auths holds the credentials by registry.
-	auths map[string]authConfig
 }
 
 // newKubeSecretProvider returns a provider whose informer starts with

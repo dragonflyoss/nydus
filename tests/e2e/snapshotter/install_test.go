@@ -307,16 +307,15 @@ func TestInstallKubeSecret(t *testing.T) {
 	}, syncTimeout, 200*time.Millisecond)
 
 	n.stop(t, installer)
-	n.exec(t, "ln", "--symbolic", "/", "/host")
 	installedConfig := n.exec(t, "cat", hostConfig)
 	n.writeConfig(t, "log:\n  level: loud\n")
-	n.write(t, tokenDir+"/token", "rotated by a broken config", 0o600)
+	n.write(t, tokenDir+"/token", "issued after a broken config", 0o600)
 	installer = n.start(t, "KUBERNETES_SERVICE_HOST=10.96.0.1", "KUBERNETES_SERVICE_PORT=443")
 	assert.Eventually(t, func() bool {
 		return strings.Contains(n.journal(installer), "nydus-snapshotter failed")
 	}, installTimeout, 200*time.Millisecond)
 	assert.Contains(t, n.journal(installer), "invalid log.level")
-	assert.Equal(t, "rotated by a broken config", n.exec(t, "cat", kubernetesDir+"/token"))
+	assert.Equal(t, "rotated", n.exec(t, "cat", kubernetesDir+"/token"))
 	assert.Equal(t, installedConfig, n.exec(t, "cat", hostConfig))
 	assert.Equal(t, "active", n.property(t, serviceUnit, "ActiveState"))
 }

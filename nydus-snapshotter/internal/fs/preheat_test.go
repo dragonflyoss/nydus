@@ -27,9 +27,9 @@ import (
 )
 
 var (
-	mockPreheatUnit = "nydus-preheat-" + mockID + ".service"
+	mockPreheatUnit = "nydusd-preheat-" + mockID + ".service"
 
-	mockOtherPreheatUnit = "nydus-preheat-" + mockOtherID + ".service"
+	mockOtherPreheatUnit = "nydusd-preheat-" + mockOtherID + ".service"
 
 	mockPreheatCredential = &PreheatCredential{Username: "user", Password: "pass"}
 
@@ -347,11 +347,11 @@ func TestFileSystem_Preheat(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
 			var fsys atomic.Pointer[fileSystem]
-			tc.mock(mockRecorders{systemd: manager.EXPECT(), fs: &fsys})
+			tc.mock(mockRecorders{systemd: mockSystemd.EXPECT(), fs: &fsys})
 
-			f, image := newTestFileSystem(t, manager, nil, nil, nil)
+			f, image := newTestFileSystem(t, mockSystemd, nil, nil, nil)
 			f.preheats.pollInterval = time.Millisecond
 			fsys.Store(f)
 			tc.expect(t, f, image)
@@ -432,11 +432,11 @@ func TestFileSystem_startPreheat(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
 			var started atomic.Pointer[systemd.Unit]
-			tc.mock(mockRecorders{systemd: manager.EXPECT(), started: &started})
+			tc.mock(mockRecorders{systemd: mockSystemd.EXPECT(), started: &started})
 
-			f, image := newTestFileSystem(t, manager, nil, nil, nil)
+			f, image := newTestFileSystem(t, mockSystemd, nil, nil, nil)
 			tc.expect(t, f, image, &started)
 		})
 	}
@@ -540,7 +540,7 @@ func TestFileSystem_StatPreheat(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			f, _ := newTestFileSystem(t, systemdmocks.NewMockManager(ctl), nil, nil, nil)
+			f, _ := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), nil, nil, nil)
 			tc.prepare(t, f)
 			preheat, err := f.StatPreheat(tc.chainID)
 			tc.expect(t, preheat, err)
@@ -551,12 +551,12 @@ func TestFileSystem_StatPreheat(t *testing.T) {
 func TestFileSystem_recoverPreheats(t *testing.T) {
 	tests := []struct {
 		name   string
-		mock   func(m *systemdmocks.MockManagerMockRecorder)
+		mock   func(m *systemdmocks.MockSystemdMockRecorder)
 		expect func(t *testing.T, f *fileSystem)
 	}{
 		{
 			name: "nothing left by a previous run",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {},
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {},
 			expect: func(t *testing.T, f *fileSystem) {
 				assert := assert.New(t)
 				assert.Empty(f.recoverPreheats(t.Context()))
@@ -564,7 +564,7 @@ func TestFileSystem_recoverPreheats(t *testing.T) {
 		},
 		{
 			name: "watch the unit that outlived the restart",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), gomock.Any(), preheatUnitPattern).Return(map[string]systemd.ActiveState{mockPreheatUnit: systemd.ActiveStateActive}, nil).Times(1)
 				m.ActiveState(gomock.Any(), mockPreheatUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
 			},
@@ -588,7 +588,7 @@ func TestFileSystem_recoverPreheats(t *testing.T) {
 		},
 		{
 			name: "sort out the preheats whose units are gone",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), gomock.Any(), preheatUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem) {
@@ -625,7 +625,7 @@ func TestFileSystem_recoverPreheats(t *testing.T) {
 		},
 		{
 			name: "units that cannot be listed",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), gomock.Any(), preheatUnitPattern).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem) {
@@ -641,10 +641,10 @@ func TestFileSystem_recoverPreheats(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
-			tc.mock(manager.EXPECT())
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
+			tc.mock(mockSystemd.EXPECT())
 
-			f, _ := newTestFileSystem(t, manager, nil, nil, nil)
+			f, _ := newTestFileSystem(t, mockSystemd, nil, nil, nil)
 			f.preheats.pollInterval = time.Millisecond
 			tc.expect(t, f)
 		})

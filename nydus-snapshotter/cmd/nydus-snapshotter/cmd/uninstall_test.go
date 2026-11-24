@@ -31,7 +31,7 @@ func TestUninstallCmd(t *testing.T) {
 			},
 		},
 		{
-			name: "config that was asked for and is missing",
+			name: "config that is missing",
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.ErrorIs(err, fs.ErrNotExist)

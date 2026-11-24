@@ -77,23 +77,6 @@ const (
 	kubeBurst = 100
 )
 
-// prepareNodeLabel reads, once, what labeling the node takes: the socket of
-// the snapshotter from the config installed on the host, and a client of the
-// API server. A failure is the caller's to report and is tried again on the
-// next sync, so it never stops the config and credential sync.
-func (i *Installer) prepareNodeLabel() error {
-	if i.snapshotterAddr == "" {
-		cfg, err := i.cfg.installed()
-		if err != nil {
-			return err
-		}
-
-		i.snapshotterAddr = cfg.GRPC.Addr
-	}
-
-	return i.initKubeClient()
-}
-
 // syncNodeLabel makes NodeLabel follow whether Pods on the node can use the
 // snapshotter, and patches the node only when its label differs, so a label
 // changed behind the installer is put right. The label is kept through a
@@ -105,15 +88,17 @@ func (i *Installer) prepareNodeLabel() error {
 //	                      ├─▶ both ───────────────────▶ d7y.io/nydus-snapshotter=true
 //	containerd loaded it ─┘   else, 3 checks in a row ─▶ label removed
 func (i *Installer) syncNodeLabel(ctx context.Context) error {
-	if !i.cfg.NodeLabel.Enable {
+	if !i.cfg.Installer.NodeLabel.Enable {
 		return nil
 	}
 
-	if err := i.prepareNodeLabel(); err != nil {
+	// A client that cannot be built is tried again on the next sync, so it
+	// never stops the config and credential sync.
+	if err := i.initKubeClient(); err != nil {
 		return err
 	}
 
-	logger := log.G(ctx).WithFields(log.Fields{"node": i.cfg.NodeName, "label": NodeLabel})
+	logger := log.G(ctx).WithFields(log.Fields{"node": i.nodeName, "label": NodeLabel})
 	notReady := ""
 	if err := i.ready(ctx); err != nil {
 		// A check cut short because the installer stops says nothing about
@@ -158,7 +143,7 @@ func (i *Installer) syncNodeLabel(ctx context.Context) error {
 		patch, message = unlabelPatch, "removed node label"
 	}
 
-	if err := i.patchNode(ctx, i.cfg.NodeName, patch); err != nil {
+	if err := i.patchNode(ctx, i.nodeName, patch); err != nil {
 		return err
 	}
 
@@ -215,9 +200,9 @@ func (i *Installer) UnlabelNodes(ctx context.Context) error {
 // https://kubernetes.io/docs/reference/using-api/api-concepts/#semantics-for-get-and-list;
 // a stale answer costs one patch that changes nothing.
 func (i *Installer) nodeLabel(ctx context.Context) (string, bool, error) {
-	node, err := i.kubeClient.CoreV1().Nodes().Get(ctx, i.cfg.NodeName, metav1.GetOptions{ResourceVersion: "0"})
+	node, err := i.kubeClient.CoreV1().Nodes().Get(ctx, i.nodeName, metav1.GetOptions{ResourceVersion: "0"})
 	if err != nil {
-		return "", false, fmt.Errorf("get node %s: %w", i.cfg.NodeName, err)
+		return "", false, fmt.Errorf("get node %s: %w", i.nodeName, err)
 	}
 
 	value, labeled := node.Labels[NodeLabel]
@@ -236,7 +221,7 @@ func (i *Installer) patchNode(ctx context.Context, name, patch string) error {
 // waitServing waits for the snapshotter to serve, so the node is labeled
 // right after the install and not a sync later.
 func (i *Installer) waitServing(ctx context.Context) {
-	if !i.cfg.NodeLabel.Enable || i.prepareNodeLabel() != nil {
+	if !i.cfg.Installer.NodeLabel.Enable || i.initKubeClient() != nil {
 		return
 	}
 
@@ -259,7 +244,7 @@ func (i *Installer) ready(ctx context.Context) error {
 // serving returns nil when the snapshotter on the host answers its gRPC
 // health check with SERVING.
 func (i *Installer) serving(ctx context.Context) error {
-	conn, err := i.dial(i.snapshotterAddr)
+	conn, err := i.dial(i.cfg.GRPC.Addr)
 	if err != nil {
 		return err
 	}
@@ -286,7 +271,7 @@ func (i *Installer) serving(ctx context.Context) error {
 // config file, refer to
 // https://github.com/containerd/nerdctl/blob/main/pkg/infoutil/infoutil.go.
 func (i *Installer) loaded(ctx context.Context) error {
-	conn, err := i.dial(i.cfg.NodeLabel.ContainerdAddr)
+	conn, err := i.dial(i.cfg.Installer.NodeLabel.ContainerdAddr)
 	if err != nil {
 		return err
 	}
@@ -301,7 +286,7 @@ func (i *Installer) loaded(ctx context.Context) error {
 		return fmt.Errorf("list containerd snapshotters: %w", err)
 	}
 
-	socket, err := i.cfg.host(i.snapshotterAddr)
+	socket, err := i.host(i.cfg.GRPC.Addr)
 	if err != nil {
 		return err
 	}
@@ -315,7 +300,7 @@ func (i *Installer) loaded(ctx context.Context) error {
 			continue
 		}
 
-		if path, err := i.cfg.host(address); err != nil || path != socket {
+		if path, err := i.host(address); err != nil || path != socket {
 			continue
 		}
 
@@ -326,14 +311,14 @@ func (i *Installer) loaded(ctx context.Context) error {
 		return nil
 	}
 
-	return fmt.Errorf("containerd has loaded no proxy snapshotter at %s", i.snapshotterAddr)
+	return fmt.Errorf("containerd has loaded no proxy snapshotter at %s", i.cfg.GRPC.Addr)
 }
 
 // dial returns a connection to a unix socket of the host, one per check as
 // kubelet dials per gRPC probe, refer to
 // https://github.com/kubernetes/kubernetes/blob/v1.34.0/pkg/probe/grpc/grpc.go.
 func (i *Installer) dial(socket string) (*grpc.ClientConn, error) {
-	socket, err := i.cfg.host(socket)
+	socket, err := i.host(socket)
 	if err != nil {
 		return nil, err
 	}
@@ -373,8 +358,8 @@ func (i *Installer) newKubeClient() (kubernetes.Interface, error) {
 
 	return kubernetes.NewForConfig(&rest.Config{
 		Host:            server,
-		BearerTokenFile: filepath.Join(i.cfg.TokenDir, "token"),
-		TLSClientConfig: rest.TLSClientConfig{CAFile: filepath.Join(i.cfg.TokenDir, "ca.crt")},
+		BearerTokenFile: filepath.Join(i.cfg.Installer.TokenDir, "token"),
+		TLSClientConfig: rest.TLSClientConfig{CAFile: filepath.Join(i.cfg.Installer.TokenDir, "ca.crt")},
 		QPS:             kubeQPS,
 		Burst:           kubeBurst,
 		Timeout:         requestTimeout,

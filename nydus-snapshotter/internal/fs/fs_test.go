@@ -90,7 +90,7 @@ var (
 )
 
 type mockRecorders struct {
-	systemd  *systemdmocks.MockManagerMockRecorder
+	systemd  *systemdmocks.MockSystemdMockRecorder
 	keychain *authmocks.MockKeychainMockRecorder
 	driver   *MockDriverMockRecorder
 	client   *nydusdmocks.MockClientMockRecorder
@@ -103,13 +103,13 @@ func TestNew(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(t *testing.T, cfg *config.Config)
-		mock    func(m *systemdmocks.MockManagerMockRecorder)
+		mock    func(m *systemdmocks.MockSystemdMockRecorder)
 		expect  func(t *testing.T, cfg *config.Config, f FileSystem, err error)
 	}{
 		{
 			name:    "start the slice and limit the daemons left running",
 			prepare: func(t *testing.T, cfg *config.Config) {},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				gomock.InOrder(
 					m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(math.MaxUint64), nil).Times(1),
 					m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, systemd.Resources{MemoryMax: 8 << 30, MemoryHigh: 6 << 30, CPUQuotaPerSecUSec: 4_000_000}).Return(nil).Times(1),
@@ -131,7 +131,7 @@ func TestNew(t *testing.T) {
 		{
 			name:    "defer slice limits below the current usage",
 			prepare: func(t *testing.T, cfg *config.Config) {},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(9<<30), nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, nil).Times(1)
 			},
@@ -144,7 +144,7 @@ func TestNew(t *testing.T) {
 		{
 			name:    "retry daemon limits that fail on release",
 			prepare: func(t *testing.T, cfg *config.Config) {},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(math.MaxUint64), nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, errors.New("foo")).Times(1)
@@ -158,7 +158,7 @@ func TestNew(t *testing.T) {
 		{
 			name:    "slice that cannot be started",
 			prepare: func(t *testing.T, cfg *config.Config) {},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(math.MaxUint64), nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(errors.New("foo")).Times(1)
 			},
@@ -173,7 +173,7 @@ func TestNew(t *testing.T) {
 			prepare: func(t *testing.T, cfg *config.Config) {
 				cfg.Nydusd.Driver = "virtiofs"
 			},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {},
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {},
 			expect: func(t *testing.T, cfg *config.Config, f FileSystem, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, `unsupported driver "virtiofs"`)
@@ -186,7 +186,7 @@ func TestNew(t *testing.T) {
 			prepare: func(t *testing.T, cfg *config.Config) {
 				assert.NoError(t, os.WriteFile(cfg.RootDir, nil, 0o644))
 			},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {},
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {},
 			expect: func(t *testing.T, cfg *config.Config, f FileSystem, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "create "+cfg.CacheDir())
@@ -199,8 +199,8 @@ func TestNew(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
-			tc.mock(manager.EXPECT())
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
+			tc.mock(mockSystemd.EXPECT())
 
 			root := t.TempDir()
 			cfg := config.New()
@@ -213,7 +213,7 @@ func TestNew(t *testing.T) {
 			assert.NoError(t, err)
 			t.Cleanup(func() { s.Close() })
 
-			f, err := New(t.Context(), cfg, manager, s, authmocks.NewMockKeychain(ctl), &sync.Mutex{})
+			f, err := New(t.Context(), cfg, mockSystemd, s, authmocks.NewMockKeychain(ctl), &sync.Mutex{})
 			tc.expect(t, cfg, f, err)
 		})
 	}
@@ -852,7 +852,7 @@ func TestFileSystem_Mount(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
 			keychain := authmocks.NewMockKeychain(ctl)
 			driver := NewMockDriver(ctl)
 			client := nydusdmocks.NewMockClient(ctl)
@@ -862,9 +862,9 @@ func TestFileSystem_Mount(t *testing.T) {
 				fsys    atomic.Pointer[fileSystem]
 			)
 			expectDriver(driver, &mounted)
-			tc.mock(mockRecorders{systemd: manager.EXPECT(), keychain: keychain.EXPECT(), driver: driver.EXPECT(), client: client.EXPECT(), started: &started, fs: &fsys}, &mounted)
+			tc.mock(mockRecorders{systemd: mockSystemd.EXPECT(), keychain: keychain.EXPECT(), driver: driver.EXPECT(), client: client.EXPECT(), started: &started, fs: &fsys}, &mounted)
 
-			f, image := newTestFileSystem(t, manager, keychain, driver, client)
+			f, image := newTestFileSystem(t, mockSystemd, keychain, driver, client)
 			fsys.Store(f)
 			tc.expect(t, f, image, &started)
 		})
@@ -1305,7 +1305,7 @@ func TestFileSystem_Release(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
 			driver := NewMockDriver(ctl)
 			client := nydusdmocks.NewMockClient(ctl)
 			mounted := &atomic.Bool{}
@@ -1313,9 +1313,9 @@ func TestFileSystem_Release(t *testing.T) {
 			expectDriver(driver, mounted)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			tc.mock(mockRecorders{systemd: manager.EXPECT(), driver: driver.EXPECT(), client: client.EXPECT(), cancel: cancel})
+			tc.mock(mockRecorders{systemd: mockSystemd.EXPECT(), driver: driver.EXPECT(), client: client.EXPECT(), cancel: cancel})
 
-			f, _ := newTestFileSystem(t, manager, authmocks.NewMockKeychain(ctl), driver, client)
+			f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), driver, client)
 			id, err := daemonIDFromChainID(mockChainID)
 			assert.NoError(t, err)
 			if tc.unresponsive {
@@ -1386,7 +1386,7 @@ func TestFileSystem_MountRelease(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
 			keychain := authmocks.NewMockKeychain(ctl)
 			driver := NewMockDriver(ctl)
 			client := nydusdmocks.NewMockClient(ctl)
@@ -1401,25 +1401,25 @@ func TestFileSystem_MountRelease(t *testing.T) {
 
 				return systemd.ActiveStateInactive, nil
 			}
-			manager.EXPECT().ActiveState(gomock.Any(), mockUnit).DoAndReturn(state).AnyTimes()
-			manager.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).DoAndReturn(func(ctx context.Context, _, _ string) (map[string]systemd.ActiveState, error) {
+			mockSystemd.EXPECT().ActiveState(gomock.Any(), mockUnit).DoAndReturn(state).AnyTimes()
+			mockSystemd.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).DoAndReturn(func(ctx context.Context, _, _ string) (map[string]systemd.ActiveState, error) {
 				active, err := state(ctx, mockUnit)
 				return map[string]systemd.ActiveState{mockUnit: active}, err
 			}).AnyTimes()
-			manager.EXPECT().StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
+			mockSystemd.EXPECT().StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 				close(starting)
 				<-proceed
 				mounted.Store(true)
 				return nil
 			}).Times(1)
-			manager.EXPECT().StopUnit(gomock.Any(), gomock.Any()).Times(0)
+			mockSystemd.EXPECT().StopUnit(gomock.Any(), gomock.Any()).Times(0)
 			keychain.EXPECT().Synced().Return(true).AnyTimes()
 			keychain.EXPECT().Resolve(gomock.Any(), gomock.Any()).Return("", nil).AnyTimes()
 			driver.EXPECT().Unmount(gomock.Any()).Return(nil).AnyTimes()
 			client.EXPECT().Ready(gomock.Any()).Return(nil).AnyTimes()
 			client.EXPECT().Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
 
-			f, image := newTestFileSystem(t, manager, keychain, driver, client)
+			f, image := newTestFileSystem(t, mockSystemd, keychain, driver, client)
 			tc.expect(t, f, image, starting, proceed)
 		})
 	}
@@ -1429,13 +1429,13 @@ func TestFileSystem_ReleaseConcurrent(t *testing.T) {
 	tests := []struct {
 		name   string
 		count  int
-		mock   func(m *systemdmocks.MockManagerMockRecorder, ids []daemonID, stopping *atomic.Int32, proceed <-chan struct{})
+		mock   func(m *systemdmocks.MockSystemdMockRecorder, ids []daemonID, stopping *atomic.Int32, proceed <-chan struct{})
 		expect func(t *testing.T, f *fileSystem, ids []daemonID, stopping int32, err error)
 	}{
 		{
 			name:  "stop unused daemons at once within the limit",
 			count: 2 * daemonConcurrency,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, ids []daemonID, stopping *atomic.Int32, proceed <-chan struct{}) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, ids []daemonID, stopping *atomic.Int32, proceed <-chan struct{}) {
 				m.StopUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, string) error {
 					stopping.Add(1)
 					<-proceed
@@ -1454,7 +1454,7 @@ func TestFileSystem_ReleaseConcurrent(t *testing.T) {
 		{
 			name:  "report every daemon that fails to stop and stop the others",
 			count: 3,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, ids []daemonID, stopping *atomic.Int32, proceed <-chan struct{}) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, ids []daemonID, stopping *atomic.Int32, proceed <-chan struct{}) {
 				m.StopUnit(gomock.Any(), ids[0].Unit()).Return(errors.New("foo")).Times(1)
 				m.StopUnit(gomock.Any(), ids[1].Unit()).Return(errors.New("bar")).Times(1)
 				m.StopUnit(gomock.Any(), ids[2].Unit()).Return(nil).Times(1)
@@ -1477,7 +1477,7 @@ func TestFileSystem_ReleaseConcurrent(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				ctl := gomock.NewController(t)
 				defer ctl.Finish()
-				manager := systemdmocks.NewMockManager(ctl)
+				mockSystemd := systemdmocks.NewMockSystemd(ctl)
 				driver := NewMockDriver(ctl)
 				expectDriver(driver, &atomic.Bool{})
 				driver.EXPECT().Unmount(gomock.Any()).Return(nil).AnyTimes()
@@ -1492,11 +1492,11 @@ func TestFileSystem_ReleaseConcurrent(t *testing.T) {
 				}
 
 				stopping, proceed := &atomic.Int32{}, make(chan struct{})
-				manager.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(units, nil).Times(1)
-				manager.EXPECT().ActiveState(gomock.Any(), gomock.Any()).Return(systemd.ActiveStateActive, nil).Times(tc.count)
-				tc.mock(manager.EXPECT(), ids, stopping, proceed)
+				mockSystemd.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(units, nil).Times(1)
+				mockSystemd.EXPECT().ActiveState(gomock.Any(), gomock.Any()).Return(systemd.ActiveStateActive, nil).Times(tc.count)
+				tc.mock(mockSystemd.EXPECT(), ids, stopping, proceed)
 
-				f, _ := newTestFileSystem(t, manager, authmocks.NewMockKeychain(ctl), driver, nydusdmocks.NewMockClient(ctl))
+				f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), driver, nydusdmocks.NewMockClient(ctl))
 				for _, id := range ids {
 					assert.NoError(t, f.store.PutInstance(f.daemon(f.cfg.Load(), id).Instance))
 				}
@@ -1520,13 +1520,13 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		name      string
 		instances []*store.Instance
 		closed    bool
-		mock      func(m *systemdmocks.MockManagerMockRecorder)
+		mock      func(m *systemdmocks.MockSystemdMockRecorder)
 		expect    func(t *testing.T, blobs map[string]struct{}, err error)
 	}{
 		{
 			name:      "blobs of every recorded daemon",
 			instances: []*store.Instance{{ChainID: mockChainID, Unit: mockUnit, Blobs: []string{"aaaa", "bbbb"}}},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
@@ -1537,7 +1537,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		},
 		{
 			name: "no blobs without records",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
@@ -1548,7 +1548,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		},
 		{
 			name: "daemon running without a record",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
@@ -1559,7 +1559,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		},
 		{
 			name: "stopped unit without a record",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateFailed}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
@@ -1570,7 +1570,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		},
 		{
 			name: "units cannot be listed",
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
@@ -1583,7 +1583,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 			name:      "records cannot be read",
 			instances: []*store.Instance{{ChainID: mockChainID, Unit: mockUnit, Blobs: []string{"aaaa"}}},
 			closed:    true,
-			mock:      func(m *systemdmocks.MockManagerMockRecorder) {},
+			mock:      func(m *systemdmocks.MockSystemdMockRecorder) {},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
 				assert.Error(err)
@@ -1593,7 +1593,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		{
 			name:      "unit that is no daemon",
 			instances: []*store.Instance{{ChainID: mockChainID, Unit: mockUnit, Blobs: []string{"aaaa"}}},
-			mock: func(m *systemdmocks.MockManagerMockRecorder) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive, "nydusd-helper.service": systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
@@ -1608,10 +1608,10 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
-			tc.mock(manager.EXPECT())
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
+			tc.mock(mockSystemd.EXPECT())
 
-			f, _ := newTestFileSystem(t, manager, authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), nydusdmocks.NewMockClient(ctl))
+			f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), nydusdmocks.NewMockClient(ctl))
 			for _, instance := range tc.instances {
 				assert.NoError(t, f.store.PutInstance(instance))
 			}
@@ -1662,7 +1662,7 @@ func expectDriver(driver *MockDriver, mounted *atomic.Bool) {
 	driver.EXPECT().Mounted(gomock.Any()).DoAndReturn(func(*Daemon) (bool, error) { return mounted.Load(), nil }).AnyTimes()
 }
 
-func newTestFileSystem(t *testing.T, manager systemd.Manager, keychain *authmocks.MockKeychain, driver Driver, client nydusd.Client) (*fileSystem, *Image) {
+func newTestFileSystem(t *testing.T, systemd systemd.Systemd, keychain *authmocks.MockKeychain, driver Driver, client nydusd.Client) (*fileSystem, *Image) {
 	t.Helper()
 	root := t.TempDir()
 	cfg := config.New()
@@ -1686,7 +1686,7 @@ func newTestFileSystem(t *testing.T, manager systemd.Manager, keychain *authmock
 	t.Cleanup(func() { s.Close() })
 
 	f := &fileSystem{
-		systemd:   manager,
+		systemd:   systemd,
 		store:     s,
 		keychain:  keychain,
 		hosts:     registry.NewHosts(""),

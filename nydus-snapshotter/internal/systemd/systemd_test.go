@@ -9,6 +9,7 @@ package systemd
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -25,8 +26,6 @@ import (
 )
 
 var (
-	mockJobTimeout = 30 * time.Second
-
 	mockUnknownUnit = "nydus-test-unknown.service"
 
 	mockInvalidUnit = "nydus test.service"
@@ -142,64 +141,80 @@ func TestActiveState_Stopped(t *testing.T) {
 	}
 }
 
-func TestManager_StartTransientUnit(t *testing.T) {
+func TestSystemd_StartTransientUnit(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, unit *Unit)
+		expect func(t *testing.T, s Systemd, unit *Unit)
 	}{
 		{
 			name: "start a unit",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				state, err := m.ActiveState(t.Context(), unit.Name)
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				state, err := s.ActiveState(t.Context(), unit.Name)
 				assert.NoError(err)
 				assert.Equal(ActiveStateActive, state)
 			},
 		},
 		{
 			name: "refuse a running unit",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				assert.ErrorIs(m.StartTransientUnit(t.Context(), unit), errdefs.ErrAlreadyExists)
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				assert.ErrorIs(s.StartTransientUnit(t.Context(), unit), errdefs.ErrAlreadyExists)
+			},
+		},
+		{
+			name: "start again a failed unit holding the name",
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
+				assert := assert.New(t)
+				assert.NoError(exec.Command("systemd-run", "--unit", unit.Name, "false").Run())
+				assert.Eventually(func() bool {
+					state, err := s.ActiveState(t.Context(), unit.Name)
+					return err == nil && state == ActiveStateFailed
+				}, 10*time.Second, 10*time.Millisecond)
+
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				state, err := s.ActiveState(t.Context(), unit.Name)
+				assert.NoError(err)
+				assert.Equal(ActiveStateActive, state)
 			},
 		},
 		{
 			name: "unit without a command",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
 				unit.ExecStart = nil
-				assert.ErrorIs(m.StartTransientUnit(t.Context(), unit), errdefs.ErrInvalidArgument)
+				assert.ErrorIs(s.StartTransientUnit(t.Context(), unit), errdefs.ErrInvalidArgument)
 			},
 		},
 		{
 			name: "unit whose command is missing",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
 				unit.ExecStart = []string{"/nonexistent/nydus-test"}
-				assert.EqualError(m.StartTransientUnit(t.Context(), unit), fmt.Sprintf("start unit %s: job finished with %q", unit.Name, "failed"))
+				assert.EqualError(s.StartTransientUnit(t.Context(), unit), fmt.Sprintf("start unit %s: job finished with %q", unit.Name, "failed"))
 			},
 		},
 		{
 			name: "notify unit that never reports ready",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
 				unit.Notify = true
 				unit.TimeoutStart = 300 * time.Millisecond
-				assert.ErrorContains(m.StartTransientUnit(t.Context(), unit), "finished with")
-				state, err := m.ActiveState(t.Context(), unit.Name)
+				assert.ErrorContains(s.StartTransientUnit(t.Context(), unit), "finished with")
+				state, err := s.ActiveState(t.Context(), unit.Name)
 				assert.NoError(err)
 				assert.NotEqual(ActiveStateActive, state)
 			},
 		},
 		{
 			name: "unit file holding the name",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
 				unit.Name = newSocketActivated(t).service
-				assert.ErrorContains(m.StartTransientUnit(t.Context(), unit), "start unit "+unit.Name)
-				state, err := m.ActiveState(t.Context(), unit.Name)
+				assert.ErrorContains(s.StartTransientUnit(t.Context(), unit), "start unit "+unit.Name)
+				state, err := s.ActiveState(t.Context(), unit.Name)
 				assert.NoError(err)
 				assert.Equal(ActiveStateInactive, state)
 			},
@@ -208,110 +223,110 @@ func TestManager_StartTransientUnit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
-			tc.expect(t, m, newTestUnit(t))
+			s := newTestSystemd(t)
+			tc.expect(t, s, newTestUnit(t))
 		})
 	}
 }
 
-func TestManager_StopUnit(t *testing.T) {
+func TestSystemd_StopUnit(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, unit *Unit)
+		expect func(t *testing.T, s Systemd, unit *Unit)
 	}{
 		{
 			name: "stop a running unit",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				assert.NoError(m.StopUnit(t.Context(), unit.Name))
-				state, err := m.ActiveState(t.Context(), unit.Name)
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				assert.NoError(s.StopUnit(t.Context(), unit.Name))
+				state, err := s.ActiveState(t.Context(), unit.Name)
 				assert.NoError(err)
 				assert.Equal(ActiveStateInactive, state)
 			},
 		},
 		{
 			name: "stop an unknown unit",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StopUnit(t.Context(), unit.Name))
+				assert.NoError(s.StopUnit(t.Context(), unit.Name))
 			},
 		},
 		{
 			name: "stop a unit with an invalid name",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.StopUnit(t.Context(), mockInvalidUnit), "stop unit "+mockInvalidUnit)
+				assert.ErrorContains(s.StopUnit(t.Context(), mockInvalidUnit), "stop unit "+mockInvalidUnit)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestManager(t), newTestUnit(t))
+			tc.expect(t, newTestSystemd(t), newTestUnit(t))
 		})
 	}
 }
 
-func TestManager_confirmStopped(t *testing.T) {
+func TestSystemd_confirmStopped(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m *manager, unit *Unit)
+		expect func(t *testing.T, s *systemd, unit *Unit)
 	}{
 		{
 			name: "unit a failed stop job left running",
-			expect: func(t *testing.T, m *manager, unit *Unit) {
+			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				assert.ErrorContains(m.confirmStopped(t.Context(), unit.Name, &jobError{result: "canceled"}), "left it active")
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				assert.ErrorContains(s.confirmStopped(t.Context(), unit.Name, &jobError{result: "canceled"}), "left it active")
 			},
 		},
 		{
 			name: "unit a failed stop job stopped",
-			expect: func(t *testing.T, m *manager, unit *Unit) {
+			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.confirmStopped(t.Context(), unit.Name, &jobError{result: "failed"}))
+				assert.NoError(s.confirmStopped(t.Context(), unit.Name, &jobError{result: "failed"}))
 			},
 		},
 		{
 			name: "unit whose state cannot be read",
-			expect: func(t *testing.T, m *manager, unit *Unit) {
+			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.confirmStopped(t.Context(), mockInvalidUnit, &jobError{result: "failed"}), "get unit "+mockInvalidUnit+" state")
+				assert.ErrorContains(s.confirmStopped(t.Context(), mockInvalidUnit, &jobError{result: "failed"}), "get unit "+mockInvalidUnit+" state")
 			},
 		},
 		{
 			name: "unit that cannot be reset",
-			expect: func(t *testing.T, m *manager, unit *Unit) {
+			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.Ping(t.Context()))
+				assert.NoError(s.Ping(t.Context()))
 				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
-				assert.ErrorContains(m.confirmStopped(ctx, unit.Name, &jobError{result: "failed"}), "reset failed unit "+unit.Name)
+				assert.ErrorContains(s.confirmStopped(ctx, unit.Name, &jobError{result: "failed"}), "reset failed unit "+unit.Name)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestManager(t).(*manager), newTestUnit(t))
+			tc.expect(t, newTestSystemd(t).(*systemd), newTestUnit(t))
 		})
 	}
 }
 
-func TestManager_StartUnit(t *testing.T) {
+func TestSystemd_StartUnit(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, units *socketActivated)
+		expect func(t *testing.T, s Systemd, units *socketActivated)
 	}{
 		{
 			name: "start a unit and leave it alone once it runs",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.NoError(m.StartUnit(t.Context(), units.socket))
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				state, err := m.ActiveState(t.Context(), units.service)
+				assert.NoError(s.StartUnit(t.Context(), units.socket))
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				state, err := s.ActiveState(t.Context(), units.service)
 				assert.NoError(err)
 				assert.Equal(ActiveStateActive, state)
 				assert.Equal(1, units.starts(t))
@@ -319,13 +334,13 @@ func TestManager_StartUnit(t *testing.T) {
 		},
 		{
 			name: "wait for the restart a restarted socket gives its running service",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.NoError(m.StartUnit(t.Context(), units.socket))
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				assert.NoError(m.RestartUnit(t.Context(), units.socket))
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				state, err := m.ActiveState(t.Context(), units.service)
+				assert.NoError(s.StartUnit(t.Context(), units.socket))
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				assert.NoError(s.RestartUnit(t.Context(), units.socket))
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				state, err := s.ActiveState(t.Context(), units.service)
 				assert.NoError(err)
 				assert.Equal(ActiveStateActive, state)
 				assert.Equal(2, units.starts(t))
@@ -333,14 +348,14 @@ func TestManager_StartUnit(t *testing.T) {
 		},
 		{
 			name: "leave a service alone that its restarted socket is starting again",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.NoError(m.StartUnit(t.Context(), units.socket))
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				assert.NoError(m.RestartUnit(t.Context(), units.socket))
+				assert.NoError(s.StartUnit(t.Context(), units.socket))
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				assert.NoError(s.RestartUnit(t.Context(), units.socket))
 				assert.Eventually(func() bool { return units.starts(t) == 2 }, 5*time.Second, 10*time.Millisecond)
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				state, err := m.ActiveState(t.Context(), units.service)
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				state, err := s.ActiveState(t.Context(), units.service)
 				assert.NoError(err)
 				assert.Equal(ActiveStateActive, state)
 				assert.Equal(2, units.starts(t))
@@ -348,53 +363,53 @@ func TestManager_StartUnit(t *testing.T) {
 		},
 		{
 			name: "unknown unit",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.StartUnit(t.Context(), mockUnknownUnit), "start unit "+mockUnknownUnit)
+				assert.ErrorContains(s.StartUnit(t.Context(), mockUnknownUnit), "start unit "+mockUnknownUnit)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
-			tc.expect(t, m, newSocketActivated(t))
+			s := newTestSystemd(t)
+			tc.expect(t, s, newSocketActivated(t))
 		})
 	}
 }
 
-func TestManager_RestartUnit(t *testing.T) {
+func TestSystemd_RestartUnit(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, units *socketActivated)
+		expect func(t *testing.T, s Systemd, units *socketActivated)
 	}{
 		{
 			name: "restart a running unit",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.NoError(m.StartUnit(t.Context(), units.service))
-				assert.NoError(m.RestartUnit(t.Context(), units.service))
+				assert.NoError(s.StartUnit(t.Context(), units.service))
+				assert.NoError(s.RestartUnit(t.Context(), units.service))
 				assert.Equal(2, units.starts(t))
 			},
 		},
 		{
 			name: "unknown unit",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.RestartUnit(t.Context(), mockUnknownUnit), "restart unit "+mockUnknownUnit)
+				assert.ErrorContains(s.RestartUnit(t.Context(), mockUnknownUnit), "restart unit "+mockUnknownUnit)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
-			tc.expect(t, m, newSocketActivated(t))
+			s := newTestSystemd(t)
+			tc.expect(t, s, newSocketActivated(t))
 		})
 	}
 }
 
-func TestManager_ActiveState(t *testing.T) {
+func TestSystemd_ActiveState(t *testing.T) {
 	tests := []struct {
 		name   string
 		unit   string
@@ -422,13 +437,13 @@ func TestManager_ActiveState(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := newTestManager(t).ActiveState(t.Context(), tc.unit)
+			state, err := newTestSystemd(t).ActiveState(t.Context(), tc.unit)
 			tc.expect(t, state, err)
 		})
 	}
 }
 
-func TestManager_ListUnits(t *testing.T) {
+func TestSystemd_ListUnits(t *testing.T) {
 	tests := []struct {
 		name     string
 		slice    func(unit *Unit) string
@@ -481,8 +496,8 @@ func TestManager_ListUnits(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m, unit := newTestManager(t), newTestUnit(t)
-			assert.NoError(t, m.StartTransientUnit(t.Context(), unit))
+			s, unit := newTestSystemd(t), newTestUnit(t)
+			assert.NoError(t, s.StartTransientUnit(t.Context(), unit))
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -490,96 +505,115 @@ func TestManager_ListUnits(t *testing.T) {
 				cancel()
 			}
 
-			units, err := m.ListUnits(ctx, tc.slice(unit), tc.pattern)
+			units, err := s.ListUnits(ctx, tc.slice(unit), tc.pattern)
 			tc.expect(t, unit, units, err)
 		})
 	}
 }
 
-func TestManager_StartSlice(t *testing.T) {
+func TestSystemd_StartSlice(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, slice string)
+		expect func(t *testing.T, s Systemd, slice string)
 	}{
 		{
 			name: "start a slice and change its limits",
-			expect: func(t *testing.T, m Manager, slice string) {
+			expect: func(t *testing.T, s Systemd, slice string) {
 				assert := assert.New(t)
-				assert.NoError(m.StartSlice(t.Context(), slice, "nydus-snapshotter unit test", Resources{MemoryHigh: 1 << 30}))
-				_, err := m.MemoryCurrent(t.Context(), slice)
+				assert.NoError(s.StartSlice(t.Context(), slice, "nydus-snapshotter unit test", Resources{MemoryHigh: 1 << 30}))
+				_, err := s.MemoryCurrent(t.Context(), slice)
 				assert.NoError(err)
-				assert.NoError(m.StartSlice(t.Context(), slice, "nydus-snapshotter unit test", Resources{MemoryHigh: 2 << 30, CPUQuotaPerSecUSec: 500_000}))
+				assert.NoError(s.StartSlice(t.Context(), slice, "nydus-snapshotter unit test", Resources{MemoryHigh: 2 << 30, CPUQuotaPerSecUSec: 500_000}))
+				var high uint64
+				assert.NoError(s.(*systemd).unitProperty(t.Context(), slice, sliceInterface, "MemoryHigh", &high))
+				assert.Equal(uint64(2<<30), high)
+
+				assert.NoError(s.StartSlice(t.Context(), slice, "nydus-snapshotter unit test", Resources{}))
+				assert.NoError(s.(*systemd).unitProperty(t.Context(), slice, sliceInterface, "MemoryHigh", &high))
+				assert.Equal(uint64(math.MaxUint64), high)
 			},
 		},
 		{
 			name: "invalid slice name",
-			expect: func(t *testing.T, m Manager, slice string) {
+			expect: func(t *testing.T, s Systemd, slice string) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.StartSlice(t.Context(), "nydus test.slice", "nydus-snapshotter unit test", Resources{}), "start slice nydus test.slice")
+				assert.ErrorContains(s.StartSlice(t.Context(), "nydus test.slice", "nydus-snapshotter unit test", Resources{}), "start slice nydus test.slice")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
+			s := newTestSystemd(t)
 			slice := "nydustest" + strconv.Itoa(os.Getpid()) + ".slice"
-			t.Cleanup(func() { assert.NoError(t, m.StopUnit(context.Background(), slice)) })
-			tc.expect(t, m, slice)
+			t.Cleanup(func() { assert.NoError(t, s.StopUnit(context.Background(), slice)) })
+			tc.expect(t, s, slice)
 		})
 	}
 }
 
-func TestManager_SetResources(t *testing.T) {
+func TestSystemd_SetResources(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, unit *Unit)
+		expect func(t *testing.T, s Systemd, unit *Unit)
 	}{
 		{
 			name: "limit a running unit",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				assert.NoError(m.SetResources(t.Context(), unit.Name, Resources{MemoryHigh: 1 << 30}))
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				assert.NoError(s.SetResources(t.Context(), unit.Name, Resources{MemoryHigh: 1 << 30}))
+				var high uint64
+				assert.NoError(s.(*systemd).unitProperty(t.Context(), unit.Name, serviceInterface, "MemoryHigh", &high))
+				assert.Equal(uint64(1<<30), high)
 			},
 		},
 		{
 			name: "unknown unit",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.SetResources(t.Context(), mockUnknownUnit, Resources{MemoryHigh: 1 << 30}), "set unit "+mockUnknownUnit+" resources")
+				assert.ErrorContains(s.SetResources(t.Context(), mockUnknownUnit, Resources{MemoryHigh: 1 << 30}), "set unit "+mockUnknownUnit+" resources")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
-			tc.expect(t, m, newTestUnit(t))
+			s := newTestSystemd(t)
+			tc.expect(t, s, newTestUnit(t))
 		})
 	}
 }
 
-func TestManager_MemoryCurrent(t *testing.T) {
+func TestSystemd_MemoryCurrent(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, unit *Unit)
+		expect func(t *testing.T, s Systemd, unit *Unit)
 	}{
 		{
 			name: "memory of a slice",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				_, err := m.MemoryCurrent(t.Context(), unit.Slice)
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				_, err := s.MemoryCurrent(t.Context(), unit.Slice)
 				assert.NoError(err)
 			},
 		},
 		{
-			name: "unit that is no slice",
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			name: "slice that is not loaded",
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(m.StartTransientUnit(t.Context(), unit))
-				_, err := m.MemoryCurrent(t.Context(), unit.Name)
+				current, err := s.MemoryCurrent(t.Context(), "nydustest-unknown.slice")
+				assert.NoError(err)
+				assert.Equal(uint64(math.MaxUint64), current)
+			},
+		},
+		{
+			name: "unit that is no slice",
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
+				assert := assert.New(t)
+				assert.NoError(s.StartTransientUnit(t.Context(), unit))
+				_, err := s.MemoryCurrent(t.Context(), unit.Name)
 				assert.ErrorContains(err, "get slice "+unit.Name+" memory")
 			},
 		},
@@ -587,88 +621,99 @@ func TestManager_MemoryCurrent(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
-			tc.expect(t, m, newTestUnit(t))
+			s := newTestSystemd(t)
+			tc.expect(t, s, newTestUnit(t))
 		})
 	}
 }
 
-func TestManager_EnableUnitFiles(t *testing.T) {
+func TestSystemd_EnableUnitFiles(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m Manager, units *socketActivated)
+		expect func(t *testing.T, s Systemd, units *socketActivated)
 	}{
 		{
 			name: "unit file without install config",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.NoError(m.EnableUnitFiles(t.Context(), []string{units.socket, units.service}))
+				assert.NoError(s.EnableUnitFiles(t.Context(), []string{units.socket, units.service}))
 			},
 		},
 		{
 			name: "missing unit file",
-			expect: func(t *testing.T, m Manager, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, units *socketActivated) {
 				assert := assert.New(t)
-				assert.ErrorContains(m.EnableUnitFiles(t.Context(), []string{mockUnknownUnit}), "enable unit files ["+mockUnknownUnit+"]")
+				assert.ErrorContains(s.EnableUnitFiles(t.Context(), []string{mockUnknownUnit}), "enable unit files ["+mockUnknownUnit+"]")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager(t)
-			tc.expect(t, m, newSocketActivated(t))
+			s := newTestSystemd(t)
+			tc.expect(t, s, newSocketActivated(t))
 		})
 	}
 }
 
-func TestManager_Ping(t *testing.T) {
+func TestSystemd_Ping(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, m *manager)
+		expect func(t *testing.T, s *systemd)
 	}{
 		{
 			name: "connect once",
-			expect: func(t *testing.T, m *manager) {
+			expect: func(t *testing.T, s *systemd) {
 				assert := assert.New(t)
-				assert.NoError(m.Ping(t.Context()))
-				conn := m.conn
+				assert.NoError(s.Ping(t.Context()))
+				conn := s.conn
 				assert.NotNil(conn)
-				assert.NoError(m.Ping(t.Context()))
-				assert.Same(conn, m.conn)
+				assert.NoError(s.Ping(t.Context()))
+				assert.Same(conn, s.conn)
+			},
+		},
+		{
+			name: "reconnect once the connection is closed",
+			expect: func(t *testing.T, s *systemd) {
+				assert := assert.New(t)
+				assert.NoError(s.Ping(t.Context()))
+				closed := s.conn
+				closed.Close()
+				assert.Eventually(func() bool { return s.Ping(t.Context()) == nil }, 5*time.Second, 10*time.Millisecond)
+				assert.NotSame(closed, s.conn)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestManager(t).(*manager))
+			tc.expect(t, newTestSystemd(t).(*systemd))
 		})
 	}
 }
 
-func TestManager_runJob(t *testing.T) {
+func TestSystemd_runJob(t *testing.T) {
 	tests := []struct {
 		name       string
 		jobTimeout time.Duration
-		expect     func(t *testing.T, m Manager, unit *Unit)
+		expect     func(t *testing.T, s Systemd, unit *Unit)
 	}{
 		{
 			name:       "job slower than the job timeout",
 			jobTimeout: 50 * time.Millisecond,
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.ErrorIs(m.StartTransientUnit(t.Context(), unit), context.DeadlineExceeded)
+				assert.ErrorIs(s.StartTransientUnit(t.Context(), unit), context.DeadlineExceeded)
 			},
 		},
 		{
 			name:       "request canceled while the job runs",
-			jobTimeout: mockJobTimeout,
-			expect: func(t *testing.T, m Manager, unit *Unit) {
+			jobTimeout: defaultJobTimeout,
+			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
 				ctx, cancel := context.WithCancel(t.Context())
 				defer time.AfterFunc(50*time.Millisecond, cancel).Stop()
-				assert.ErrorIs(m.StartTransientUnit(ctx, unit), context.Canceled)
+				assert.ErrorIs(s.StartTransientUnit(ctx, unit), context.Canceled)
 			},
 		},
 	}
@@ -676,22 +721,23 @@ func TestManager_runJob(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			testutil.RequireSystemd(t)
-			m := New(tc.jobTimeout)
-			t.Cleanup(m.Close)
+			s := New().(*systemd)
+			s.jobTimeout = tc.jobTimeout
+			t.Cleanup(s.Close)
 			unit := newTestUnit(t)
 			unit.Notify = true
 			unit.TimeoutStart = 5 * time.Second
-			tc.expect(t, m, unit)
+			tc.expect(t, s, unit)
 		})
 	}
 }
 
-func newTestManager(t *testing.T) Manager {
+func newTestSystemd(t *testing.T) Systemd {
 	t.Helper()
 	testutil.RequireSystemd(t)
-	m := New(mockJobTimeout)
-	t.Cleanup(m.Close)
-	return m
+	s := New()
+	t.Cleanup(s.Close)
+	return s
 }
 
 type socketActivated struct {
@@ -720,10 +766,10 @@ func newSocketActivated(t *testing.T) *socketActivated {
 
 	reload := func() { assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run()) }
 	t.Cleanup(func() {
-		m := New(mockJobTimeout)
-		defer m.Close()
-		assert.NoError(t, m.StopUnit(context.Background(), units.service))
-		assert.NoError(t, m.StopUnit(context.Background(), units.socket))
+		s := New()
+		defer s.Close()
+		assert.NoError(t, s.StopUnit(context.Background(), units.service))
+		assert.NoError(t, s.StopUnit(context.Background(), units.socket))
 		for file := range files {
 			assert.NoError(t, os.Remove(filepath.Join("/run/systemd/system", file)))
 		}
@@ -754,10 +800,10 @@ func newTestUnit(t *testing.T) *Unit {
 	}
 
 	t.Cleanup(func() {
-		m := New(mockJobTimeout)
-		defer m.Close()
-		assert.NoError(t, m.StopUnit(context.Background(), unit.Name))
-		assert.NoError(t, m.StopUnit(context.Background(), unit.Slice))
+		s := New()
+		defer s.Close()
+		assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+		assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
 	})
 
 	return unit

@@ -52,9 +52,6 @@ const (
 	preheatRetention = 24 * time.Hour
 )
 
-// PreheatState is the state of a preheat.
-type PreheatState string
-
 const (
 	// PreheatStatePending is a preheat waiting for a slot.
 	PreheatStatePending PreheatState = "pending"
@@ -70,6 +67,9 @@ const (
 	// failed.
 	PreheatStateFailed PreheatState = "failed"
 )
+
+// PreheatState is the state of a preheat.
+type PreheatState string
 
 // PreheatCredential is the registry credential of one preheat: a username
 // and a password, or a bearer token.
@@ -251,7 +251,7 @@ func (q *preheatQueue) remove(job *preheatJob) {
 // credential is not used; a finished one is replaced.
 //
 //	Preheat ─▶ pending ─▶ running ─▶ succeeded or failed, kept 24h
-//	             │ a slot    │ nydus-preheat-<id>.service exits
+//	             │ a slot    │ nydusd-preheat-<id>.service exits
 func (f *fileSystem) Preheat(ctx context.Context, image *Image, credential *PreheatCredential) error {
 	id, err := daemonIDFromChainID(image.ChainID)
 	if err != nil {
@@ -516,7 +516,7 @@ func (f *fileSystem) runPreheat(ctx context.Context, job *preheatJob) {
 	log.G(ctx).WithField("unit", unit).Info("preheat is running")
 
 	// The poll fails only once the snapshotter stops. A failed check counts
-	// as still running: the manager reconnects to systemd.
+	// as still running: the connection to systemd is made again.
 	if err := wait.PollUntilContextCancel(ctx, f.preheats.pollInterval, false, func(ctx context.Context) (bool, error) {
 		state, err := f.systemd.ActiveState(ctx, unit)
 		return err == nil && state.Stopped(), nil
@@ -606,7 +606,7 @@ func (f *fileSystem) preheatUnit(cfg *config.Config, id daemonID, ref *registry.
 		Environment:      []string{"NYDUS_PREHEAT_CONSOLE=false"},
 		TimeoutStop:      time.Duration(cfg.Nydusd.MountTimeout),
 		LimitNOFILE:      limitNOFILE,
-		SyslogIdentifier: "nydus-preheat",
+		SyslogIdentifier: "nydusd-preheat",
 		LogExtraFields:   []string{"NYDUS_CHAIN_ID=" + id.ChainID()},
 		Resources:        f.daemonResources(cfg),
 	}, nil

@@ -14,7 +14,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"io/fs"
 	"math/big"
 	"net"
 	"os"
@@ -57,8 +56,6 @@ var (
 	mockUnlabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-3", Labels: map[string]string{"kept": "yes"}}}
 
 	mockNodeNotFound = apierrors.NewNotFound(corev1.Resource("nodes"), mockNodeName)
-
-	mockOtherSocketConfig = "grpc:\n  addr: /run/nydus-snapshotter/other.sock\n"
 
 	mockSnapshotterPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": config.DefaultGRPCAddr}}
 
@@ -162,20 +159,19 @@ func (h *mockHost) serve(t *testing.T, socket string, register func(server *grpc
 func newMockHost(t *testing.T, enable bool, nodes ...*corev1.Node) *mockHost {
 	t.Helper()
 	cfg := newConfig(t)
-	cfg.NodeName = mockNodeName
-	cfg.NodeLabel = config.InstallerNodeLabelConfig{Enable: enable, ContainerdAddr: config.DefaultInstallerContainerdAddr}
+	cfg.Installer.NodeLabel = config.InstallerNodeLabelConfig{Enable: enable, ContainerdAddr: config.DefaultInstallerContainerdAddr}
 	root, err := os.MkdirTemp("", "nydus-") //nolint:usetesting // t.TempDir is too long for the path of a unix socket
 	assert.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	cfg.RootfsDir = root
+	cfg.Installer.RootfsDir = root
 
 	h := &mockHost{
-		installer:   New(cfg, mocks.NewMockManager(gomock.NewController(t))),
+		installer:   newInstaller(cfg, mocks.NewMockSystemd(gomock.NewController(t))),
 		client:      fake.NewClientset(),
 		snapshotter: health.NewServer(),
 		containerd:  &mockContainerd{plugins: []*introspectionapi.Plugin{mockOtherPlugin, mockSnapshotterPlugin}},
 	}
-	h.installer.kubeClient, h.installer.snapshotterAddr = h.client, config.DefaultGRPCAddr
+	h.installer.nodeName, h.installer.kubeClient = mockNodeName, h.client
 	h.serve(t, config.DefaultGRPCAddr, func(server *grpc.Server) { grpc_health_v1.RegisterHealthServer(server, h.snapshotter) })
 	h.serve(t, config.DefaultInstallerContainerdAddr, func(server *grpc.Server) { introspectionapi.RegisterIntrospectionServer(server, h.containerd) })
 	for _, node := range nodes {
@@ -187,35 +183,28 @@ func newMockHost(t *testing.T, enable bool, nodes ...*corev1.Node) *mockHost {
 	return h
 }
 
-func TestInstaller_prepareNodeLabel(t *testing.T) {
+func TestInstaller_initKubeClient(t *testing.T) {
 	tests := []struct {
 		name    string
-		enable  bool
 		host    string
 		prepare func(t *testing.T, h *mockHost)
 		expect  func(t *testing.T, h *mockHost, err error)
 	}{
 		{
-			name:   "read the socket from the config installed on the host",
-			enable: true,
-			host:   "10.96.0.1",
-			prepare: func(t *testing.T, h *mockHost) {
-				writeFiles(t, h.installer.cfg.RootfsDir, map[string]string{config.DefaultPath: mockOtherSocketConfig})
-			},
+			name:    "keep the client it holds",
+			host:    "10.96.0.1",
+			prepare: func(t *testing.T, h *mockHost) {},
 			expect: func(t *testing.T, h *mockHost, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal("/run/nydus-snapshotter/other.sock", h.installer.snapshotterAddr)
 				assert.Same(h.client, h.installer.kubeClient)
 			},
 		},
 		{
-			name:   "build the client of the api server once",
-			enable: true,
-			host:   "10.96.0.1",
+			name: "build the client of the api server once",
+			host: "10.96.0.1",
 			prepare: func(t *testing.T, h *mockHost) {
-				writeFiles(t, h.installer.cfg.RootfsDir, map[string]string{config.DefaultPath: mockOtherSocketConfig})
-				writeFiles(t, h.installer.cfg.TokenDir, map[string]string{"ca.crt": newCertificate(t)})
+				writeFiles(t, h.installer.cfg.Installer.TokenDir, map[string]string{"ca.crt": newCertificate(t)})
 				h.installer.kubeClient = nil
 			},
 			expect: func(t *testing.T, h *mockHost, err error) {
@@ -223,26 +212,13 @@ func TestInstaller_prepareNodeLabel(t *testing.T) {
 				assert.NoError(err)
 				client := h.installer.kubeClient
 				assert.NotNil(client)
-				assert.NoError(h.installer.prepareNodeLabel())
+				assert.NoError(h.installer.initKubeClient())
 				assert.Same(client, h.installer.kubeClient)
 			},
 		},
 		{
-			name:    "host without an installed config",
-			enable:  true,
-			host:    "10.96.0.1",
-			prepare: func(t *testing.T, h *mockHost) {},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.ErrorIs(err, fs.ErrNotExist)
-				assert.Empty(h.installer.snapshotterAddr)
-			},
-		},
-		{
-			name:   "pod without an api server",
-			enable: true,
+			name: "pod without an api server",
 			prepare: func(t *testing.T, h *mockHost) {
-				writeFiles(t, h.installer.cfg.RootfsDir, map[string]string{config.DefaultPath: mockOtherSocketConfig})
 				h.installer.kubeClient = nil
 			},
 			expect: func(t *testing.T, h *mockHost, err error) {
@@ -256,10 +232,9 @@ func TestInstaller_prepareNodeLabel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_HOST", tc.host)
 			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-			h := newMockHost(t, tc.enable)
-			h.installer.snapshotterAddr = ""
+			h := newMockHost(t, true)
 			tc.prepare(t, h)
-			tc.expect(t, h, h.installer.prepareNodeLabel())
+			tc.expect(t, h, h.installer.initKubeClient())
 		})
 	}
 }
@@ -560,9 +535,9 @@ func TestInstaller_ready(t *testing.T) {
 			},
 		},
 		{
-			name: "snapshotter at a socket the installed config does not name",
+			name: "snapshotter that does not serve at the socket of the config",
 			prepare: func(t *testing.T, h *mockHost) {
-				h.installer.snapshotterAddr = "/run/nydus-snapshotter/other.sock"
+				h.installer.cfg.GRPC.Addr = "/run/nydus-snapshotter/other.sock"
 			},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
@@ -572,8 +547,8 @@ func TestInstaller_ready(t *testing.T) {
 		{
 			name: "snapshotter that containerd has loaded at another spelling of its socket",
 			prepare: func(t *testing.T, h *mockHost) {
-				assert.NoError(t, os.MkdirAll(filepath.Join(h.installer.cfg.RootfsDir, "var"), 0o755))
-				assert.NoError(t, os.Symlink("/run", filepath.Join(h.installer.cfg.RootfsDir, "var/run")))
+				assert.NoError(t, os.MkdirAll(filepath.Join(h.installer.cfg.Installer.RootfsDir, "var"), 0o755))
+				assert.NoError(t, os.Symlink("/run", filepath.Join(h.installer.cfg.Installer.RootfsDir, "var/run")))
 				h.containerd.load(mockBuiltinPlugin, mockAliasedPlugin)
 			},
 			expect: func(t *testing.T, err error) {
@@ -815,8 +790,8 @@ func TestInstaller_newKubeClient(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_HOST", tc.host)
 			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
 			cfg := newConfig(t)
-			writeFiles(t, cfg.TokenDir, map[string]string{"ca.crt": tc.ca})
-			client, err := New(cfg, mocks.NewMockManager(gomock.NewController(t))).newKubeClient()
+			writeFiles(t, cfg.Installer.TokenDir, map[string]string{"ca.crt": tc.ca})
+			client, err := newInstaller(cfg, mocks.NewMockSystemd(gomock.NewController(t))).newKubeClient()
 			tc.expect(t, client, err)
 		})
 	}
@@ -868,13 +843,12 @@ func TestInstaller_Run_nodeLabel(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newMockHost(t, true, mockNode)
-			h.installer.snapshotterAddr = ""
-			h.installer.cfg.SyncInterval = config.Duration(10 * time.Millisecond)
-			manager := h.installer.systemd.(*mocks.MockManager).EXPECT()
-			manager.Ping(gomock.Any()).Return(nil).AnyTimes()
-			manager.EnableUnitFiles(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-			manager.RestartUnit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-			manager.StartUnit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			h.installer.cfg.Installer.SyncInterval = config.Duration(10 * time.Millisecond)
+			mockSystemd := h.installer.systemd.(*mocks.MockSystemd).EXPECT()
+			mockSystemd.Ping(gomock.Any()).Return(nil).AnyTimes()
+			mockSystemd.EnableUnitFiles(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			mockSystemd.RestartUnit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			mockSystemd.StartUnit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()

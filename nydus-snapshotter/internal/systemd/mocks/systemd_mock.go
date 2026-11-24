@@ -17,32 +17,32 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
-// MockManager is a mock of Manager interface.
-type MockManager struct {
+// MockSystemd is a mock of Systemd interface.
+type MockSystemd struct {
 	ctrl     *gomock.Controller
-	recorder *MockManagerMockRecorder
+	recorder *MockSystemdMockRecorder
 	isgomock struct{}
 }
 
-// MockManagerMockRecorder is the mock recorder for MockManager.
-type MockManagerMockRecorder struct {
-	mock *MockManager
+// MockSystemdMockRecorder is the mock recorder for MockSystemd.
+type MockSystemdMockRecorder struct {
+	mock *MockSystemd
 }
 
-// NewMockManager creates a new mock instance.
-func NewMockManager(ctrl *gomock.Controller) *MockManager {
-	mock := &MockManager{ctrl: ctrl}
-	mock.recorder = &MockManagerMockRecorder{mock}
+// NewMockSystemd creates a new mock instance.
+func NewMockSystemd(ctrl *gomock.Controller) *MockSystemd {
+	mock := &MockSystemd{ctrl: ctrl}
+	mock.recorder = &MockSystemdMockRecorder{mock}
 	return mock
 }
 
 // EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockManager) EXPECT() *MockManagerMockRecorder {
+func (m *MockSystemd) EXPECT() *MockSystemdMockRecorder {
 	return m.recorder
 }
 
 // ActiveState mocks base method.
-func (m *MockManager) ActiveState(ctx context.Context, name string) (systemd.ActiveState, error) {
+func (m *MockSystemd) ActiveState(ctx context.Context, name string) (systemd.ActiveState, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ActiveState", ctx, name)
 	ret0, _ := ret[0].(systemd.ActiveState)
@@ -51,25 +51,25 @@ func (m *MockManager) ActiveState(ctx context.Context, name string) (systemd.Act
 }
 
 // ActiveState indicates an expected call of ActiveState.
-func (mr *MockManagerMockRecorder) ActiveState(ctx, name any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) ActiveState(ctx, name any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ActiveState", reflect.TypeOf((*MockManager)(nil).ActiveState), ctx, name)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ActiveState", reflect.TypeOf((*MockSystemd)(nil).ActiveState), ctx, name)
 }
 
 // Close mocks base method.
-func (m *MockManager) Close() {
+func (m *MockSystemd) Close() {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Close")
 }
 
 // Close indicates an expected call of Close.
-func (mr *MockManagerMockRecorder) Close() *gomock.Call {
+func (mr *MockSystemdMockRecorder) Close() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockManager)(nil).Close))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockSystemd)(nil).Close))
 }
 
 // EnableUnitFiles mocks base method.
-func (m *MockManager) EnableUnitFiles(ctx context.Context, files []string) error {
+func (m *MockSystemd) EnableUnitFiles(ctx context.Context, files []string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "EnableUnitFiles", ctx, files)
 	ret0, _ := ret[0].(error)
@@ -77,13 +77,13 @@ func (m *MockManager) EnableUnitFiles(ctx context.Context, files []string) error
 }
 
 // EnableUnitFiles indicates an expected call of EnableUnitFiles.
-func (mr *MockManagerMockRecorder) EnableUnitFiles(ctx, files any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) EnableUnitFiles(ctx, files any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableUnitFiles", reflect.TypeOf((*MockManager)(nil).EnableUnitFiles), ctx, files)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EnableUnitFiles", reflect.TypeOf((*MockSystemd)(nil).EnableUnitFiles), ctx, files)
 }
 
 // ListUnits mocks base method.
-func (m *MockManager) ListUnits(ctx context.Context, slice, pattern string) (map[string]systemd.ActiveState, error) {
+func (m *MockSystemd) ListUnits(ctx context.Context, slice, pattern string) (map[string]systemd.ActiveState, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ListUnits", ctx, slice, pattern)
 	ret0, _ := ret[0].(map[string]systemd.ActiveState)
@@ -92,13 +92,13 @@ func (m *MockManager) ListUnits(ctx context.Context, slice, pattern string) (map
 }
 
 // ListUnits indicates an expected call of ListUnits.
-func (mr *MockManagerMockRecorder) ListUnits(ctx, slice, pattern any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) ListUnits(ctx, slice, pattern any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListUnits", reflect.TypeOf((*MockManager)(nil).ListUnits), ctx, slice, pattern)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListUnits", reflect.TypeOf((*MockSystemd)(nil).ListUnits), ctx, slice, pattern)
 }
 
 // MemoryCurrent mocks base method.
-func (m *MockManager) MemoryCurrent(ctx context.Context, name string) (uint64, error) {
+func (m *MockSystemd) MemoryCurrent(ctx context.Context, name string) (uint64, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "MemoryCurrent", ctx, name)
 	ret0, _ := ret[0].(uint64)
@@ -107,13 +107,13 @@ func (m *MockManager) MemoryCurrent(ctx context.Context, name string) (uint64, e
 }
 
 // MemoryCurrent indicates an expected call of MemoryCurrent.
-func (mr *MockManagerMockRecorder) MemoryCurrent(ctx, name any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) MemoryCurrent(ctx, name any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MemoryCurrent", reflect.TypeOf((*MockManager)(nil).MemoryCurrent), ctx, name)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "MemoryCurrent", reflect.TypeOf((*MockSystemd)(nil).MemoryCurrent), ctx, name)
 }
 
 // Ping mocks base method.
-func (m *MockManager) Ping(ctx context.Context) error {
+func (m *MockSystemd) Ping(ctx context.Context) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Ping", ctx)
 	ret0, _ := ret[0].(error)
@@ -121,13 +121,13 @@ func (m *MockManager) Ping(ctx context.Context) error {
 }
 
 // Ping indicates an expected call of Ping.
-func (mr *MockManagerMockRecorder) Ping(ctx any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) Ping(ctx any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ping", reflect.TypeOf((*MockManager)(nil).Ping), ctx)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ping", reflect.TypeOf((*MockSystemd)(nil).Ping), ctx)
 }
 
 // RestartUnit mocks base method.
-func (m *MockManager) RestartUnit(ctx context.Context, name string) error {
+func (m *MockSystemd) RestartUnit(ctx context.Context, name string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RestartUnit", ctx, name)
 	ret0, _ := ret[0].(error)
@@ -135,13 +135,13 @@ func (m *MockManager) RestartUnit(ctx context.Context, name string) error {
 }
 
 // RestartUnit indicates an expected call of RestartUnit.
-func (mr *MockManagerMockRecorder) RestartUnit(ctx, name any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) RestartUnit(ctx, name any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RestartUnit", reflect.TypeOf((*MockManager)(nil).RestartUnit), ctx, name)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RestartUnit", reflect.TypeOf((*MockSystemd)(nil).RestartUnit), ctx, name)
 }
 
 // SetResources mocks base method.
-func (m *MockManager) SetResources(ctx context.Context, name string, resources systemd.Resources) error {
+func (m *MockSystemd) SetResources(ctx context.Context, name string, resources systemd.Resources) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetResources", ctx, name, resources)
 	ret0, _ := ret[0].(error)
@@ -149,13 +149,13 @@ func (m *MockManager) SetResources(ctx context.Context, name string, resources s
 }
 
 // SetResources indicates an expected call of SetResources.
-func (mr *MockManagerMockRecorder) SetResources(ctx, name, resources any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) SetResources(ctx, name, resources any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetResources", reflect.TypeOf((*MockManager)(nil).SetResources), ctx, name, resources)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetResources", reflect.TypeOf((*MockSystemd)(nil).SetResources), ctx, name, resources)
 }
 
 // StartSlice mocks base method.
-func (m *MockManager) StartSlice(ctx context.Context, name, description string, resources systemd.Resources) error {
+func (m *MockSystemd) StartSlice(ctx context.Context, name, description string, resources systemd.Resources) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "StartSlice", ctx, name, description, resources)
 	ret0, _ := ret[0].(error)
@@ -163,13 +163,13 @@ func (m *MockManager) StartSlice(ctx context.Context, name, description string, 
 }
 
 // StartSlice indicates an expected call of StartSlice.
-func (mr *MockManagerMockRecorder) StartSlice(ctx, name, description, resources any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) StartSlice(ctx, name, description, resources any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartSlice", reflect.TypeOf((*MockManager)(nil).StartSlice), ctx, name, description, resources)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartSlice", reflect.TypeOf((*MockSystemd)(nil).StartSlice), ctx, name, description, resources)
 }
 
 // StartTransientUnit mocks base method.
-func (m *MockManager) StartTransientUnit(ctx context.Context, unit *systemd.Unit) error {
+func (m *MockSystemd) StartTransientUnit(ctx context.Context, unit *systemd.Unit) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "StartTransientUnit", ctx, unit)
 	ret0, _ := ret[0].(error)
@@ -177,13 +177,13 @@ func (m *MockManager) StartTransientUnit(ctx context.Context, unit *systemd.Unit
 }
 
 // StartTransientUnit indicates an expected call of StartTransientUnit.
-func (mr *MockManagerMockRecorder) StartTransientUnit(ctx, unit any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) StartTransientUnit(ctx, unit any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartTransientUnit", reflect.TypeOf((*MockManager)(nil).StartTransientUnit), ctx, unit)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartTransientUnit", reflect.TypeOf((*MockSystemd)(nil).StartTransientUnit), ctx, unit)
 }
 
 // StartUnit mocks base method.
-func (m *MockManager) StartUnit(ctx context.Context, name string) error {
+func (m *MockSystemd) StartUnit(ctx context.Context, name string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "StartUnit", ctx, name)
 	ret0, _ := ret[0].(error)
@@ -191,13 +191,13 @@ func (m *MockManager) StartUnit(ctx context.Context, name string) error {
 }
 
 // StartUnit indicates an expected call of StartUnit.
-func (mr *MockManagerMockRecorder) StartUnit(ctx, name any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) StartUnit(ctx, name any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartUnit", reflect.TypeOf((*MockManager)(nil).StartUnit), ctx, name)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartUnit", reflect.TypeOf((*MockSystemd)(nil).StartUnit), ctx, name)
 }
 
 // StopUnit mocks base method.
-func (m *MockManager) StopUnit(ctx context.Context, name string) error {
+func (m *MockSystemd) StopUnit(ctx context.Context, name string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "StopUnit", ctx, name)
 	ret0, _ := ret[0].(error)
@@ -205,7 +205,7 @@ func (m *MockManager) StopUnit(ctx context.Context, name string) error {
 }
 
 // StopUnit indicates an expected call of StopUnit.
-func (mr *MockManagerMockRecorder) StopUnit(ctx, name any) *gomock.Call {
+func (mr *MockSystemdMockRecorder) StopUnit(ctx, name any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StopUnit", reflect.TypeOf((*MockManager)(nil).StopUnit), ctx, name)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StopUnit", reflect.TypeOf((*MockSystemd)(nil).StopUnit), ctx, name)
 }

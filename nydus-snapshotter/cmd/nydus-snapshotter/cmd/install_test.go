@@ -7,6 +7,7 @@
 package cmd
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,21 @@ func TestInstallCmd(t *testing.T) {
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "NODE_NAME must name the node when installer.node_label.enable is set")
+			},
+		},
+		{
+			name: "config that is missing",
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, fs.ErrNotExist)
+			},
+		},
+		{
+			name:   "invalid config",
+			config: "log:\n  level: loud\n",
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "invalid log.level")
 			},
 		},
 		{

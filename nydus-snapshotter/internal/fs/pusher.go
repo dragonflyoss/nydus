@@ -46,6 +46,16 @@ func (f *fileSystem) Run(ctx context.Context) {
 	p.run(ctx)
 }
 
+// pushRecord is a credential one daemon accepted or rejected.
+type pushRecord struct {
+	// createdAt is the instance's creation time, telling a restarted daemon
+	// apart.
+	createdAt time.Time
+
+	// sum is the credential's sha256, so the credential is not kept.
+	sum [sha256.Size]byte
+}
+
 // pusher keeps the registry credential of every recorded daemon current:
 // when a credential may have changed it resolves each daemon's again and
 // pushes the ones that differ from what the daemon was last given, refer to
@@ -72,16 +82,6 @@ type pusher struct {
 
 	// startTimeout is the longest a daemon start takes.
 	startTimeout time.Duration
-}
-
-// pushRecord is a credential one daemon accepted or rejected.
-type pushRecord struct {
-	// createdAt is the instance's creation time, telling a restarted daemon
-	// apart.
-	createdAt time.Time
-
-	// sum is the credential's sha256, so the credential is not kept.
-	sum [sha256.Size]byte
 }
 
 // newPusher returns a pusher that sends the credentials keychain resolves to

@@ -26,12 +26,7 @@ import (
 // client-go re-reads a rotated token file, refer to
 // https://github.com/kubernetes/client-go/blob/master/transport/token_source.go.
 func (i *Installer) syncKubeconfig(ctx context.Context) error {
-	enabled, err := i.kubeSecretEnabled()
-	if err != nil {
-		return err
-	}
-
-	if !enabled {
+	if !i.cfg.Auth.KubeSecret.Enable {
 		return nil
 	}
 
@@ -42,18 +37,18 @@ func (i *Installer) syncKubeconfig(ctx context.Context) error {
 		return err
 	}
 
-	token, err := os.ReadFile(filepath.Join(i.cfg.TokenDir, "token"))
+	token, err := os.ReadFile(filepath.Join(i.cfg.Installer.TokenDir, "token"))
 	if err != nil {
 		return fmt.Errorf("read service account token: %w", err)
 	}
 
-	ca, err := os.ReadFile(filepath.Join(i.cfg.TokenDir, "ca.crt"))
+	ca, err := os.ReadFile(filepath.Join(i.cfg.Installer.TokenDir, "ca.crt"))
 	if err != nil {
 		return fmt.Errorf("read service account ca: %w", err)
 	}
 
 	// The token is a credential: keep it on tmpfs, in a dir only root reads.
-	hostDir, err := i.cfg.host(dir)
+	hostDir, err := i.host(dir)
 	if err != nil {
 		return err
 	}
@@ -114,22 +109,4 @@ func (i *Installer) apiServer() (string, error) {
 	}
 
 	return "https://" + net.JoinHostPort(host, port), nil
-}
-
-// kubeSecretEnabled reports whether the snapshotter reads credentials from
-// secrets: by the payload config or, when the installer rejects that one, by
-// the config installed on the host, which the running snapshotter keeps
-// using. A broken ConfigMap must not stop the token rotation it relies on.
-func (i *Installer) kubeSecretEnabled() (bool, error) {
-	cfg, _, err := i.payloadConfig()
-	if err == nil {
-		return cfg.Auth.KubeSecret.Enable, nil
-	}
-
-	installed, installedErr := i.cfg.installed()
-	if installedErr != nil {
-		return false, err
-	}
-
-	return installed.Auth.KubeSecret.Enable, nil
 }

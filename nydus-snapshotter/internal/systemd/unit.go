@@ -7,20 +7,13 @@
 package systemd
 
 import (
+	"cmp"
 	"math"
 	"time"
 
 	systemddbus "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/godbus/dbus/v5"
 	"golang.org/x/sys/unix"
-)
-
-const (
-	// serviceTypeExec is a service started once its binary runs.
-	serviceTypeExec = "exec"
-
-	// serviceTypeNotify is a service started once it sends READY=1.
-	serviceTypeNotify = "notify"
 )
 
 // Resources are cgroup limits of a unit; 0 means no limit.
@@ -31,8 +24,26 @@ type Resources struct {
 	// MemoryHigh is memory.high in bytes.
 	MemoryHigh uint64
 
-	// CPUQuotaPerSecUSec is CPU time in microseconds per second.
+	// CPUQuotaPerSecUSec is CPU time in microseconds per second, a multiple
+	// of 10000, 1% of a CPU: an older systemd keeps whole percents only.
 	CPUQuotaPerSecUSec uint64
+}
+
+// properties returns the cgroup properties. No limit is sent as
+// math.MaxUint64, systemd's CGROUP_LIMIT_MAX and USEC_INFINITY, and never
+// left out, so applying the resources again removes a limit set before, as
+// containerd always sets the CPU quota, refer to
+// https://github.com/containerd/cgroups/blob/main/cgroup2/manager.go.
+// Memory accounting is always on, as runc turns it on for every unit, so
+// MemoryCurrent has a value whatever DefaultMemoryAccounting the host sets,
+// refer to https://github.com/opencontainers/cgroups/blob/main/systemd/v2.go.
+func (r *Resources) properties() []systemddbus.Property {
+	return []systemddbus.Property{
+		newProp("MemoryAccounting", true),
+		newProp("MemoryMax", cmp.Or(r.MemoryMax, math.MaxUint64)),
+		newProp("MemoryHigh", cmp.Or(r.MemoryHigh, math.MaxUint64)),
+		newProp("CPUQuotaPerSecUSec", cmp.Or(r.CPUQuotaPerSecUSec, math.MaxUint64)),
+	}
 }
 
 // Unit is a transient service unit.
@@ -43,7 +54,7 @@ type Unit struct {
 	// Description is the unit description.
 	Description string
 
-	// Slice is the slice the unit runs in.
+	// Slice is the slice the unit runs in, systemd's default when empty.
 	Slice string
 
 	// ExecStart is the command line.
@@ -90,13 +101,16 @@ type Unit struct {
 	Resources Resources
 }
 
-// serviceType returns the systemd service type of the unit.
+// serviceType returns the systemd service type of the unit: notify, started
+// once the process sends READY=1, or exec, started once its binary runs. A
+// systemd older than 240 does not know exec and rejects the unit, refer to
+// https://github.com/systemd/systemd/blob/v255/NEWS.
 func (u *Unit) serviceType() string {
 	if u.Notify {
-		return serviceTypeNotify
+		return "notify"
 	}
 
-	return serviceTypeExec
+	return "exec"
 }
 
 // properties returns the D-Bus properties of the transient unit.
@@ -108,7 +122,6 @@ func (u *Unit) properties() []systemddbus.Property {
 
 	properties := []systemddbus.Property{
 		systemddbus.PropDescription(u.Description),
-		systemddbus.PropSlice(u.Slice),
 		systemddbus.PropType(u.serviceType()),
 		// The bool is systemd's ignore-failure flag, the "-" prefix of
 		// ExecStart=, whatever go-systemd names it: false makes a missing
@@ -123,7 +136,9 @@ func (u *Unit) properties() []systemddbus.Property {
 		newProp("StandardOutput", "journal"),
 		newProp("StandardError", "journal"),
 		newProp("LogExtraFields", extraFields),
-		// No core dumps: a daemon's memory holds registry credentials.
+		// Write no core file: a daemon's memory holds registry credentials.
+		// A piped core_pattern handler still gets the dump; systemd-coredump
+		// drops it on this limit.
 		newProp("LimitCORE", uint64(0)),
 		newProp("LimitCORESoft", uint64(0)),
 	}
@@ -134,7 +149,12 @@ func (u *Unit) properties() []systemddbus.Property {
 	}
 
 	// Zero values keep systemd's defaults; a zero limit or timeout would
-	// leave the process no file or no time to start or stop.
+	// leave the process no file or no time to start or stop, and an empty
+	// slice is no unit name.
+	if u.Slice != "" {
+		properties = append(properties, systemddbus.PropSlice(u.Slice))
+	}
+
 	if u.TimeoutStart > 0 {
 		properties = append(properties, newProp("TimeoutStartUSec", uint64(u.TimeoutStart.Microseconds())))
 	}
@@ -164,23 +184,6 @@ func (u *Unit) properties() []systemddbus.Property {
 	}
 
 	return append(properties, u.Resources.properties()...)
-}
-
-// properties returns the cgroup properties, systemd's infinity for 0.
-func (r *Resources) properties() []systemddbus.Property {
-	limit := func(v uint64) uint64 {
-		if v == 0 {
-			return math.MaxUint64
-		}
-
-		return v
-	}
-
-	return []systemddbus.Property{
-		newProp("MemoryMax", limit(r.MemoryMax)),
-		newProp("MemoryHigh", limit(r.MemoryHigh)),
-		newProp("CPUQuotaPerSecUSec", limit(r.CPUQuotaPerSecUSec)),
-	}
 }
 
 // newProp returns a unit property, as runc's systemd driver, refer to

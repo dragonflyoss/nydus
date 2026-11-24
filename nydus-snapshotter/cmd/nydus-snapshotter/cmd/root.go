@@ -9,9 +9,7 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/signal"
 	"syscall"
@@ -38,7 +36,7 @@ var rootCmd = &cobra.Command{
 	SilenceUsage:      true,
 	SilenceErrors:     true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig(cmd.Context(), configPath, cmd.Flags().Changed("config"))
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return err
 		}
@@ -67,27 +65,13 @@ func Execute() {
 
 // init initializes the root command.
 func init() {
-	// The install command reads the same config file, the one it installs.
+	// Every command reads the same config file; install also installs it.
 	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&configPath, "config", config.DefaultPath, "Specify the path to the config file")
 
 	// Add sub command.
 	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(uninstallCmd)
-}
-
-// loadConfig loads the config at path. Only a path that was not asked for
-// explicitly, the default one, may be missing and yields the defaults, as
-// containerd's config, refer to
-// https://github.com/containerd/containerd/blob/main/cmd/containerd/command/main.go.
-func loadConfig(ctx context.Context, path string, explicit bool) (*config.Config, error) {
-	cfg, err := config.Load(path)
-	if errors.Is(err, fs.ErrNotExist) && !explicit {
-		log.G(ctx).WithField("path", path).Warn("config not found, using defaults")
-		return config.Parse(nil)
-	}
-
-	return cfg, err
 }
 
 // runSnapshotter serves the snapshotter until ctx is done, reloading the

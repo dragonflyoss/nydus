@@ -82,12 +82,12 @@ func TestInstaller_nydusVersion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := newConfig(t)
 			if tc.script == "" {
-				assert.NoError(t, os.Remove(cfg.payload(payloadNydusBinary)))
+				assert.NoError(t, os.Remove(filepath.Join(cfg.Installer.PayloadDir, payloadNydusBinary)))
 			} else {
-				writeFiles(t, cfg.PayloadDir, map[string]string{payloadNydusBinary: tc.script})
+				writeFiles(t, cfg.Installer.PayloadDir, map[string]string{payloadNydusBinary: tc.script})
 			}
 
-			version, err := New(cfg, nil).nydusVersion(t.Context())
+			version, err := newInstaller(cfg, nil).nydusVersion(t.Context())
 			tc.expect(t, version, err)
 		})
 	}
@@ -234,7 +234,7 @@ func TestInstaller_switchVersion(t *testing.T) {
 			binDir := filepath.Dir(hostPath(t, cfg, filepath.Dir(config.DefaultNydusdBinary)))
 			assert.NoError(t, os.MkdirAll(filepath.Join(binDir, mockVersion), 0o755))
 			tc.prepare(t, binDir)
-			tc.expect(t, binDir, New(cfg, nil).switchVersion(t.Context(), mockVersion))
+			tc.expect(t, binDir, newInstaller(cfg, nil).switchVersion(t.Context(), mockVersion))
 		})
 	}
 }

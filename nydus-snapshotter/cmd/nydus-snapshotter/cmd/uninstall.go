@@ -25,17 +25,17 @@ var uninstallCmd = &cobra.Command{
 	DisableAutoGenTag: true,
 	SilenceUsage:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig(cmd.Context(), configPath, cmd.Flags().Changed("config"))
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return err
 		}
 
-		return runUninstall(cmd.Context(), cfg)
+		return runUninstall(cmd.Context(), cfg, configPath)
 	},
 }
 
 // runUninstall removes the label the installers keep on their nodes from
 // every node, with the service account of the Pod.
-func runUninstall(ctx context.Context, cfg *config.Config) error {
-	return installer.New(&installer.Config{InstallerConfig: cfg.Installer}, nil).UnlabelNodes(ctx)
+func runUninstall(ctx context.Context, cfg *config.Config, path string) error {
+	return installer.New(cfg, path, nil).UnlabelNodes(ctx)
 }

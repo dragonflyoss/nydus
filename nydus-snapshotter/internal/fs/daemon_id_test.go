@@ -44,6 +44,15 @@ func TestDaemonIDFromUnit(t *testing.T) {
 			},
 		},
 		{
+			name: "preheat unit",
+			unit: mockPreheatUnit,
+			expect: func(t *testing.T, id daemonID, ok bool) {
+				assert := assert.New(t)
+				assert.False(ok)
+				assert.Empty(id)
+			},
+		},
+		{
 			name: "unit without the daemon prefix",
 			unit: "containerd.service",
 			expect: func(t *testing.T, id daemonID, ok bool) {

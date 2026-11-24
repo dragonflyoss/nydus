@@ -206,7 +206,7 @@ func (i *Installer) configFiles() ([]file, error) {
 // from certs.d stay on the host, so hosts.toml baked into the node image
 // survive.
 func (i *Installer) certsFiles() ([]file, error) {
-	certsDir := i.cfg.certsDir()
+	certsDir := i.certsDir()
 	if _, err := os.Stat(certsDir); errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -243,7 +243,7 @@ func (i *Installer) certsFiles() ([]file, error) {
 // payloadConfig returns the validated config.yaml of the payload and its
 // content.
 func (i *Installer) payloadConfig() (*config.Config, []byte, error) {
-	data, err := os.ReadFile(i.cfg.Path)
+	data, err := os.ReadFile(i.configPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read payload config: %w", err)
 	}
@@ -280,7 +280,7 @@ func (i *Installer) payloadConfig() (*config.Config, []byte, error) {
 func (i *Installer) installFiles(ctx context.Context, files []file) error {
 	var changed []file
 	for _, f := range files {
-		target, err := i.cfg.host(f.path)
+		target, err := i.host(f.path)
 		if err != nil {
 			return err
 		}
@@ -330,7 +330,7 @@ func (i *Installer) unitsToRestart(changed []file) []string {
 
 // pendingRestarts returns the units marked pending a restart.
 func (i *Installer) pendingRestarts() ([]string, error) {
-	path, err := i.cfg.host(restartPending)
+	path, err := i.host(restartPending)
 	if err != nil {
 		return nil, err
 	}
@@ -361,7 +361,7 @@ func (i *Installer) markRestarts(units []string) error {
 	units = append(pending, units...)
 	slices.Sort(units)
 	units = slices.Compact(units)
-	path, err := i.cfg.host(restartPending)
+	path, err := i.host(restartPending)
 	if err != nil {
 		return err
 	}
@@ -379,7 +379,7 @@ func (i *Installer) markRestarts(units []string) error {
 
 // clearRestarts forgets the units pending a restart.
 func (i *Installer) clearRestarts() error {
-	path, err := i.cfg.host(restartPending)
+	path, err := i.host(restartPending)
 	if err != nil {
 		return err
 	}

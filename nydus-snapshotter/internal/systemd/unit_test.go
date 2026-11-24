@@ -58,6 +58,7 @@ func TestUnit_properties(t *testing.T) {
 				assert.Equal("system-nydusd.slice", properties["Slice"])
 				assert.Equal([]string{"NYDUS_FUSE_CONSOLE=false"}, properties["Environment"])
 				assert.Equal([][]byte{[]byte("NYDUS_CHAIN_ID=sha256:ab")}, properties["LogExtraFields"])
+				assert.Equal(true, properties["MemoryAccounting"])
 				assert.Equal(uint64(1<<30), properties["MemoryHigh"])
 				assert.Equal(uint64(math.MaxUint64), properties["MemoryMax"])
 				assert.Equal(uint64(math.MaxUint64), properties["CPUQuotaPerSecUSec"])
@@ -68,6 +69,7 @@ func TestUnit_properties(t *testing.T) {
 			unit: &Unit{Name: "nydusd-ab.service", ExecStart: []string{"/bin/true"}},
 			expect: func(t *testing.T, properties map[string]any) {
 				assert := assert.New(t)
+				assert.NotContains(properties, "Slice")
 				assert.NotContains(properties, "Environment")
 				assert.NotContains(properties, "Before")
 				assert.NotContains(properties, "TimeoutStopUSec")

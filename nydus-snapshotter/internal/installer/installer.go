@@ -34,12 +34,6 @@ const (
 	// https://github.com/kubernetes/node-problem-detector/blob/master/cmd/options/options.go.
 	NodeNameEnvVar = "NODE_NAME"
 
-	// JobTimeout bounds a unit start or restart. Restarting the socket stops
-	// the service, then starts the socket and the service again; systemd
-	// gives a stop and a start 90s each by default, refer to
-	// https://www.freedesktop.org/software/systemd/man/latest/systemd-system.conf.html#DefaultTimeoutStartSec=.
-	JobTimeout = 5 * time.Minute
-
 	// serviceUnit is the snapshotter service.
 	serviceUnit = "nydus-snapshotter.service"
 
@@ -58,116 +52,26 @@ const (
 	restartPending = "/run/nydus-snapshotter/restart-pending"
 )
 
-// Config is the installer config.
-type Config struct {
-	// InstallerConfig is the installer section of the config file, as it was
-	// when the installer started.
-	config.InstallerConfig
-
-	// Path is the config file to install, the ConfigMap, with certs.d beside
-	// it as on the host.
-	Path string
-
-	// NodeName is the node to label with NodeLabel, the spec.nodeName of the
-	// Pod.
-	NodeName string
-}
-
-// NewConfig returns the installer config of the config file at path.
-//
-//	config.yaml (ConfigMap) ──▶ installer section ─┐
-//	NODE_NAME (Downward API) ─▶ node name ─────────┴─▶ Config
-func NewConfig(path string) (*Config, error) {
-	c := &Config{
-		InstallerConfig: config.New().Installer,
-		Path:            path,
-		NodeName:        os.Getenv(NodeNameEnvVar),
-	}
-
-	c.load()
-	if c.NodeLabel.Enable && c.NodeName == "" {
-		return nil, errors.New(NodeNameEnvVar + " must name the node when installer.node_label.enable is set")
-	}
-
-	return c, nil
-}
-
-// load sets the installer settings from the config file. A file that cannot
-// be used is left for the install to reject, and the settings fall back, so
-// a broken ConfigMap does not stop the token rotation of a running
-// snapshotter. The installed config is looked up under the rootfs directory
-// c holds, the default one, where the chart mounts the host.
-//
-//	config.yaml ─▶ usable ─────────────────────────▶ its installer section
-//	            └▶ not usable ─▶ installed config ─▶ its installer section
-//	                            └▶ none ───────────▶ the settings c holds
-func (c *Config) load() {
-	cfg, err := config.Load(c.Path)
-	if err == nil {
-		c.InstallerConfig = cfg.Installer
-		return
-	}
-
-	logger := log.L.WithError(err)
-	installed, err := c.installed()
-	if err != nil {
-		logger.WithField("installed", err).Warn("config is not usable and none is installed, keeping the default installer settings")
-		return
-	}
-
-	logger.Warn("config is not usable, keeping the installer settings of the installed config")
-	c.InstallerConfig = installed.Installer
-}
-
-// installed returns the config installed on the host.
-func (c *Config) installed() (*config.Config, error) {
-	path, err := c.host(config.DefaultPath)
-	if err != nil {
-		return nil, err
-	}
-
-	return config.Load(path)
-}
-
-// host returns where a host path is in the Pod. Symlinks in its parent
-// directories resolve within the host root, as an absolute link on the host
-// must, refer to https://github.com/containerd/continuity/blob/main/fs/path.go.
-// The last element is kept, so a link itself can be replaced.
-func (c *Config) host(path string) (string, error) {
-	dir, err := continuityfs.RootPath(c.RootfsDir, filepath.Dir(path))
-	if err != nil {
-		return "", fmt.Errorf("resolve host path %s: %w", path, err)
-	}
-
-	return filepath.Join(dir, filepath.Base(path)), nil
-}
-
-// payload returns where a payload file is.
-func (c *Config) payload(path string) string {
-	return filepath.Join(c.PayloadDir, path)
-}
-
-// certsDir returns the certs.d directory to install, beside the config file
-// as config.DefaultRegistryConfigPath is on the host.
-func (c *Config) certsDir() string {
-	return filepath.Join(filepath.Dir(c.Path), filepath.Base(config.DefaultRegistryConfigPath))
-}
-
 // Installer installs the snapshotter onto the host from the DaemonSet Pod.
 type Installer struct {
-	// cfg is the installer config.
-	cfg *Config
+	// cfg is the config the installer started with. Its installer section
+	// holds the installer's own settings.
+	cfg *config.Config
+
+	// configPath is the config file to install, the ConfigMap, with certs.d
+	// beside it as on the host.
+	configPath string
+
+	// nodeName is the node to label with NodeLabel, the spec.nodeName of the
+	// Pod.
+	nodeName string
 
 	// systemd manages the host's snapshotter units.
-	systemd systemd.Manager
+	systemd systemd.Systemd
 
 	// kubeClient is the client of the API server the node is labeled
 	// through, built once.
 	kubeClient kubernetes.Interface
-
-	// snapshotterAddr is the snapshotter's socket on the host, read once
-	// from the config installed there.
-	snapshotterAddr string
 
 	// notReadyChecks is how many checks in a row found the node not ready.
 	notReadyChecks int
@@ -177,9 +81,13 @@ type Installer struct {
 	notReady string
 }
 
-// New returns an installer that drives the host's units through manager.
-func New(cfg *Config, manager systemd.Manager) *Installer {
-	return &Installer{cfg: cfg, systemd: manager}
+// New returns an installer of the config loaded from the file at configPath,
+// which drives the host's units through systemd.
+//
+//	config.yaml (ConfigMap) ──▶ config, its installer section ─┐
+//	NODE_NAME (Downward API) ─▶ node name ─────────────────────┴─▶ Installer
+func New(cfg *config.Config, configPath string, systemd systemd.Systemd) *Installer {
+	return &Installer{cfg: cfg, configPath: configPath, nodeName: os.Getenv(NodeNameEnvVar), systemd: systemd}
 }
 
 // Run checks the host's systemd, syncs the Kubernetes credentials, installs
@@ -193,6 +101,11 @@ func New(cfg *Config, manager systemd.Manager) *Installer {
 // stops daemons, edits containerd's config, removes the label when it stops
 // or uninstalls.
 func (i *Installer) Run(ctx context.Context) error {
+	// The label goes on the node of the Pod.
+	if i.cfg.Installer.NodeLabel.Enable && i.nodeName == "" {
+		return errors.New(NodeNameEnvVar + " must name the node when installer.node_label.enable is set")
+	}
+
 	// Check the host's systemd before anything is written to the host, as
 	// kubeadm runs its preflight checks before its first change, refer to
 	// https://github.com/kubernetes/kubernetes/blob/v1.34.0/cmd/kubeadm/app/cmd/phases/init/preflight.go.
@@ -218,7 +131,7 @@ func (i *Installer) Run(ctx context.Context) error {
 	}
 
 	log.G(ctx).Info("installed, keeping the config and the credentials in sync")
-	tick := time.NewTicker(time.Duration(i.cfg.SyncInterval))
+	tick := time.NewTicker(time.Duration(i.cfg.Installer.SyncInterval))
 	defer tick.Stop()
 	for {
 		select {
@@ -249,10 +162,10 @@ func (i *Installer) install(ctx context.Context) error {
 	}
 
 	files := []file{
-		{path: i.nydusBinary(version), perm: 0o755, src: i.cfg.payload(payloadNydusBinary)},
-		{path: snapshotterBinary, perm: 0o755, src: i.cfg.payload(payloadSnapshotterBinary)},
-		{path: filepath.Join(unitDir, socketUnit), perm: 0o644, src: i.cfg.payload(filepath.Join(payloadUnitDir, socketUnit))},
-		{path: filepath.Join(unitDir, serviceUnit), perm: 0o644, src: i.cfg.payload(filepath.Join(payloadUnitDir, serviceUnit))},
+		{path: i.nydusBinary(version), perm: 0o755, src: i.payload(payloadNydusBinary)},
+		{path: snapshotterBinary, perm: 0o755, src: i.payload(payloadSnapshotterBinary)},
+		{path: filepath.Join(unitDir, socketUnit), perm: 0o644, src: i.payload(filepath.Join(payloadUnitDir, socketUnit))},
+		{path: filepath.Join(unitDir, serviceUnit), perm: 0o644, src: i.payload(filepath.Join(payloadUnitDir, serviceUnit))},
 	}
 
 	configFiles, err := i.configFiles()
@@ -314,4 +227,28 @@ func (i *Installer) startUnit(ctx context.Context, unit string, restart bool) er
 	}
 
 	return i.systemd.StartUnit(ctx, unit)
+}
+
+// host returns where a host path is in the Pod. Symlinks in its parent
+// directories resolve within the host root, as an absolute link on the host
+// must, refer to https://github.com/containerd/continuity/blob/main/fs/path.go.
+// The last element is kept, so a link itself can be replaced.
+func (i *Installer) host(path string) (string, error) {
+	dir, err := continuityfs.RootPath(i.cfg.Installer.RootfsDir, filepath.Dir(path))
+	if err != nil {
+		return "", fmt.Errorf("resolve host path %s: %w", path, err)
+	}
+
+	return filepath.Join(dir, filepath.Base(path)), nil
+}
+
+// payload returns where a payload file is.
+func (i *Installer) payload(path string) string {
+	return filepath.Join(i.cfg.Installer.PayloadDir, path)
+}
+
+// certsDir returns the certs.d directory to install, beside the config file
+// as config.DefaultRegistryConfigPath is on the host.
+func (i *Installer) certsDir() string {
+	return filepath.Join(filepath.Dir(i.configPath), filepath.Base(config.DefaultRegistryConfigPath))
 }

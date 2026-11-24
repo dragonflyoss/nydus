@@ -77,7 +77,7 @@ func TestPreheat(t *testing.T) {
 	assert.ElementsMatch(t, layers, blobs)
 	assert.Positive(t, contentLength)
 	assert.NoFileExists(t, filepath.Join(dir, "config.yaml"))
-	waitStopped(t, "nydus-preheat-"+chainID+".service", startTimeout)
+	waitStopped(t, "nydusd-preheat-"+chainID+".service", startTimeout)
 
 	gets, challenges := origin.Faults.BlobGets(), auth.challenges.Load()
 	assert.Positive(t, gets)

@@ -318,12 +318,12 @@ func TestInstaller_syncConfig(t *testing.T) {
 	tests := []struct {
 		name   string
 		update map[string]string
-		expect func(t *testing.T, cfg *Config, previous os.FileInfo, err error)
+		expect func(t *testing.T, cfg *config.Config, previous os.FileInfo, err error)
 	}{
 		{
 			name:   "copy a changed config without restarting",
 			update: map[string]string{"config/config.yaml": "cgroup:\n  memory_max: \"4GiB\"\n"},
-			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
+			expect: func(t *testing.T, cfg *config.Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assertFile(t, hostPath(t, cfg, config.DefaultPath), "cgroup:\n  memory_max: \"4GiB\"\n", 0o644)
@@ -333,7 +333,7 @@ func TestInstaller_syncConfig(t *testing.T) {
 		{
 			name:   "copy a changed hosts.toml without a pending restart",
 			update: map[string]string{"config/certs.d/registry.example.com/hosts.toml": mockMirrorHostsTOML},
-			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
+			expect: func(t *testing.T, cfg *config.Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assertFile(t, hostPath(t, cfg, config.DefaultRegistryConfigPath+"/registry.example.com/hosts.toml"), mockMirrorHostsTOML, 0o644)
@@ -342,7 +342,7 @@ func TestInstaller_syncConfig(t *testing.T) {
 		},
 		{
 			name: "copy nothing when the config is unchanged",
-			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
+			expect: func(t *testing.T, cfg *config.Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				current, err := os.Stat(hostPath(t, cfg, config.DefaultPath))
@@ -354,7 +354,7 @@ func TestInstaller_syncConfig(t *testing.T) {
 		{
 			name:   "keep the host config when the new one is invalid",
 			update: map[string]string{"config/config.yaml": mockInvalidConfig},
-			expect: func(t *testing.T, cfg *Config, previous os.FileInfo, err error) {
+			expect: func(t *testing.T, cfg *config.Config, previous os.FileInfo, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "invalid log.level")
 				assertFile(t, hostPath(t, cfg, config.DefaultPath), readFile(t, "../../deploy/nydus-snapshotter/config.yaml"), 0o644)
@@ -366,13 +366,13 @@ func TestInstaller_syncConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := newConfig(t)
 			install(t, cfg)
-			writeFiles(t, cfg.PayloadDir, tc.update)
+			writeFiles(t, cfg.Installer.PayloadDir, tc.update)
 			previous, err := os.Stat(hostPath(t, cfg, config.DefaultPath))
 			assert.NoError(t, err)
 
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			tc.expect(t, cfg, previous, New(cfg, mocks.NewMockManager(ctl)).syncConfig(t.Context()))
+			tc.expect(t, cfg, previous, newInstaller(cfg, mocks.NewMockSystemd(ctl)).syncConfig(t.Context()))
 		})
 	}
 }
@@ -380,15 +380,15 @@ func TestInstaller_syncConfig(t *testing.T) {
 func TestInstaller_clearRestarts(t *testing.T) {
 	tests := []struct {
 		name    string
-		prepare func(t *testing.T, cfg *Config)
-		expect  func(t *testing.T, cfg *Config, err error)
+		prepare func(t *testing.T, cfg *config.Config)
+		expect  func(t *testing.T, cfg *config.Config, err error)
 	}{
 		{
 			name: "forget the pending units",
-			prepare: func(t *testing.T, cfg *Config) {
-				writeFiles(t, cfg.RootfsDir, map[string]string{restartPending: mockServiceRestart})
+			prepare: func(t *testing.T, cfg *config.Config) {
+				writeFiles(t, cfg.Installer.RootfsDir, map[string]string{restartPending: mockServiceRestart})
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, cfg *config.Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.NoFileExists(hostPath(t, cfg, restartPending))
@@ -396,28 +396,28 @@ func TestInstaller_clearRestarts(t *testing.T) {
 		},
 		{
 			name:    "nothing pending",
-			prepare: func(t *testing.T, cfg *Config) {},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			prepare: func(t *testing.T, cfg *config.Config) {},
+			expect: func(t *testing.T, cfg *config.Config, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 			},
 		},
 		{
 			name: "marker that cannot be removed",
-			prepare: func(t *testing.T, cfg *Config) {
+			prepare: func(t *testing.T, cfg *config.Config) {
 				assert.NoError(t, os.MkdirAll(filepath.Join(hostPath(t, cfg, restartPending), "busy"), 0o755))
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, cfg *config.Config, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "remove "+hostPath(t, cfg, restartPending))
 			},
 		},
 		{
 			name: "host path that cannot be resolved",
-			prepare: func(t *testing.T, cfg *Config) {
-				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.RootfsDir, "run")))
+			prepare: func(t *testing.T, cfg *config.Config) {
+				assert.NoError(t, os.Symlink("run", filepath.Join(cfg.Installer.RootfsDir, "run")))
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, cfg *config.Config, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "resolve host path "+restartPending)
 			},
@@ -428,7 +428,7 @@ func TestInstaller_clearRestarts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := newConfig(t)
 			tc.prepare(t, cfg)
-			tc.expect(t, cfg, New(cfg, nil).clearRestarts())
+			tc.expect(t, cfg, newInstaller(cfg, nil).clearRestarts())
 		})
 	}
 }

@@ -122,7 +122,7 @@ type fileSystem struct {
 	cfg atomic.Pointer[config.Config]
 
 	// systemd starts and stops daemon units.
-	systemd systemd.Manager
+	systemd systemd.Systemd
 
 	// store persists instances and blob access times.
 	store store.Store
@@ -169,7 +169,7 @@ type fileSystem struct {
 // New returns the Nydus v3 file system. It starts the daemon slice with its
 // limits, applies the daemon limits to the daemons already running and
 // recovers the preheats a previous run left.
-func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s store.Store, keychain auth.Keychain, startLock sync.Locker) (FileSystem, error) {
+func New(ctx context.Context, cfg *config.Config, systemd systemd.Systemd, s store.Store, keychain auth.Keychain, startLock sync.Locker) (FileSystem, error) {
 	driver, err := newDriver(cfg.Nydusd.Driver)
 	if err != nil {
 		return nil, err
@@ -182,7 +182,7 @@ func New(ctx context.Context, cfg *config.Config, manager systemd.Manager, s sto
 	}
 
 	f := &fileSystem{
-		systemd:   manager,
+		systemd:   systemd,
 		store:     s,
 		keychain:  keychain,
 		hosts:     registry.NewHosts(cfg.Registry.ConfigPath),

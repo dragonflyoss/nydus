@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/installer"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd"
 )
@@ -25,21 +26,21 @@ var installCmd = &cobra.Command{
 	DisableAutoGenTag: true,
 	SilenceUsage:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runInstall(cmd.Context(), configPath)
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			return err
+		}
+
+		return runInstall(cmd.Context(), cfg, configPath)
 	},
 }
 
-// runInstall installs the snapshotter onto the host as the config file at
-// path says, then keeps its config and Kubernetes credentials in sync until
-// ctx is done.
-func runInstall(ctx context.Context, path string) error {
-	cfg, err := installer.NewConfig(path)
-	if err != nil {
-		return err
-	}
+// runInstall installs the snapshotter onto the host as the config says, with
+// the config file at path, then keeps its config and Kubernetes credentials
+// in sync until ctx is done.
+func runInstall(ctx context.Context, cfg *config.Config, path string) error {
+	systemd := systemd.New()
+	defer systemd.Close()
 
-	manager := systemd.New(installer.JobTimeout)
-	defer manager.Close()
-
-	return installer.New(cfg, manager).Run(ctx)
+	return installer.New(cfg, path, systemd).Run(ctx)
 }

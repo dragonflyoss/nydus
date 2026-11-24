@@ -50,6 +50,28 @@ type authConfig struct {
 	RegistryToken string `json:"registrytoken,omitempty"`
 }
 
+// decodeAuth decodes the auth field, padded or not, into a username and a
+// password, refer to
+// https://github.com/kubernetes/kubernetes/blob/6575724b63e50cd5dd454e774bc293c6de1e4e12/pkg/credentialprovider/config.go.
+func (a *authConfig) decodeAuth() (string, string, error) {
+	encoding := base64.RawStdEncoding
+	if strings.HasSuffix(strings.TrimSpace(a.Auth), "=") {
+		encoding = base64.StdEncoding
+	}
+
+	decoded, err := encoding.DecodeString(a.Auth)
+	if err != nil {
+		return "", "", err
+	}
+
+	username, password, ok := strings.Cut(string(decoded), ":")
+	if !ok {
+		return "", "", errors.New("auth is not base64 username:password")
+	}
+
+	return username, password, nil
+}
+
 // dockerConfigJSON is a docker config.json, also the .dockerconfigjson key of
 // a kubernetes.io/dockerconfigjson secret.
 type dockerConfigJSON struct {
@@ -61,15 +83,6 @@ type dockerConfigJSON struct {
 
 	// CredHelpers names a credential helper per registry, unsupported.
 	CredHelpers map[string]string `json:"credHelpers,omitempty"`
-}
-
-// dockerConfigProvider provides the credentials of a docker config.json.
-type dockerConfigProvider struct {
-	// paths are the files searched, the first one that reads is used.
-	paths []string
-
-	// last is the file read last.
-	last atomic.Pointer[dockerConfigFile]
 }
 
 // dockerConfigFile is a docker config.json as it was read.
@@ -85,6 +98,15 @@ type dockerConfigFile struct {
 
 	// keyring indexes the auths of the file.
 	keyring *keyring
+}
+
+// dockerConfigProvider provides the credentials of a docker config.json.
+type dockerConfigProvider struct {
+	// paths are the files searched, the first one that reads is used.
+	paths []string
+
+	// last is the file read last.
+	last atomic.Pointer[dockerConfigFile]
 }
 
 // newDockerConfigProvider returns a provider reading the docker config at
@@ -160,26 +182,4 @@ func (d *dockerConfigProvider) read(ctx context.Context, path string) (*keyring,
 	k := &keyring{}
 	k.add(path, cfg.Auths)
 	return k, nil
-}
-
-// decodeAuth decodes the auth field, padded or not, into a username and a
-// password, refer to
-// https://github.com/kubernetes/kubernetes/blob/6575724b63e50cd5dd454e774bc293c6de1e4e12/pkg/credentialprovider/config.go.
-func (a *authConfig) decodeAuth() (string, string, error) {
-	encoding := base64.RawStdEncoding
-	if strings.HasSuffix(strings.TrimSpace(a.Auth), "=") {
-		encoding = base64.StdEncoding
-	}
-
-	decoded, err := encoding.DecodeString(a.Auth)
-	if err != nil {
-		return "", "", err
-	}
-
-	username, password, ok := strings.Cut(string(decoded), ":")
-	if !ok {
-		return "", "", errors.New("auth is not base64 username:password")
-	}
-
-	return username, password, nil
 }

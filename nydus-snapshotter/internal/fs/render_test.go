@@ -294,7 +294,7 @@ func TestFileSystem_renderConfig(t *testing.T) {
 			driver := NewMockDriver(ctl)
 			driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
 
-			f, image := newTestFileSystem(t, systemdmocks.NewMockManager(ctl), keychain, driver, nydusdmocks.NewMockClient(ctl))
+			f, image := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), keychain, driver, nydusdmocks.NewMockClient(ctl))
 			cfg := f.cfg.Load()
 			cfg.Registry.ConfigPath = t.TempDir()
 			hostDir := filepath.Join(cfg.Registry.ConfigPath, "registry.example.com")

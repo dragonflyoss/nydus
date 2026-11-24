@@ -48,6 +48,7 @@ func executeCommand(t *testing.T, args ...string) (string, error) {
 func TestRootCmd(t *testing.T) {
 	tests := []struct {
 		name   string
+		config string
 		args   []string
 		expect func(t *testing.T, out string, err error)
 	}{
@@ -86,17 +87,30 @@ func TestRootCmd(t *testing.T) {
 			},
 		},
 		{
-			name: "config that was asked for and is missing",
+			name: "config that is missing",
 			args: []string{"--config", "testdata/missing.yaml"},
 			expect: func(t *testing.T, out string, err error) {
 				assert := assert.New(t)
 				assert.ErrorIs(err, fs.ErrNotExist)
 			},
 		},
+		{
+			name:   "invalid config",
+			config: "log:\n  level: loud\n",
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "invalid log.level")
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.config != "" {
+				configPath = filepath.Join(t.TempDir(), "config.yaml")
+				assert.NoError(t, os.WriteFile(configPath, []byte(tc.config), 0o644))
+			}
+
 			out, err := executeCommand(t, tc.args...)
 			tc.expect(t, out, err)
 		})
@@ -149,64 +163,6 @@ func TestRunSnapshotter(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			go func() { done <- runSnapshotter(ctx, cfg, path) }()
 			tc.expect(t, cfg, cancel, done)
-		})
-	}
-}
-
-func TestLoadConfig(t *testing.T) {
-	tests := []struct {
-		name     string
-		data     string
-		explicit bool
-		expect   func(t *testing.T, cfg *config.Config, err error)
-	}{
-		{
-			name:     "load the config",
-			data:     "log:\n  level: debug\n",
-			explicit: true,
-			expect: func(t *testing.T, cfg *config.Config, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal("debug", cfg.Log.Level)
-			},
-		},
-		{
-			name: "default path that is missing yields the defaults",
-			expect: func(t *testing.T, cfg *config.Config, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal(config.New(), cfg)
-			},
-		},
-		{
-			name:     "path that was asked for and is missing",
-			explicit: true,
-			expect: func(t *testing.T, cfg *config.Config, err error) {
-				assert := assert.New(t)
-				assert.ErrorIs(err, fs.ErrNotExist)
-				assert.Nil(cfg)
-			},
-		},
-		{
-			name: "invalid config at the default path",
-			data: "log:\n  level: loud\n",
-			expect: func(t *testing.T, cfg *config.Config, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid log.level")
-				assert.Nil(cfg)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if tc.data != "" {
-				assert.NoError(t, os.WriteFile(path, []byte(tc.data), 0o644))
-			}
-
-			cfg, err := loadConfig(t.Context(), path, tc.explicit)
-			tc.expect(t, cfg, err)
 		})
 	}
 }

@@ -44,15 +44,15 @@ func newKeyMutex() *keyMutex {
 	}
 }
 
+type klock struct {
+	*semaphore.Weighted
+	ref int
+}
+
 type keyMutex struct {
 	mu sync.Mutex
 
 	locks map[string]*klock
-}
-
-type klock struct {
-	*semaphore.Weighted
-	ref int
 }
 
 func (km *keyMutex) Lock(ctx context.Context, key string) error {

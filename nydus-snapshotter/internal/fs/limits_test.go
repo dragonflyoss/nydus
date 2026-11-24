@@ -24,13 +24,13 @@ func TestFileSystem_Reload(t *testing.T) {
 	tests := []struct {
 		name   string
 		usage  uint64
-		mock   func(m *systemdmocks.MockManagerMockRecorder, usage uint64)
+		mock   func(m *systemdmocks.MockSystemdMockRecorder, usage uint64)
 		expect func(t *testing.T, f *fileSystem, err error)
 	}{
 		{
 			name:  "apply limits",
 			usage: 1 << 30,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(usage, nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, systemd.Resources{MemoryMax: 4 << 30, CPUQuotaPerSecUSec: 2_000_000}).Return(nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
@@ -45,7 +45,7 @@ func TestFileSystem_Reload(t *testing.T) {
 		{
 			name:  "defer daemon limits that fail to apply",
 			usage: 1 << 30,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(usage, nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
@@ -59,7 +59,7 @@ func TestFileSystem_Reload(t *testing.T) {
 		},
 		{
 			name: "defer limits while the slice usage cannot be read",
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(0), errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, err error) {
@@ -71,7 +71,7 @@ func TestFileSystem_Reload(t *testing.T) {
 		{
 			name:  "defer limits while the slice cannot be started",
 			usage: 1 << 30,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(usage, nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(errors.New("foo")).Times(1)
 			},
@@ -84,7 +84,7 @@ func TestFileSystem_Reload(t *testing.T) {
 		{
 			name:  "defer limits while the daemons cannot be listed",
 			usage: 1 << 30,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(usage, nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, errors.New("foo")).Times(1)
@@ -98,7 +98,7 @@ func TestFileSystem_Reload(t *testing.T) {
 		{
 			name:  "leave a unit that is no daemon alone",
 			usage: 1 << 30,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(usage, nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive, "nydusd-helper.service": systemd.ActiveStateActive}, nil).Times(1)
@@ -113,7 +113,7 @@ func TestFileSystem_Reload(t *testing.T) {
 		{
 			name:  "defer memory max below usage",
 			usage: 5 << 30,
-			mock: func(m *systemdmocks.MockManagerMockRecorder, usage uint64) {
+			mock: func(m *systemdmocks.MockSystemdMockRecorder, usage uint64) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(usage, nil).Times(1)
 				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
 			},
@@ -129,10 +129,10 @@ func TestFileSystem_Reload(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			manager := systemdmocks.NewMockManager(ctl)
-			tc.mock(manager.EXPECT(), tc.usage)
+			mockSystemd := systemdmocks.NewMockSystemd(ctl)
+			tc.mock(mockSystemd.EXPECT(), tc.usage)
 
-			f, _ := newTestFileSystem(t, manager, authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), nydusdmocks.NewMockClient(ctl))
+			f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), nydusdmocks.NewMockClient(ctl))
 			cfg := *f.cfg.Load()
 			cfg.Cgroup.MemoryMax = 4 << 30
 			cfg.Cgroup.CPUQuota = 200

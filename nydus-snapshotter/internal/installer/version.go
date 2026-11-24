@@ -29,7 +29,7 @@ var versionRegexp = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]*$`)
 // nydusVersion returns the version the payload's nydus binary prints, 3.0.0
 // in "nydus 3.0.0 (1a2b3c4d5, 2026-01-02)".
 func (i *Installer) nydusVersion(ctx context.Context) (string, error) {
-	binary := i.cfg.payload(payloadNydusBinary)
+	binary := i.payload(payloadNydusBinary)
 	out, err := exec.CommandContext(ctx, binary, "--version").Output()
 	if err != nil {
 		return "", fmt.Errorf("run %s --version: %w", binary, err)
@@ -54,7 +54,7 @@ func (i *Installer) nydusBinary(version string) string {
 // switchVersion atomically points the current link at a version whose binary
 // is in place and removes the versions no daemon start can resolve anymore.
 func (i *Installer) switchVersion(ctx context.Context, version string) error {
-	link, err := i.cfg.host(filepath.Dir(config.DefaultNydusdBinary))
+	link, err := i.host(filepath.Dir(config.DefaultNydusdBinary))
 	if err != nil {
 		return err
 	}
