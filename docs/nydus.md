@@ -3642,4 +3642,8 @@ The current validation surface is:
 	test that pushes a multi-layer OCI image, converts it to nydus and back for
 	every `oci-` compressor, and diffs the nydus mount against the rebuilt OCI
 	rootfs with `nydusify check`.
-5. xfstests and fio-backed performance checks for mount behavior.
+5. End-to-end suites (`tests/e2e`): one filesystem conformance set run
+	against every mount (FUSE, fileio and the kernel's EROFS; NBD, ublk and
+	fanotify as experimental), with fault, cache, soak and compatibility
+	suites beside it. The fio-backed cold-start benchmark (`make benchmark`)
+	owns performance.
