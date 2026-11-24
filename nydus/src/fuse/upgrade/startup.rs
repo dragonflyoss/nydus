@@ -14,7 +14,7 @@ use super::lifecycle::SessionRuntimeHandle;
 use super::ownership::{OwnerRecord, SessionOwner};
 use super::transfer::SessionTransfer;
 use crate::continuity::startup::{self, Frontend, Open};
-use crate::fuse::mount::{is_fuse_fstype, mount_entry_of};
+use crate::fuse::mount::MountTable;
 use crate::fuse::{ErofsFs, FuseService};
 
 /// The maximum number of final-component symlinks explicitly expanded during resolution.
@@ -106,8 +106,8 @@ impl Frontend for FuseFrontend {
     }
 
     fn inspect(&self) -> Result<Option<String>> {
-        match mount_entry_of(&self.mountpoint)? {
-            Some((device, kind)) if is_fuse_fstype(&kind) => Ok(Some(device)),
+        match MountTable::read()?.entry_of(&self.mountpoint) {
+            Some(entry) if entry.is_fuse() => Ok(Some(entry.device)),
             Some(_) => Err(Error::Runtime(
                 "another filesystem occupies the FUSE mountpoint; refusing startup".into(),
             )),

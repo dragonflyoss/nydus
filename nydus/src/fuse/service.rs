@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::fs::ErofsFs;
-use super::mount::{connection_dead, finish_session, mount_dev_of};
+use super::mount::{connection_dead, finish_session, MountTable};
 use super::upgrade::{
     validate_fuse_connection, FuseInitState, SessionOwner, SessionRuntimeHandle, SessionTransfer,
 };
@@ -110,19 +110,21 @@ impl FuseService {
             kernel_init_flags: kernel_capabilities.bits(),
         };
         let mount_dev = Some(
-            mount_dev_of(mountpoint)
+            MountTable::read()
                 .with_context(|| {
                     format!(
                         "failed to record the mount device of {}",
                         mountpoint.display()
                     )
                 })?
+                .entry_of(mountpoint)
                 .ok_or_else(|| {
                     Error::Runtime(format!(
                         "no mount device found for {}",
                         mountpoint.display()
                     ))
-                })?,
+                })?
+                .device,
         );
         let session = match park_timeout {
             Some(timeout) => session
