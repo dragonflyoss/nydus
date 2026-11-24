@@ -129,11 +129,12 @@ preheat:
 # the snapshotter ignores it.
 installer:
   # Where the Pod mounts the root filesystem of the host, the payload of the
-  # image (bin/ and systemd/) and its service account token. They follow the
-  # volumeMounts of the DaemonSet.
+  # image (bin/ and systemd/), its service account token and the certs.d of
+  # the ConfigMap. They follow the volumeMounts of the DaemonSet.
   rootfs_dir: /host
   payload_dir: /opt/nydus-snapshotter/payload
   token_dir: /var/run/secrets/kubernetes.io/serviceaccount
+  certs_dir: /etc/nydus-snapshotter/certs.d
   # How often the token and the config are copied to the host and the node
   # label is checked.
   sync_interval: 1m

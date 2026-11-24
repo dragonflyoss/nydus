@@ -7,7 +7,6 @@
 package cmd
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,23 +30,9 @@ func TestUninstallCmd(t *testing.T) {
 			},
 		},
 		{
-			name: "config that is missing",
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.ErrorIs(err, fs.ErrNotExist)
-			},
-		},
-		{
-			name:   "invalid config",
-			config: "log:\n  level: loud\n",
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid log.level")
-			},
-		},
-		{
-			name: "refuse an argument",
-			args: []string{"now"},
+			name:   "refuse an argument",
+			config: "log:\n  level: debug\n",
+			args:   []string{"now"},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "unknown command")

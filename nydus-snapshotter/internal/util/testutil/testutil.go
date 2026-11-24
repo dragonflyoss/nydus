@@ -10,13 +10,20 @@
 package testutil
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	cryptorand "crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -82,4 +89,21 @@ func MountTmpfs(t *testing.T, dir, options string) {
 			t.Errorf("unmount %s: %v", dir, err)
 		}
 	})
+}
+
+// NewCertificate returns a self-signed CA certificate in PEM.
+func NewCertificate(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), cryptorand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(cryptorand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }

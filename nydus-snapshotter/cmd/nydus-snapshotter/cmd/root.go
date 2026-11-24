@@ -22,6 +22,10 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/version"
 )
 
+// cfg is the config of every command: the defaults, which initConfig loads
+// the config file into.
+var cfg *config.Config
+
 // configPath is the path to the config file, which --config sets.
 var configPath string
 
@@ -36,11 +40,6 @@ var rootCmd = &cobra.Command{
 	SilenceUsage:      true,
 	SilenceErrors:     true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-
 		if err := log.SetLevel(cfg.Log.Level); err != nil {
 			return fmt.Errorf("set log level: %w", err)
 		}
@@ -65,7 +64,14 @@ func Execute() {
 
 // init initializes the root command.
 func init() {
-	// Every command reads the same config file; install also installs it.
+	// Initialize default config.
+	cfg = config.New()
+
+	// Initialize cobra.
+	cobra.OnInitialize(initConfig)
+
+	// Add flags. Every command reads the same config file; install also
+	// installs it.
 	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&configPath, "config", config.DefaultPath, "Specify the path to the config file")
 
@@ -74,12 +80,22 @@ func init() {
 	rootCmd.AddCommand(uninstallCmd)
 }
 
+// initConfig reads the config file into cfg before a command runs. A file
+// that does not load ends the process here: cobra's initializers return no
+// error, and cobra's own initConfig ends it the same way, refer to
+// https://github.com/spf13/cobra/blob/v1.10.2/site/content/user_guide.md.
+func initConfig() {
+	if err := cfg.Load(configPath); err != nil {
+		log.L.WithError(err).Fatal("nydus-snapshotter failed")
+	}
+}
+
 // runSnapshotter serves the snapshotter until ctx is done, reloading the
-// config file at path.
-func runSnapshotter(ctx context.Context, cfg *config.Config, path string) error {
+// config file at configPath.
+func runSnapshotter(ctx context.Context, cfg *config.Config, configPath string) error {
 	log.G(ctx).WithField("version", version.String()).Info("starting nydus-snapshotter")
 
-	s, err := server.New(ctx, cfg, path)
+	s, err := server.New(ctx, cfg, configPath)
 	if err != nil {
 		return err
 	}

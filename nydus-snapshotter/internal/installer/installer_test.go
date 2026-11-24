@@ -735,10 +735,12 @@ func newInstaller(cfg *config.Config, systemd systemd.Systemd) *Installer {
 func newConfig(t *testing.T) *config.Config {
 	t.Helper()
 	cfg := config.New()
+	payloadDir := t.TempDir()
 	cfg.Installer = config.InstallerConfig{
 		RootfsDir:    t.TempDir(),
-		PayloadDir:   t.TempDir(),
+		PayloadDir:   payloadDir,
 		TokenDir:     t.TempDir(),
+		CertsDir:     filepath.Join(payloadDir, "config/certs.d"),
 		SyncInterval: config.DefaultInstallerSyncInterval,
 	}
 

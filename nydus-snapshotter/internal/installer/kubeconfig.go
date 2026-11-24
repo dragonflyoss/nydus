@@ -8,9 +8,7 @@ package installer
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 
@@ -18,6 +16,7 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/kubeutil"
 )
 
 // syncKubeconfig copies the Pod's service account token and CA to the host
@@ -69,7 +68,7 @@ func (i *Installer) syncKubeconfig(ctx context.Context) error {
 // clients do and reads the token and the CA from host files, refer to
 // https://github.com/kubernetes/client-go/blob/master/rest/config.go.
 func (i *Installer) kubeconfig(tokenPath, caPath string) ([]byte, error) {
-	server, err := i.apiServer()
+	server, err := kubeutil.APIServer()
 	if err != nil {
 		return nil, err
 	}
@@ -99,14 +98,4 @@ func (i *Installer) kubeconfig(tokenPath, caPath string) ([]byte, error) {
 	}
 
 	return kubeconfig, nil
-}
-
-// apiServer returns the address of the API server a Pod is given.
-func (i *Installer) apiServer() (string, error) {
-	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
-	if host == "" || port == "" {
-		return "", errors.New("KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
-	}
-
-	return "https://" + net.JoinHostPort(host, port), nil
 }

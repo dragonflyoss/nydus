@@ -8,9 +8,7 @@ package installer
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	introspectionapi "github.com/containerd/containerd/api/services/introspection/v1"
@@ -18,15 +16,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/pager"
+
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/kubeutil"
 )
 
 const (
@@ -58,23 +52,13 @@ const (
 	// servingInterval is how often that wait checks the snapshotter.
 	servingInterval = time.Second
 
-	// requestTimeout bounds a call to the snapshotter, containerd and the
-	// API server.
+	// requestTimeout bounds a call to the snapshotter and containerd.
 	requestTimeout = 10 * time.Second
 
 	// notReadyThreshold is how many checks in a row have to fail before the
 	// label is removed, the default failureThreshold of a probe, refer to
 	// https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#Probe.
 	notReadyThreshold = 3
-
-	// kubeQPS is the rate of the requests to the API server, kubelet's
-	// default, so UnlabelNodes clears 5000 nodes within the five minutes
-	// helm gives a hook, refer to
-	// https://github.com/kubernetes/kubernetes/blob/v1.34.0/pkg/kubelet/apis/config/v1beta1/defaults.go.
-	kubeQPS = 50
-
-	// kubeBurst is the burst of those requests, kubelet's default.
-	kubeBurst = 100
 )
 
 // syncNodeLabel makes NodeLabel follow whether Pods on the node can use the
@@ -149,49 +133,6 @@ func (i *Installer) syncNodeLabel(ctx context.Context) error {
 
 	logger.Info(message)
 	return nil
-}
-
-// UnlabelNodes removes NodeLabel from every node that carries it. It is the
-// post-delete hook of the chart: an installer that stops keeps its label, so
-// the uninstall removes them, as node-feature-discovery prunes its labels
-// with such a hook, refer to
-// https://github.com/kubernetes-sigs/node-feature-discovery/blob/master/deployment/helm/node-feature-discovery/templates/post-delete-job.yaml.
-//
-//	installer stops ─▶ label kept, the next installer Pod takes it over
-//	helm uninstall ──▶ post-delete hook ─▶ UnlabelNodes ─▶ label removed
-func (i *Installer) UnlabelNodes(ctx context.Context) error {
-	if err := i.initKubeClient(); err != nil {
-		return err
-	}
-
-	// List in pages, so the labeled nodes of a large cluster are never held
-	// at once.
-	nodes := pager.New(func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-		return i.kubeClient.CoreV1().Nodes().List(ctx, opts)
-	})
-
-	var errs []error
-	if err := nodes.EachListItem(ctx, metav1.ListOptions{LabelSelector: NodeLabel}, func(obj runtime.Object) error {
-		node, err := meta.Accessor(obj)
-		if err != nil {
-			return err
-		}
-
-		// A node deleted since it was listed has no label left to remove.
-		switch err := i.patchNode(ctx, node.GetName(), unlabelPatch); {
-		case apierrors.IsNotFound(err):
-		case err != nil:
-			errs = append(errs, err)
-		default:
-			log.G(ctx).WithFields(log.Fields{"node": node.GetName(), "label": NodeLabel}).Info("removed node label")
-		}
-
-		return nil
-	}); err != nil {
-		return fmt.Errorf("list labeled nodes: %w", err)
-	}
-
-	return errors.Join(errs...)
 }
 
 // nodeLabel returns the value of NodeLabel on the node and whether the node
@@ -337,31 +278,11 @@ func (i *Installer) initKubeClient() error {
 		return nil
 	}
 
-	client, err := i.newKubeClient()
+	client, err := kubeutil.NewClient(i.cfg.Installer.TokenDir)
 	if err != nil {
 		return err
 	}
 
 	i.kubeClient = client
 	return nil
-}
-
-// newKubeClient returns a client of the API server for the Pod's service
-// account, as rest.InClusterConfig builds one, with the token directory the
-// installer was given, refer to
-// https://github.com/kubernetes/client-go/blob/master/rest/config.go.
-func (i *Installer) newKubeClient() (kubernetes.Interface, error) {
-	server, err := i.apiServer()
-	if err != nil {
-		return nil, err
-	}
-
-	return kubernetes.NewForConfig(&rest.Config{
-		Host:            server,
-		BearerTokenFile: filepath.Join(i.cfg.Installer.TokenDir, "token"),
-		TLSClientConfig: rest.TLSClientConfig{CAFile: filepath.Join(i.cfg.Installer.TokenDir, "ca.crt")},
-		QPS:             kubeQPS,
-		Burst:           kubeBurst,
-		Timeout:         requestTimeout,
-	})
 }

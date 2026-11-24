@@ -33,8 +33,8 @@ func TestNew(t *testing.T) {
 			name: "shipped config states the defaults",
 			expect: func(t *testing.T, cfg *Config) {
 				assert := assert.New(t)
-				shipped, err := Load("../../deploy/nydus-snapshotter/config.yaml")
-				assert.NoError(err)
+				shipped := New()
+				assert.NoError(shipped.Load("../../deploy/nydus-snapshotter/config.yaml"))
 				assert.Equal(cfg, shipped)
 			},
 		},
@@ -96,14 +96,15 @@ func TestLoad(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.ErrorIs(err, os.ErrNotExist)
-				assert.Nil(cfg)
+				assert.Equal(New(), cfg)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Load(tc.path)
+			cfg := New()
+			err := cfg.Load(tc.path)
 			tc.expect(t, cfg, err)
 		})
 	}
@@ -573,6 +574,14 @@ func TestConfig_Validate(t *testing.T) {
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, `installer.token_dir must be an absolute path, got ""`)
+			},
+		},
+		{
+			name:   "installer certs dir that is relative",
+			mutate: func(cfg *Config) { cfg.Installer.CertsDir = "certs.d" },
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, `installer.certs_dir must be an absolute path, got "certs.d"`)
 			},
 		},
 		{

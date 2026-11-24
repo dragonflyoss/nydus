@@ -368,6 +368,10 @@ type InstallerConfig struct {
 	// TokenDir is the Pod's service account token directory.
 	TokenDir string `yaml:"token_dir"`
 
+	// CertsDir is the certs.d directory to install, where the Pod mounts
+	// the ConfigMap's; nothing is installed from a missing one.
+	CertsDir string `yaml:"certs_dir"`
+
 	// SyncInterval is how often the token and the config are copied to the
 	// host and the node label is checked.
 	SyncInterval Duration `yaml:"sync_interval"`
@@ -476,27 +480,13 @@ func New() *Config {
 			RootfsDir:    DefaultInstallerRootfsDir,
 			PayloadDir:   DefaultInstallerPayloadDir,
 			TokenDir:     DefaultInstallerTokenDir,
+			CertsDir:     DefaultInstallerCertsDir,
 			SyncInterval: DefaultInstallerSyncInterval,
 			NodeLabel: InstallerNodeLabelConfig{
 				ContainerdAddr: DefaultInstallerContainerdAddr,
 			},
 		},
 	}
-}
-
-// Load reads, decodes strictly and validates the config at path.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-
-	cfg, err := Parse(data)
-	if err != nil {
-		return nil, fmt.Errorf("load config %s: %w", path, err)
-	}
-
-	return cfg, nil
 }
 
 // Parse decodes strictly and validates a YAML config over the defaults. An
@@ -521,6 +511,24 @@ func Parse(data []byte) (*Config, error) {
 	return cfg, nil
 }
 
+// Load reads the config at path into c: the file decoded strictly over the
+// defaults and validated. A file that does not load leaves c as it was.
+func (c *Config) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	cfg, err := Parse(data)
+	if err != nil {
+		return fmt.Errorf("load config %s: %w", path, err)
+	}
+
+	*c = *cfg
+
+	return nil
+}
+
 // Validate checks the config values.
 func (c *Config) Validate() error {
 	for _, p := range []struct {
@@ -540,6 +548,7 @@ func (c *Config) Validate() error {
 		{name: "installer.rootfs_dir", path: c.Installer.RootfsDir},
 		{name: "installer.payload_dir", path: c.Installer.PayloadDir},
 		{name: "installer.token_dir", path: c.Installer.TokenDir},
+		{name: "installer.certs_dir", path: c.Installer.CertsDir},
 		{name: "installer.node_label.containerd_addr", path: c.Installer.NodeLabel.ContainerdAddr},
 	} {
 		if p.optional && p.path == "" {

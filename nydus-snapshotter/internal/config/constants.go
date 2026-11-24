@@ -220,6 +220,10 @@ const (
 	// directory.
 	DefaultInstallerTokenDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
+	// DefaultInstallerCertsDir is where the DaemonSet mounts the certs.d of
+	// the ConfigMap, the path it is installed to on the host.
+	DefaultInstallerCertsDir = DefaultRegistryConfigPath
+
 	// DefaultInstallerSyncInterval is how often the installer syncs, well
 	// within the hour a projected token lives.
 	DefaultInstallerSyncInterval = Duration(time.Minute)

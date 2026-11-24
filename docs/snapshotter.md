@@ -760,11 +760,12 @@ preheat:
 # the snapshotter ignores it.
 installer:
   # Where the Pod mounts the root filesystem of the host, the payload of the
-  # image (bin/ and systemd/) and its service account token. They follow the
-  # volumeMounts of the DaemonSet.
+  # image (bin/ and systemd/), its service account token and the certs.d of
+  # the ConfigMap. They follow the volumeMounts of the DaemonSet.
   rootfs_dir: /host
   payload_dir: /opt/nydus-snapshotter/payload
   token_dir: /var/run/secrets/kubernetes.io/serviceaccount
+  certs_dir: /etc/nydus-snapshotter/certs.d
   # How often the token and the config are copied to the host and the node
   # label is checked.
   sync_interval: 1m
@@ -896,9 +897,12 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
   - Runs `nydus-snapshotter install` with no argument. The installer reads
     the config it installs at the path the snapshotter defaults to,
     `/etc/nydus-snapshotter/config.yaml` (`--config` names another), where
-    the DaemonSet mounts the ConfigMap, `certs.d` beside it, as the charts of
+    the DaemonSet mounts the ConfigMap, as the charts of
     node-feature-discovery and Dragonfly's dfinit mount a ConfigMap at their
     binary's default config path. The image carries the default config there.
+    The `certs.d` it installs is the directory `installer.certs_dir` names,
+    where the same mount puts the ConfigMap's, as Istio's CNI installer is
+    told its source and target directories and derives neither.
     Its own settings are the `installer` section of that file. A file that
     cannot be loaded ends the installer with the error before it writes
     anything to the host, the service account token included.
@@ -1142,22 +1146,23 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 │   ├── main.go                     cmd.Execute()
 │   └── cmd/{root.go,install.go,uninstall.go}  serve; install (DaemonSet entrypoint); uninstall (post-delete hook)
 ├── internal/
-│   ├── config/                     config.go (Config, New, Load, Validate), constants.go, types.go, watch.go; testdata/
+│   ├── config/                     config.go (Config, New, Parse, Load, Validate), constants.go, types.go, watch.go; testdata/
 │   ├── snapshot/                   snapshots.Snapshotter on core/snapshots/storage: snapshot.go, mount.go, label.go, blobs.go, image.go, release.go
 │   ├── fs/                         FileSystem (fs.go), daemon.go, limits.go, pusher.go, preheat.go, render.go, bootstrap.go, gather.go, Driver and fuse
 │   ├── preheat/                    NydusSnapshotter gRPC service (service.go), image resolver over containerd (resolver.go)
-│   ├── systemd/                    Manager (systemd.go), units and slices (unit.go) over systemd's D-Bus API (dbus.go)
+│   ├── systemd/                    Systemd (systemd.go), units and slices (unit.go) over systemd's D-Bus API (dbus.go)
 │   ├── nydusd/                     nydus daemon API client
 │   ├── store/                      bbolt instances and blobs
 │   ├── auth/                       Keychain (keychain.go), keyring, kube_secret and docker config providers
 │   ├── registry/                   image reference, hosts.toml
 │   ├── cache/                      blob cache GC
 │   ├── installer/                  host install: installer.go, payload.go, kubeconfig.go, version.go, label.go
+│   ├── uninstaller/                the post-delete hook: removes the node label from every node
 │   ├── server/                     wiring, gRPC serving, socket activation, workers
 │   ├── version/                    -ldflags build information
 │   ├── kmutex/                     keyed mutex (from containerd internal/kmutex)
 │   ├── metrics/                    Prometheus collectors, /metrics server
-│   └── util/testutil/              helpers tests of several packages share
+│   └── util/                       kubeutil/ (API server client of a Pod, for installer and uninstaller), testutil/ (helpers tests share)
 ├── deploy/                         systemd units, default config, containerd snippets
 ├── Dockerfile                      installer image: nydus-snapshotter and nydus
 ├── Makefile                        build, test, lint, generate

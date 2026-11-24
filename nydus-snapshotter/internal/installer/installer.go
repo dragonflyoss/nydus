@@ -58,8 +58,7 @@ type Installer struct {
 	// holds the installer's own settings.
 	cfg *config.Config
 
-	// configPath is the config file to install, the ConfigMap, with certs.d
-	// beside it as on the host.
+	// configPath is the config file to install, the ConfigMap's.
 	configPath string
 
 	// nodeName is the node to label with NodeLabel, the spec.nodeName of the
@@ -245,10 +244,4 @@ func (i *Installer) host(path string) (string, error) {
 // payload returns where a payload file is.
 func (i *Installer) payload(path string) string {
 	return filepath.Join(i.cfg.Installer.PayloadDir, path)
-}
-
-// certsDir returns the certs.d directory to install, beside the config file
-// as config.DefaultRegistryConfigPath is on the host.
-func (i *Installer) certsDir() string {
-	return filepath.Join(filepath.Dir(i.configPath), filepath.Base(config.DefaultRegistryConfigPath))
 }

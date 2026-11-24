@@ -9,9 +9,9 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,6 +22,10 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/version"
+)
+
+var (
+	mockConfigPathEnvVar = "NYDUS_SNAPSHOTTER_TEST_CONFIG_PATH"
 )
 
 func executeCommand(t *testing.T, args ...string) (string, error) {
@@ -48,7 +52,6 @@ func executeCommand(t *testing.T, args ...string) (string, error) {
 func TestRootCmd(t *testing.T) {
 	tests := []struct {
 		name   string
-		config string
 		args   []string
 		expect func(t *testing.T, out string, err error)
 	}{
@@ -86,12 +89,49 @@ func TestRootCmd(t *testing.T) {
 				assert.ErrorContains(err, "unknown flag")
 			},
 		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			assert.NoError(t, os.WriteFile(path, []byte("log:\n  level: debug\n"), 0o644))
+
+			out, err := executeCommand(t, append([]string{"--config", path}, tc.args...)...)
+			tc.expect(t, out, err)
+		})
+	}
+}
+
+func TestInitConfig(t *testing.T) {
+	if path := os.Getenv(mockConfigPathEnvVar); path != "" {
+		configPath = path
+		initConfig()
+		return
+	}
+
+	tests := []struct {
+		name   string
+		config string
+		expect func(t *testing.T, out string, err error)
+	}{
 		{
-			name: "config that is missing",
-			args: []string{"--config", "testdata/missing.yaml"},
+			name:   "config that loads",
+			config: "log:\n  level: debug\n",
 			expect: func(t *testing.T, out string, err error) {
 				assert := assert.New(t)
-				assert.ErrorIs(err, fs.ErrNotExist)
+				assert.NoError(err)
+			},
+		},
+		{
+			name: "config that is missing",
+			expect: func(t *testing.T, out string, err error) {
+				assert := assert.New(t)
+				var exitErr *exec.ExitError
+				if assert.ErrorAs(err, &exitErr) {
+					assert.Equal(1, exitErr.ExitCode())
+				}
+
+				assert.Contains(out, "no such file or directory")
 			},
 		},
 		{
@@ -99,20 +139,27 @@ func TestRootCmd(t *testing.T) {
 			config: "log:\n  level: loud\n",
 			expect: func(t *testing.T, out string, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid log.level")
+				var exitErr *exec.ExitError
+				if assert.ErrorAs(err, &exitErr) {
+					assert.Equal(1, exitErr.ExitCode())
+				}
+
+				assert.Contains(out, "invalid log.level")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
 			if tc.config != "" {
-				configPath = filepath.Join(t.TempDir(), "config.yaml")
-				assert.NoError(t, os.WriteFile(configPath, []byte(tc.config), 0o644))
+				assert.NoError(t, os.WriteFile(path, []byte(tc.config), 0o644))
 			}
 
-			out, err := executeCommand(t, tc.args...)
-			tc.expect(t, out, err)
+			cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestInitConfig$")
+			cmd.Env = append(os.Environ(), mockConfigPathEnvVar+"="+path)
+			out, err := cmd.CombinedOutput()
+			tc.expect(t, string(out), err)
 		})
 	}
 }

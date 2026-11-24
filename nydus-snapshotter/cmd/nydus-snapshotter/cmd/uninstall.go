@@ -13,6 +13,7 @@ import (
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/installer"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/uninstaller"
 )
 
 // uninstallCmd represents the uninstall command, the post-delete hook of the
@@ -25,17 +26,12 @@ var uninstallCmd = &cobra.Command{
 	DisableAutoGenTag: true,
 	SilenceUsage:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-
-		return runUninstall(cmd.Context(), cfg, configPath)
+		return runUninstall(cmd.Context(), cfg)
 	},
 }
 
 // runUninstall removes the label the installers keep on their nodes from
 // every node, with the service account of the Pod.
-func runUninstall(ctx context.Context, cfg *config.Config, path string) error {
-	return installer.New(cfg, path, nil).UnlabelNodes(ctx)
+func runUninstall(ctx context.Context, cfg *config.Config) error {
+	return uninstaller.New(cfg).Run(ctx)
 }

@@ -26,21 +26,16 @@ var installCmd = &cobra.Command{
 	DisableAutoGenTag: true,
 	SilenceUsage:      true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-
 		return runInstall(cmd.Context(), cfg, configPath)
 	},
 }
 
 // runInstall installs the snapshotter onto the host as the config says, with
-// the config file at path, then keeps its config and Kubernetes credentials
-// in sync until ctx is done.
-func runInstall(ctx context.Context, cfg *config.Config, path string) error {
+// the config file at configPath, then keeps its config and Kubernetes
+// credentials in sync until ctx is done.
+func runInstall(ctx context.Context, cfg *config.Config, configPath string) error {
 	systemd := systemd.New()
 	defer systemd.Close()
 
-	return installer.New(cfg, path, systemd).Run(ctx)
+	return installer.New(cfg, configPath, systemd).Run(ctx)
 }

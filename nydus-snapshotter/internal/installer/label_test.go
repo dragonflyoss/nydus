@@ -8,13 +8,7 @@ package installer
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
-	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -31,15 +25,14 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd/mocks"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 var (
@@ -50,12 +43,6 @@ var (
 	mockLabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", NodeLabel: nodeLabelValue}}}
 
 	mockMislabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", NodeLabel: "false"}}}
-
-	mockOtherLabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"kept": "yes", NodeLabel: nodeLabelValue}}}
-
-	mockUnlabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-3", Labels: map[string]string{"kept": "yes"}}}
-
-	mockNodeNotFound = apierrors.NewNotFound(corev1.Resource("nodes"), mockNodeName)
 
 	mockSnapshotterPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": config.DefaultGRPCAddr}}
 
@@ -112,18 +99,6 @@ func (h *mockHost) verbs() []string {
 	}
 
 	return verbs
-}
-
-func (h *mockHost) labeledNodes(t *testing.T) []string {
-	t.Helper()
-	nodes, err := h.client.CoreV1().Nodes().List(t.Context(), metav1.ListOptions{LabelSelector: NodeLabel})
-	assert.NoError(t, err)
-	names := []string{}
-	for _, node := range nodes.Items {
-		names = append(names, node.Name)
-	}
-
-	return names
 }
 
 func (h *mockHost) fail(verb string, err error, times int) {
@@ -204,7 +179,7 @@ func TestInstaller_initKubeClient(t *testing.T) {
 			name: "build the client of the api server once",
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, h *mockHost) {
-				writeFiles(t, h.installer.cfg.Installer.TokenDir, map[string]string{"ca.crt": newCertificate(t)})
+				writeFiles(t, h.installer.cfg.Installer.TokenDir, map[string]string{"ca.crt": testutil.NewCertificate(t)})
 				h.installer.kubeClient = nil
 			},
 			expect: func(t *testing.T, h *mockHost, err error) {
@@ -597,97 +572,6 @@ func TestInstaller_ready(t *testing.T) {
 	}
 }
 
-func TestInstaller_UnlabelNodes(t *testing.T) {
-	tests := []struct {
-		name    string
-		nodes   []*corev1.Node
-		prepare func(t *testing.T, h *mockHost)
-		expect  func(t *testing.T, h *mockHost, err error)
-	}{
-		{
-			name:    "remove the label from every node that carries it",
-			nodes:   []*corev1.Node{mockLabeledNode, mockOtherLabeledNode, mockUnlabeledNode},
-			prepare: func(t *testing.T, h *mockHost) {},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal([]string{"list", "patch", "patch"}, h.verbs())
-				assert.Empty(h.labeledNodes(t))
-				assert.Equal(mockNode.Labels, h.labels(t))
-			},
-		},
-		{
-			name:    "leave a cluster without the label alone",
-			nodes:   []*corev1.Node{mockNode, mockUnlabeledNode},
-			prepare: func(t *testing.T, h *mockHost) {},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal([]string{"list"}, h.verbs())
-			},
-		},
-		{
-			name:  "go on to the next node when a patch fails",
-			nodes: []*corev1.Node{mockLabeledNode, mockOtherLabeledNode},
-			prepare: func(t *testing.T, h *mockHost) {
-				h.fail("patch", errors.New("foo"), 1)
-			},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "patch node ")
-				assert.ErrorContains(err, ": foo")
-				assert.Equal([]string{"list", "patch", "patch"}, h.verbs())
-				assert.Len(h.labeledNodes(t), 1)
-			},
-		},
-		{
-			name:  "skip a node deleted since it was listed",
-			nodes: []*corev1.Node{mockLabeledNode, mockOtherLabeledNode},
-			prepare: func(t *testing.T, h *mockHost) {
-				h.fail("patch", mockNodeNotFound, 1)
-			},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal([]string{"list", "patch", "patch"}, h.verbs())
-			},
-		},
-		{
-			name:  "nodes that cannot be listed",
-			nodes: []*corev1.Node{mockLabeledNode},
-			prepare: func(t *testing.T, h *mockHost) {
-				h.fail("list", errors.New("foo"), 1)
-			},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "list labeled nodes: foo")
-				assert.Equal([]string{"list"}, h.verbs())
-			},
-		},
-		{
-			name:  "pod without an api server",
-			nodes: []*corev1.Node{mockLabeledNode},
-			prepare: func(t *testing.T, h *mockHost) {
-				h.installer.kubeClient = nil
-			},
-			expect: func(t *testing.T, h *mockHost, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
-				assert.Empty(h.verbs())
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KUBERNETES_SERVICE_HOST", "")
-			h := newMockHost(t, false, tc.nodes...)
-			tc.prepare(t, h)
-			tc.expect(t, h, h.installer.UnlabelNodes(t.Context()))
-		})
-	}
-}
-
 func TestInstaller_waitServing(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -734,65 +618,6 @@ func TestInstaller_waitServing(t *testing.T) {
 			start := time.Now()
 			h.installer.waitServing(ctx)
 			tc.expect(t, time.Since(start))
-		})
-	}
-}
-
-func newCertificate(t *testing.T) string {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	assert.NoError(t, err)
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	assert.NoError(t, err)
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-}
-
-func TestInstaller_newKubeClient(t *testing.T) {
-	tests := []struct {
-		name   string
-		host   string
-		ca     string
-		expect func(t *testing.T, client kubernetes.Interface, err error)
-	}{
-		{
-			name: "client of the pod's api server",
-			host: "10.96.0.1",
-			ca:   newCertificate(t),
-			expect: func(t *testing.T, client kubernetes.Interface, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.NotNil(client)
-			},
-		},
-		{
-			name: "ca that is no certificate",
-			host: "10.96.0.1",
-			ca:   mockCA,
-			expect: func(t *testing.T, client kubernetes.Interface, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "unable to load root certificates")
-			},
-		},
-		{
-			name: "pod without an api server",
-			ca:   mockCA,
-			expect: func(t *testing.T, client kubernetes.Interface, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
-				assert.Nil(client)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KUBERNETES_SERVICE_HOST", tc.host)
-			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-			cfg := newConfig(t)
-			writeFiles(t, cfg.Installer.TokenDir, map[string]string{"ca.crt": tc.ca})
-			client, err := newInstaller(cfg, mocks.NewMockSystemd(gomock.NewController(t))).newKubeClient()
-			tc.expect(t, client, err)
 		})
 	}
 }
