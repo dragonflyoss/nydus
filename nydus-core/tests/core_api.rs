@@ -67,6 +67,31 @@ fn read_returns_the_whole_file() {
 }
 
 #[test]
+fn chunk_size_uses_the_existing_reader_without_blob_access() {
+    let image = Image::build();
+    let cache_dir = tempdir().unwrap();
+    let core = image.core(cache_dir.path(), &[]);
+    let node = core.fs.open(FILE_NAME).unwrap();
+    fs::remove_file(&image.bootstrap).unwrap();
+    fs::remove_file(image.blob_path()).unwrap();
+
+    assert_eq!(node.chunk_size().unwrap(), u64::from(CHUNK_SIZE));
+}
+
+#[test]
+fn chunk_size_rejects_non_chunk_based_entries() {
+    let image = Image::build();
+    let cache_dir = tempdir().unwrap();
+    let core = image.core(cache_dir.path(), &[]);
+    let root = core.fs.open("/").unwrap();
+
+    assert!(matches!(
+        root.chunk_size(),
+        Err(nydus_error::Error::Unsupported(_))
+    ));
+}
+
+#[test]
 fn read_at_returns_the_file_bytes_up_to_the_end() {
     let image = Image::build();
     let cache_dir = tempdir().unwrap();
