@@ -793,12 +793,17 @@ Current implementation notes:
 - Every blob entry carries a `VERIFIED` row: `yes` when the resolved file
 	reproduces the slot id, `no` when it was resolved by name only, and
 	`<unresolved>` when no candidate matched.
-- z_erofs images (superblock `COMPR OR DISTANCE` non-zero) are checked as
+- z_erofs images (the `compr_cfgs` incompat feature with a non-zero
+	superblock `COMPR OR DISTANCE`) are checked as
 	such: the incompat dump names `zero_padding`, `big_pcluster+compr_cfgs` and
 	`fragments`; the summary counts `Z_EROFS FILES`, `Z_EROFS FRAGMENT FILES`
 	and `Z_EROFS PCLUSTERS OUT OF RANGE` (HEAD/PLAIN lcluster addresses that no
 	device covers, EOF indexes excluded, always 0 for a sound image), and the
-	packed inode is walked too. Each device resolves to
+	packed inode is walked too. The command fails when a mount could not read
+	every file: a pcluster out of range, an LZ4 pcluster of more blocks than
+	the superblock's `max_pclusterblks`, or a file in a data layout nydus does
+	not decode (`OTHER LAYOUT FILES`, e.g. the compact indexes `mkfs.erofs`
+	writes by default). Each device resolves to
 	`<blob-dir>/<slot id>`, the layer's full blob
 	(`SLOT DIGEST KIND z_erofs_device`); it verifies when the footer's data
 	region spans the declared block count and the file's SHA256 equals the slot

@@ -2,7 +2,7 @@
 
 use crate::erofs::{
     EROFS_BLOCK_SIZE, Z_EROFS_LCLUSTER_INDEX_SIZE, Z_EROFS_LCLUSTER_TYPE_NONHEAD,
-    Z_EROFS_LI_LCLUSTER_TYPE_MASK,
+    Z_EROFS_LI_D0_CBLKCNT, Z_EROFS_LI_LCLUSTER_TYPE_MASK,
 };
 use crate::error::{Error, Result};
 use crate::utils::bytes::{read_u16, read_u16_at, read_u32, write_u16, write_u16_at, write_u32};
@@ -100,6 +100,14 @@ impl ZErofsLclusterIndex {
     /// count instead.
     pub fn delta(&self) -> [u16; 2] {
         [read_u16_at(&self.di_u, 0), read_u16_at(&self.di_u, 2)]
+    }
+
+    /// The pcluster's block count, for a NONHEAD index whose `delta[0]`
+    /// holds it (`Z_EROFS_LI_D0_CBLKCNT`) instead of the distance to its
+    /// head: the first one behind the head of a pcluster of several blocks.
+    pub fn pcluster_blocks(&self) -> Option<u16> {
+        let delta0 = self.delta()[0];
+        (delta0 & Z_EROFS_LI_D0_CBLKCNT != 0).then_some(delta0 & !Z_EROFS_LI_D0_CBLKCNT)
     }
 
     /// File offset where the extent starts, for the HEAD or PLAIN index of
@@ -200,15 +208,16 @@ mod tests {
     #[test]
     fn new_nonhead_encodes_the_deltas_little_endian() {
         let test_cases = vec![
-            ([1, 1], [2, 0, 0, 0, 1, 0, 1, 0]),
+            ([1, 1], [2, 0, 0, 0, 1, 0, 1, 0], None),
             (
                 [Z_EROFS_LI_D0_CBLKCNT | 2, 0x0304],
                 [2, 0, 0, 0, 2, 8, 4, 3],
+                Some(2),
             ),
-            ([u16::MAX, 0], [2, 0, 0, 0, 0xff, 0xff, 0, 0]),
+            ([u16::MAX, 0], [2, 0, 0, 0, 0xff, 0xff, 0, 0], Some(0xf7ff)),
         ];
 
-        for (delta, expected) in test_cases {
+        for (delta, expected, pcluster_blocks) in test_cases {
             let index = ZErofsLclusterIndex::new_nonhead(delta);
             assert_eq!(index.as_bytes(), &expected);
 
@@ -216,6 +225,7 @@ mod tests {
             assert_eq!(parsed.lcluster_type(), Z_EROFS_LCLUSTER_TYPE_NONHEAD);
             assert_eq!(parsed.clusterofs(), 0);
             assert_eq!(parsed.delta(), delta);
+            assert_eq!(parsed.pcluster_blocks(), pcluster_blocks);
         }
     }
 

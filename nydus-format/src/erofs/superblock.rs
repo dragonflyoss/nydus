@@ -2,9 +2,9 @@
 
 use crate::erofs::{
     EROFS_BLKSZBITS, EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
-    EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_FEATURE_INCOMPAT_FRAGMENTS,
-    EROFS_FEATURE_INCOMPAT_ZERO_PADDING, EROFS_SB_BASE_SIZE, EROFS_SB_EXTSLOT_SIZE,
-    EROFS_SUPER_MAGIC_V1,
+    EROFS_FEATURE_INCOMPAT_COMPR_CFGS, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+    EROFS_FEATURE_INCOMPAT_FRAGMENTS, EROFS_FEATURE_INCOMPAT_ZERO_PADDING, EROFS_SB_BASE_SIZE,
+    EROFS_SB_EXTSLOT_SIZE, EROFS_SUPER_MAGIC_V1,
 };
 use crate::error::{Error, Result};
 use crate::utils::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
@@ -314,9 +314,14 @@ impl ErofsSuperblock {
     }
 
     /// Available compression algorithm bitmap (bit 0 = LZ4); non-zero only
-    /// for z_erofs images declaring COMPR_CFGS.
+    /// for z_erofs images declaring COMPR_CFGS. Without that feature the
+    /// field is the LZ4 match distance of an image that names no algorithm.
     pub fn available_compr_algs(&self) -> u16 {
-        read_u16(&self.compr_or_distance)
+        if self.incompat().contains(EROFS_FEATURE_INCOMPAT_COMPR_CFGS) {
+            read_u16(&self.compr_or_distance)
+        } else {
+            0
+        }
     }
 
     /// The packed inode holding fragment data, or `None` without FRAGMENTS.
@@ -414,6 +419,8 @@ mod tests {
         superblock.sb_extslots = 2;
         superblock.set_available_compr_algs(0b1001);
         superblock.set_packed_nid(77);
+        // Without COMPR_CFGS the field is an LZ4 match distance.
+        assert_eq!(superblock.available_compr_algs(), 0);
         write_u32(
             &mut superblock.feature_incompat,
             EROFS_FEATURE_INCOMPAT_COMPR_CFGS | EROFS_FEATURE_INCOMPAT_FRAGMENTS,
