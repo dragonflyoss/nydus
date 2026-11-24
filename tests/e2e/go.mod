@@ -52,7 +52,7 @@ require (
 )
 
 require (
-	d7y.io/api/v2 v2.3.13
+	d7y.io/api/v2 v2.3.15
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 // indirect
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20231105174938-2b5cbb29f3e2 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect

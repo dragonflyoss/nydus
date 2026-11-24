@@ -3,7 +3,7 @@ module github.com/dragonflyoss/nydus/nydus-snapshotter
 go 1.25.0
 
 require (
-	d7y.io/api/v2 v2.3.13
+	d7y.io/api/v2 v2.3.15
 	github.com/containerd/containerd/api v1.10.0
 	github.com/containerd/containerd/v2 v2.2.10
 	github.com/containerd/continuity v0.5.0
