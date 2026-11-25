@@ -49,8 +49,8 @@ func TestGC_collect(t *testing.T) {
 		name      string
 		files     map[string]time.Time
 		touched   map[string]time.Time
-		running   []string
-		committed []string
+		running   map[string]struct{}
+		committed map[string]struct{}
 		canceled  bool
 		prepare   func(t *testing.T, g *gc)
 		expect    func(t *testing.T, dir string, s store.Store, err error)
@@ -59,7 +59,7 @@ func TestGC_collect(t *testing.T) {
 			name:  "skip a round while a daemon starts",
 			files: map[string]time.Time{"a.blob.data": mockOld},
 			prepare: func(t *testing.T, g *gc) {
-				lock := g.StartLock()
+				lock := g.DaemonStartLock()
 				lock.Lock()
 				t.Cleanup(lock.Unlock)
 			},
@@ -113,7 +113,7 @@ func TestGC_collect(t *testing.T) {
 		{
 			name:      "evict orphan blob",
 			files:     map[string]time.Time{"a.blob.data": mockOld, "a.blob.meta": mockOld, "a.group.map": mockOld},
-			committed: []string{"b"},
+			committed: map[string]struct{}{"b": {}},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -126,7 +126,7 @@ func TestGC_collect(t *testing.T) {
 			name:      "keep blob of committed image within ttl",
 			files:     map[string]time.Time{"a.blob.data": mockOld},
 			touched:   map[string]time.Time{"a": mockOld},
-			committed: []string{"a"},
+			committed: map[string]struct{}{"a": {}},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -137,7 +137,7 @@ func TestGC_collect(t *testing.T) {
 			name:      "evict blob past ttl and forget it",
 			files:     map[string]time.Time{"a.blob.data": mockOld},
 			touched:   map[string]time.Time{"a": mockNow.Add(-48 * time.Hour)},
-			committed: []string{"a"},
+			committed: map[string]struct{}{"a": {}},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -151,7 +151,7 @@ func TestGC_collect(t *testing.T) {
 			name:    "keep blob of running daemon",
 			files:   map[string]time.Time{"a.blob.data": mockOld},
 			touched: map[string]time.Time{"a": mockNow.Add(-48 * time.Hour)},
-			running: []string{"a"},
+			running: map[string]struct{}{"a": {}},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -171,7 +171,7 @@ func TestGC_collect(t *testing.T) {
 			name:      "keep blob with a future access time",
 			files:     map[string]time.Time{"a.blob.data": mockOld},
 			touched:   map[string]time.Time{"a": mockNow.Add(24 * 365 * time.Hour)},
-			committed: []string{"a"},
+			committed: map[string]struct{}{"a": {}},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -201,7 +201,9 @@ func TestGC_collect(t *testing.T) {
 			name:  "running blobs cannot be told",
 			files: map[string]time.Time{"a.blob.data": mockOld},
 			prepare: func(t *testing.T, g *gc) {
-				g.running = blobsError(errors.New("foo"))
+				g.running = func(context.Context) (map[string]struct{}, error) {
+					return nil, errors.New("foo")
+				}
 			},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
@@ -213,7 +215,9 @@ func TestGC_collect(t *testing.T) {
 			name:  "committed blobs cannot be told",
 			files: map[string]time.Time{"a.blob.data": mockOld},
 			prepare: func(t *testing.T, g *gc) {
-				g.committed = blobsError(errors.New("foo"))
+				g.committed = func(context.Context) (map[string]struct{}, error) {
+					return nil, errors.New("foo")
+				}
 			},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
@@ -321,7 +325,8 @@ func TestGC_collect(t *testing.T) {
 			name:    "keep an orphan whose file cannot be removed and remember it",
 			touched: map[string]time.Time{"a": mockOld},
 			prepare: func(t *testing.T, g *gc) {
-				mockUnremovable(t, filepath.Join(g.dir, "a.blob.data"))
+				assert.NoError(t, os.MkdirAll(filepath.Join(g.dir, "a.blob.data", "child"), 0o755))
+				assert.NoError(t, os.Chtimes(filepath.Join(g.dir, "a.blob.data"), mockOld, mockOld))
 			},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
@@ -335,7 +340,8 @@ func TestGC_collect(t *testing.T) {
 		{
 			name: "keep a stale temporary file that cannot be removed",
 			prepare: func(t *testing.T, g *gc) {
-				mockUnremovable(t, filepath.Join(g.dir, ".blob-meta-123.tmp"))
+				assert.NoError(t, os.MkdirAll(filepath.Join(g.dir, ".blob-meta-123.tmp", "child"), 0o755))
+				assert.NoError(t, os.Chtimes(filepath.Join(g.dir, ".blob-meta-123.tmp"), mockOld, mockOld))
 			},
 			expect: func(t *testing.T, dir string, s store.Store, err error) {
 				assert := assert.New(t)
@@ -355,14 +361,27 @@ func TestGC_collect(t *testing.T) {
 					assert.NoError(t, os.Chtimes(path, mtime, mtime))
 				}
 
-				s := newTestStore(t)
+				s, err := store.New(filepath.Join(t.TempDir(), "nydusd.db"), store.DefaultOpenTimeout)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				defer s.Close()
 				for id, at := range tc.touched {
 					assert.NoError(t, s.TouchBlobs([]string{id}, at))
 				}
 
-				g := newTestGC(dir, s, mockLowUsage)
-				g.running = blobSet(tc.running)
-				g.committed = blobSet(tc.committed)
+				g := &gc{
+					cfg:       mockGCConfig,
+					dir:       dir,
+					store:     s,
+					running:   func(context.Context) (map[string]struct{}, error) { return tc.running, nil },
+					committed: func(context.Context) (map[string]struct{}, error) { return tc.committed, nil },
+					now:       func() time.Time { return mockNow },
+					statfs: func(_ string, stat *unix.Statfs_t) error {
+						*stat = unix.Statfs_t{Bsize: 1, Blocks: mockLowUsage.total, Bavail: mockLowUsage.total - mockLowUsage.used}
+						return nil
+					},
+				}
 				if tc.prepare != nil {
 					tc.prepare(t, g)
 				}
@@ -374,7 +393,7 @@ func TestGC_collect(t *testing.T) {
 				}
 
 				start := time.Now()
-				err := g.collect(ctx)
+				err = g.collect(ctx)
 				assert.LessOrEqual(t, time.Since(start), recheckTimeout)
 				tc.expect(t, dir, s, err)
 			})
@@ -445,7 +464,8 @@ func TestGC_evict(t *testing.T) {
 			expect: func(t *testing.T, g *gc, dir string) {
 				assert := assert.New(t)
 				data := filepath.Join(dir, "a.blob.data")
-				mockUnremovable(t, data)
+				assert.NoError(os.MkdirAll(filepath.Join(data, "child"), 0o755))
+				assert.NoError(os.Chtimes(data, mockOld, mockOld))
 
 				b := &blob{id: "a", files: []string{data}}
 				assert.False(g.evict(t.Context(), b, metrics.ReasonOrphan))
@@ -457,7 +477,7 @@ func TestGC_evict(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			tc.expect(t, newTestGC(dir, newTestStore(t), mockLowUsage), dir)
+			tc.expect(t, &gc{cfg: mockGCConfig, dir: dir}, dir)
 		})
 	}
 }
@@ -497,7 +517,10 @@ func TestGC_watermarkCandidates(t *testing.T) {
 			expect: func(t *testing.T, evictions []eviction, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"oldest", "older"}, evictionIDs(evictions))
+				if assert.Len(evictions, 2) {
+					assert.Equal("oldest", evictions[0].blob.id)
+					assert.Equal("older", evictions[1].blob.id)
+				}
 			},
 		},
 		{
@@ -521,7 +544,10 @@ func TestGC_watermarkCandidates(t *testing.T) {
 			expect: func(t *testing.T, evictions []eviction, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"oldest", "older"}, evictionIDs(evictions))
+				if assert.Len(evictions, 2) {
+					assert.Equal("oldest", evictions[0].blob.id)
+					assert.Equal("older", evictions[1].blob.id)
+				}
 			},
 		},
 		{
@@ -545,7 +571,9 @@ func TestGC_watermarkCandidates(t *testing.T) {
 			expect: func(t *testing.T, evictions []eviction, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"a"}, evictionIDs(evictions))
+				if assert.Len(evictions, 1) {
+					assert.Equal("a", evictions[0].blob.id)
+				}
 			},
 		},
 		{
@@ -555,14 +583,24 @@ func TestGC_watermarkCandidates(t *testing.T) {
 			expect: func(t *testing.T, evictions []eviction, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"a"}, evictionIDs(evictions))
+				if assert.Len(evictions, 1) {
+					assert.Equal("a", evictions[0].blob.id)
+				}
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			g := newTestGC(t.TempDir(), nil, tc.usage)
+			g := &gc{
+				cfg: mockGCConfig,
+				dir: t.TempDir(),
+				now: func() time.Time { return mockNow },
+				statfs: func(_ string, stat *unix.Statfs_t) error {
+					*stat = unix.Statfs_t{Bsize: 1, Blocks: tc.usage.total, Bavail: tc.usage.total - tc.usage.used}
+					return nil
+				},
+			}
 			g.cfg.Policy.DiskThreshold = tc.threshold
 			evictions, err := g.watermarkCandidates(t.Context(), tc.cached, tc.picked, tc.lru)
 			tc.expect(t, evictions, err)
@@ -587,7 +625,8 @@ func TestGC_Run(t *testing.T) {
 				synctest.Wait()
 				assert.NoFileExists(blob)
 
-				mockBlobFile(t, blob)
+				assert.NoError(os.WriteFile(blob, []byte("data"), 0o644))
+				assert.NoError(os.Chtimes(blob, mockOld, mockOld))
 				time.Sleep(time.Duration(g.cfg.Interval))
 				synctest.Wait()
 				assert.NoFileExists(blob)
@@ -597,7 +636,7 @@ func TestGC_Run(t *testing.T) {
 			name: "retry a round a starting daemon skipped after the busy interval",
 			expect: func(t *testing.T, g *gc, blob string, failing *atomic.Bool) {
 				assert := assert.New(t)
-				lock := g.StartLock()
+				lock := g.DaemonStartLock()
 				lock.Lock()
 				time.Sleep(time.Duration(g.cfg.Interval))
 				synctest.Wait()
@@ -634,7 +673,8 @@ func TestGC_Run(t *testing.T) {
 				cfg.GC = mockGCConfig
 				assert.NoError(t, os.Mkdir(cfg.CacheDir(), 0o700))
 				blob := filepath.Join(cfg.CacheDir(), "a.blob.data")
-				mockBlobFile(t, blob)
+				assert.NoError(t, os.WriteFile(blob, []byte("data"), 0o644))
+				assert.NoError(t, os.Chtimes(blob, mockOld, mockOld))
 
 				failing := &atomic.Bool{}
 				running := func(context.Context) (map[string]struct{}, error) {
@@ -645,7 +685,17 @@ func TestGC_Run(t *testing.T) {
 					return map[string]struct{}{}, nil
 				}
 
-				g := New(cfg, newTestStore(t), running, blobSet(nil)).(*gc)
+				s, err := store.New(filepath.Join(t.TempDir(), "nydusd.db"), store.DefaultOpenTimeout)
+				if !assert.NoError(t, err) {
+					t.FailNow()
+				}
+				defer s.Close()
+
+				committed := func(context.Context) (map[string]struct{}, error) {
+					return map[string]struct{}{}, nil
+				}
+
+				g := New(cfg, s, running, committed).(*gc)
 				g.now = func() time.Time { return mockNow }
 				ctx, cancel := context.WithCancel(t.Context())
 				done := make(chan struct{})
@@ -702,30 +752,11 @@ func TestGC_usage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			g := newTestGC(tc.dir(t), nil, diskUsage{})
+			g := &gc{cfg: mockGCConfig, dir: tc.dir(t), statfs: unix.Statfs}
 			g.cfg.Policy.DiskThreshold = tc.threshold
-			g.statfs = unix.Statfs
 			usage, err := g.usage(40)
 			tc.expect(t, usage, err)
 		})
-	}
-}
-
-func mockBlobFile(t *testing.T, path string) {
-	t.Helper()
-	assert.NoError(t, os.WriteFile(path, []byte("data"), 0o644))
-	assert.NoError(t, os.Chtimes(path, mockOld, mockOld))
-}
-
-func mockUnremovable(t *testing.T, path string) {
-	t.Helper()
-	assert.NoError(t, os.MkdirAll(filepath.Join(path, "child"), 0o755))
-	assert.NoError(t, os.Chtimes(path, mockOld, mockOld))
-}
-
-func blobsError(err error) BlobsFunc {
-	return func(context.Context) (map[string]struct{}, error) {
-		return nil, err
 	}
 }
 
@@ -736,48 +767,4 @@ func mockOrphanFiles(n int) map[string]time.Time {
 	}
 
 	return files
-}
-
-func newTestGC(dir string, s store.Store, usage diskUsage) *gc {
-	return &gc{
-		cfg:   mockGCConfig,
-		dir:   dir,
-		store: s,
-		now:   func() time.Time { return mockNow },
-		statfs: func(_ string, stat *unix.Statfs_t) error {
-			*stat = unix.Statfs_t{Bsize: 1, Blocks: usage.total, Bavail: usage.total - usage.used}
-			return nil
-		},
-	}
-}
-
-func newTestStore(t *testing.T) store.Store {
-	t.Helper()
-	s, err := store.New(filepath.Join(t.TempDir(), "nydusd.db"), store.DefaultOpenTimeout)
-	if !assert.NoError(t, err) {
-		t.FailNow()
-	}
-
-	t.Cleanup(func() { s.Close() })
-	return s
-}
-
-func blobSet(ids []string) BlobsFunc {
-	return func(context.Context) (map[string]struct{}, error) {
-		set := make(map[string]struct{}, len(ids))
-		for _, id := range ids {
-			set[id] = struct{}{}
-		}
-
-		return set, nil
-	}
-}
-
-func evictionIDs(evictions []eviction) []string {
-	ids := make([]string, 0, len(evictions))
-	for _, e := range evictions {
-		ids = append(ids, e.blob.id)
-	}
-
-	return ids
 }

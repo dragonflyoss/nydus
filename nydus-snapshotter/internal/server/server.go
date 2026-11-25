@@ -5,8 +5,7 @@
  */
 
 // Package server wires the snapshotter together and serves it to containerd
-// over gRPC as a proxy plugin, refer to
-// https://github.com/containerd/containerd/blob/main/docs/PLUGINS.md.
+// over gRPC as a proxy plugin.
 package server
 
 import (
@@ -24,7 +23,6 @@ import (
 	"github.com/containerd/containerd/v2/contrib/snapshotservice"
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/log"
-	"github.com/coreos/go-systemd/v22/activation"
 	sddaemon "github.com/coreos/go-systemd/v22/daemon"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -56,7 +54,7 @@ const (
 	reloadTimeout = time.Minute
 
 	// syncedPollInterval is how often the registry credentials are checked
-	// for their first sync, as client-go polls an informer's.
+	// for their first sync.
 	syncedPollInterval = 100 * time.Millisecond
 )
 
@@ -113,9 +111,7 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 	}
 
 	// A Pod that mounts runtime_dir before the snapshotter is installed has
-	// kubelet create it 0755: set the mode as containerd does for its own
-	// directories, refer to
-	// https://github.com/containerd/containerd/blob/v2.2.10/cmd/containerd/server/server.go.
+	// kubelet create it 0755, so the mode is set here.
 	if err := os.Chmod(cfg.RuntimeDir, 0o700); err != nil {
 		return nil, fmt.Errorf("chmod %s: %w", cfg.RuntimeDir, err)
 	}
@@ -133,7 +129,7 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
-	if err := s.setup(ctx); err != nil {
+	if err := s.setupComponents(ctx); err != nil {
 		s.Stop()
 		return nil, err
 	}
@@ -143,7 +139,7 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 	s.wg.Go(func() { s.fileSystem.Run(ctx) })
 	s.wg.Go(func() { s.reportServing(ctx) })
 	watcher := config.NewWatcher(configPath, cfg)
-	s.wg.Go(func() { watcher.Run(ctx, s.reload) })
+	s.wg.Go(func() { watcher.Run(ctx, s.reloadConfig) })
 	if s.metrics != nil {
 		s.wg.Go(func() {
 			if err := s.metrics.Serve(); err != nil {
@@ -155,8 +151,8 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 	return s, nil
 }
 
-// setup builds the components in dependency order.
-func (s *Server) setup(ctx context.Context) error {
+// setupComponents builds the components in dependency order.
+func (s *Server) setupComponents(ctx context.Context) error {
 	var err error
 	s.store, err = store.New(filepath.Join(s.cfg.RootDir, "nydusd.db"), store.DefaultOpenTimeout)
 	if err != nil {
@@ -172,7 +168,7 @@ func (s *Server) setup(ctx context.Context) error {
 		func(ctx context.Context) (map[string]struct{}, error) { return s.snapshotter.CommittedBlobs(ctx) },
 	)
 
-	s.fileSystem, err = fs.New(ctx, s.cfg, s.systemd, s.store, s.keychain, s.gc.StartLock())
+	s.fileSystem, err = fs.New(ctx, s.cfg, s.systemd, s.store, s.keychain, s.gc.DaemonStartLock())
 	if err != nil {
 		return fmt.Errorf("init nydus file system: %w", err)
 	}
@@ -190,14 +186,13 @@ func (s *Server) setup(ctx context.Context) error {
 	}
 
 	// Bind the gRPC socket last, as nothing closes it before Serve owns it.
-	s.listener, err = s.listen(ctx)
+	s.listener, err = s.listen()
 	if err != nil {
 		return err
 	}
 
 	// Match containerd's proxy client limits, and let Stop wait for in-flight
-	// handlers before the stores close, refer to
-	// https://github.com/containerd/containerd/blob/main/cmd/containerd/server/server.go.
+	// handlers before the stores close.
 	s.grpc = grpc.NewServer(
 		grpc.MaxRecvMsgSize(defaults.DefaultMaxRecvMsgSize),
 		grpc.MaxSendMsgSize(defaults.DefaultMaxSendMsgSize),
@@ -205,14 +200,11 @@ func (s *Server) setup(ctx context.Context) error {
 	)
 	snapshotsapi.RegisterSnapshotsServer(s.grpc, snapshotservice.FromSnapshotter(s.snapshotter))
 
-	// The preheat service shares the socket, as containerd serves all its
-	// services on one.
-	resolver := preheat.NewResolver(s.cfg.Preheat.ContainerdAddr, s.snapshotter)
+	// The preheat service shares the socket.
+	resolver := preheat.NewResolver(s.cfg.Containerd.Addr, s.snapshotter)
 	nydussnapshotterv1.RegisterNydusSnapshotterServer(s.grpc, preheat.NewService(resolver, s.fileSystem))
 
-	// Health is the gRPC health checking protocol, served as containerd
-	// serves its own, refer to
-	// https://github.com/containerd/containerd/blob/main/plugins/services/healthcheck/service.go.
+	// Health is the gRPC health checking protocol.
 	s.health = health.NewServer()
 	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 	grpc_health_v1.RegisterHealthServer(s.grpc, s.health)
@@ -223,7 +215,7 @@ func (s *Server) setup(ctx context.Context) error {
 // Serve serves gRPC until Stop, and tells systemd the snapshotter is ready.
 func (s *Server) Serve() error {
 	// The listener is bound, so containerd's calls queue until Serve accepts
-	// them, refer to https://github.com/containerd/containerd/blob/main/cmd/containerd/command/notify_systemd.go.
+	// them.
 	if _, err := sddaemon.SdNotify(false, sddaemon.SdNotifyReady); err != nil {
 		log.L.WithError(err).Warn("notify systemd ready")
 	}
@@ -285,8 +277,7 @@ func (s *Server) Stop() {
 }
 
 // reportServing sets the health status to SERVING once the registry
-// credentials are synced, refer to
-// https://github.com/grpc/grpc/blob/master/doc/health-checking.md.
+// credentials are synced.
 //
 //	Check answers ─▶ the snapshotter is alive
 //	NOT_SERVING   ─▶ credentials are not synced yet, or the snapshotter stops
@@ -302,8 +293,8 @@ func (s *Server) reportServing(ctx context.Context) {
 	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
 }
 
-// reload applies the reloadable sections of a changed config file.
-func (s *Server) reload(ctx context.Context, next *config.Config) {
+// reloadConfig applies the reloadable sections of a changed config file.
+func (s *Server) reloadConfig(ctx context.Context, next *config.Config) {
 	ctx, cancel := context.WithTimeout(ctx, reloadTimeout)
 	defer cancel()
 
@@ -317,23 +308,8 @@ func (s *Server) reload(ctx context.Context, next *config.Config) {
 	}
 }
 
-// listen returns the gRPC listener: the socket systemd passes when socket
-// activated, as soci-snapshotter does, or a socket bound at address.
-func (s *Server) listen(ctx context.Context) (net.Listener, error) {
-	listeners, err := activation.Listeners()
-	if err != nil {
-		return nil, fmt.Errorf("get activated sockets: %w", err)
-	}
-
-	if len(listeners) > 0 {
-		if listeners[0] == nil {
-			return nil, errors.New("socket passed by systemd is not a listener")
-		}
-
-		log.G(ctx).Info("using the socket passed by systemd")
-		return listeners[0], nil
-	}
-
+// listen returns the gRPC listener, a socket bound at grpc.addr.
+func (s *Server) listen() (net.Listener, error) {
 	address := s.cfg.GRPC.Addr
 	if err := os.MkdirAll(filepath.Dir(address), 0o700); err != nil {
 		return nil, fmt.Errorf("create socket dir: %w", err)

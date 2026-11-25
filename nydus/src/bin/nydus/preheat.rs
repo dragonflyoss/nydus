@@ -4,7 +4,7 @@ use nydus::preheat::{write_failure, Preheat};
 use nydus_backend::Backend;
 use nydus_config::Config;
 use nydus_core::{CacheOptions, ErofsReader, Metrics};
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,6 +70,13 @@ pub struct PreheatCommand {
         help = "Specify whether to print log"
     )]
     console: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_PREHEAT_LOG_JOURNALD",
+        help = "Specify whether to log to the systemd journal instead of the log directory and the console"
+    )]
+    log_journald: bool,
 }
 
 /// Implement the execute for PreheatCommand.
@@ -78,13 +85,17 @@ impl PreheatCommand {
     /// into the cache directory and writing the outcome to the state file.
     pub fn execute(&self) -> Result<()> {
         // Initialize tracing.
-        let _guards = init_tracing(
-            NAME,
-            self.log_dir.clone(),
-            self.log_level,
-            self.log_max_files,
-            self.console,
-        )?;
+        let _guards = if self.log_journald {
+            init_journald_tracing(NAME, self.log_level)?
+        } else {
+            init_tracing(
+                NAME,
+                self.log_dir.clone(),
+                self.log_level,
+                self.log_max_files,
+                self.console,
+            )?
+        };
 
         self.run()
             .inspect_err(|err| error!("nydus preheat failed: {}", err.report()))

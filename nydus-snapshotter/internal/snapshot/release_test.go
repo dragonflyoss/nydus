@@ -9,10 +9,13 @@ package snapshot
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
@@ -38,7 +41,12 @@ func TestSnapshotter_Run(t *testing.T) {
 					return nil
 				}).MinTimes(2)
 
-				sn := newTestSnapshotter(t, t.TempDir(), fileSystem)
+				sn, err := New(t.TempDir(), fileSystem)
+				if !assert.NoError(err) {
+					t.FailNow()
+				}
+				defer func() { assert.NoError(sn.Close()) }()
+
 				ctx, cancel := context.WithCancel(t.Context())
 				done := make(chan struct{})
 				go func() {
@@ -47,7 +55,7 @@ func TestSnapshotter_Run(t *testing.T) {
 				}()
 
 				<-released
-				_, err := sn.Prepare(t.Context(), "container", "")
+				_, err = sn.Prepare(t.Context(), "container", "")
 				assert.NoError(err)
 				assert.NoError(sn.Remove(t.Context(), "container"))
 				<-released
@@ -66,7 +74,12 @@ func TestSnapshotter_Run(t *testing.T) {
 						fileSystem.EXPECT().Release(gomock.Any(), gomock.Any()).Return(nil).Times(2),
 					)
 
-					sn := newTestSnapshotter(t, t.TempDir(), fileSystem)
+					sn, err := New(t.TempDir(), fileSystem)
+					if !assert.NoError(err) {
+						t.FailNow()
+					}
+					defer func() { assert.NoError(sn.Close()) }()
+
 					ctx, cancel := context.WithCancel(t.Context())
 					go sn.Run(ctx)
 					synctest.Wait()
@@ -103,8 +116,7 @@ func TestSnapshotter_usedImages(t *testing.T) {
 			expect: func(t *testing.T, sn *snapshotter) {
 				assert := assert.New(t)
 				ctx := t.Context()
-				parent := pullNydusImage(t, sn, mockBootstrapLabels)
-				_, err := sn.Prepare(ctx, "container", parent)
+				_, err := sn.Prepare(ctx, "container", mockBootstrapSnapshot)
 				assert.NoError(err)
 
 				used, err := sn.usedImages(ctx)
@@ -125,11 +137,19 @@ func TestSnapshotter_usedImages(t *testing.T) {
 			expect: func(t *testing.T, sn *snapshotter) {
 				assert := assert.New(t)
 				ctx := t.Context()
-				first := pullNydusImageAs(t, sn, mockBootstrapLabels, "k8s.io/1/")
-				second := pullNydusImageAs(t, sn, mockBootstrapLabels, "default/5/")
-				_, err := sn.Prepare(ctx, "default/3/container", second)
+				_, err := sn.Prepare(ctx, "default/5/extract-1 "+mockBlobChainID, "", snapshots.WithLabels(mockBlobLabels))
+				assert.ErrorIs(err, errdefs.ErrAlreadyExists)
+				_, err = sn.Prepare(ctx, "default/5/extract-2 "+mockBootstrapChainID, mockBlobChainID, snapshots.WithLabels(mockBootstrapLabels))
 				assert.NoError(err)
-				assert.NoError(sn.Remove(ctx, first))
+				mounts, err := sn.Mounts(ctx, "default/5/extract-2 "+mockBootstrapChainID)
+				assert.NoError(err)
+				assert.Equal("bind", mounts[0].Type)
+				assert.NoError(os.CopyFS(mounts[0].Source, mockBootstrapLayer))
+				assert.NoError(sn.Commit(ctx, "default/5/"+mockBootstrapChainID, "default/5/extract-2 "+mockBootstrapChainID, snapshots.WithLabels(mockBootstrapLabels)))
+
+				_, err = sn.Prepare(ctx, "default/3/container", "default/5/"+mockBootstrapChainID)
+				assert.NoError(err)
+				assert.NoError(sn.Remove(ctx, mockBootstrapSnapshot))
 
 				used, err := sn.usedImages(ctx)
 				assert.NoError(err)
@@ -145,7 +165,22 @@ func TestSnapshotter_usedImages(t *testing.T) {
 			fileSystem := mocks.NewMockFileSystem(ctl)
 			tc.mock(fileSystem.EXPECT())
 
-			sn := newTestSnapshotter(t, t.TempDir(), fileSystem)
+			sn, err := New(t.TempDir(), fileSystem)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			defer func() { assert.NoError(t, sn.Close()) }()
+
+			_, err = sn.Prepare(t.Context(), mockBlobExtractKey, "", snapshots.WithLabels(mockBlobLabels))
+			assert.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+			_, err = sn.Prepare(t.Context(), mockBootstrapExtractKey, mockBlobChainID, snapshots.WithLabels(mockBootstrapLabels))
+			assert.NoError(t, err)
+			mounts, err := sn.Mounts(t.Context(), mockBootstrapExtractKey)
+			assert.NoError(t, err)
+			assert.Equal(t, "bind", mounts[0].Type)
+			assert.NoError(t, os.CopyFS(mounts[0].Source, mockBootstrapLayer))
+			assert.NoError(t, sn.Commit(t.Context(), mockBootstrapSnapshot, mockBootstrapExtractKey, snapshots.WithLabels(mockBootstrapLabels)))
+
 			tc.expect(t, sn.(*snapshotter))
 		})
 	}

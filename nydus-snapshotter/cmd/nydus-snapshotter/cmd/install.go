@@ -37,5 +37,10 @@ func runInstall(ctx context.Context, cfg *config.Config, configPath string) erro
 	systemd := systemd.New()
 	defer systemd.Close()
 
-	return installer.New(cfg, configPath, systemd).Run(ctx)
+	installer, err := installer.New(cfg, configPath, systemd)
+	if err != nil {
+		return err
+	}
+
+	return installer.Run(ctx)
 }

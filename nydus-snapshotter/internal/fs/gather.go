@@ -34,12 +34,10 @@ const (
 	labelImage = "image"
 )
 
-// Gather returns the metrics of every recorded daemon, each labelled with
-// the chain ID and the image of its daemon. Prometheus cannot reach the
-// daemons' sockets, so the snapshotter serves their metrics beside its own,
-// as cAdvisor serves those of containers, refer to
-// https://github.com/google/cadvisor/blob/master/metrics/prometheus.go.
-// A daemon that does not answer is left out.
+// Gather returns the metrics of every recorded daemon, each labelled with the
+// chain ID and the image of its daemon. Prometheus cannot reach the daemons'
+// sockets, so the snapshotter serves their metrics beside its own. A daemon
+// that does not answer is left out.
 func (f *fileSystem) Gather() ([]*dto.MetricFamily, error) {
 	instances, err := f.store.ListInstances()
 	if err != nil {
@@ -63,7 +61,7 @@ func (f *fileSystem) Gather() ([]*dto.MetricFamily, error) {
 
 	merged := map[string]*dto.MetricFamily{}
 	for i, families := range scraped {
-		f.mergeFamilies(merged, families, instances[i])
+		f.mergeMetricFamilies(merged, families, instances[i])
 	}
 
 	// A Gatherer returns its families sorted by name.
@@ -72,9 +70,9 @@ func (f *fileSystem) Gather() ([]*dto.MetricFamily, error) {
 	}), nil
 }
 
-// mergeFamilies adds the metric families of one daemon to merged, every
+// mergeMetricFamilies adds the metric families of one daemon to merged, every
 // metric labelled with the chain ID and the image of the daemon.
-func (f *fileSystem) mergeFamilies(merged, families map[string]*dto.MetricFamily, instance *store.Instance) {
+func (f *fileSystem) mergeMetricFamilies(merged, families map[string]*dto.MetricFamily, instance *store.Instance) {
 	for name, family := range families {
 		into, ok := merged[name]
 		if !ok {

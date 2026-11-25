@@ -15,58 +15,50 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/kubeutil"
 )
 
 // syncKubeconfig copies the Pod's service account token and CA to the host
 // and writes a kubeconfig reading them, for the snapshotter's secret
-// informer; without kube_secret it does nothing, and no token is mounted.
-// client-go re-reads a rotated token file, refer to
-// https://github.com/kubernetes/client-go/blob/master/transport/token_source.go.
+// informer. client-go re-reads a rotated token file.
 func (i *Installer) syncKubeconfig(ctx context.Context) error {
-	if !i.cfg.Auth.KubeSecret.Enable {
-		return nil
-	}
-
-	dir := filepath.Dir(config.DefaultAuthKubeconfig)
-	tokenPath, caPath := filepath.Join(dir, "token"), filepath.Join(dir, "ca.crt")
+	hostDir := filepath.Dir(i.cfg.Auth.KubeSecret.Kubeconfig)
+	tokenPath, caPath := filepath.Join(hostDir, "token"), filepath.Join(hostDir, "ca.crt")
 	kubeconfig, err := i.kubeconfig(tokenPath, caPath)
 	if err != nil {
 		return err
 	}
 
-	token, err := os.ReadFile(filepath.Join(i.cfg.Installer.TokenDir, "token"))
+	token, err := os.ReadFile(filepath.Join(i.cfg.Installer.ServiceAccountPath, "token"))
 	if err != nil {
 		return fmt.Errorf("read service account token: %w", err)
 	}
 
-	ca, err := os.ReadFile(filepath.Join(i.cfg.Installer.TokenDir, "ca.crt"))
+	ca, err := os.ReadFile(filepath.Join(i.cfg.Installer.ServiceAccountPath, "ca.crt"))
 	if err != nil {
 		return fmt.Errorf("read service account ca: %w", err)
 	}
 
-	// The token is a credential: keep it on tmpfs, in a dir only root reads.
-	hostDir, err := i.host(dir)
+	// The token is a credential: keep it in a dir only root reads.
+	containerDir, err := i.containerPath(hostDir)
 	if err != nil {
 		return err
 	}
 
-	if err := os.MkdirAll(hostDir, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", hostDir, err)
+	if err := os.MkdirAll(containerDir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", containerDir, err)
 	}
 
 	// Write the token and CA before the kubeconfig naming them.
 	return i.installFiles(ctx, []file{
-		{path: tokenPath, perm: 0o600, data: token},
-		{path: caPath, perm: 0o644, data: ca},
-		{path: config.DefaultAuthKubeconfig, perm: 0o600, data: kubeconfig},
+		{hostPath: tokenPath, perm: 0o600, data: token},
+		{hostPath: caPath, perm: 0o644, data: ca},
+		{hostPath: i.cfg.Auth.KubeSecret.Kubeconfig, perm: 0o600, data: kubeconfig},
 	})
 }
 
 // kubeconfig returns a kubeconfig that reaches the API server as in-cluster
-// clients do and reads the token and the CA from host files, refer to
-// https://github.com/kubernetes/client-go/blob/master/rest/config.go.
+// clients do and reads the token and the CA from host files.
 func (i *Installer) kubeconfig(tokenPath, caPath string) ([]byte, error) {
 	server, err := kubeutil.APIServer()
 	if err != nil {

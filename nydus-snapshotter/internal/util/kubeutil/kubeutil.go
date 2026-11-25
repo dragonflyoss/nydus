@@ -21,9 +21,8 @@ import (
 
 const (
 	// qps is the rate of the requests to the API server, kubelet's default,
-	// so the uninstaller clears 5000 nodes within the five minutes helm
-	// gives a hook, refer to
-	// https://github.com/kubernetes/kubernetes/blob/v1.34.0/pkg/kubelet/apis/config/v1beta1/defaults.go.
+	// so the uninstaller clears 5000 nodes within the five minutes helm gives
+	// a hook.
 	qps = 50
 
 	// burst is the burst of those requests, kubelet's default.
@@ -43,11 +42,10 @@ func APIServer() (string, error) {
 	return "https://" + net.JoinHostPort(host, port), nil
 }
 
-// NewClient returns a client of the API server for the Pod's service
-// account, whose token and CA are in tokenDir, as rest.InClusterConfig
-// builds one for the default directory, refer to
-// https://github.com/kubernetes/client-go/blob/master/rest/config.go.
-func NewClient(tokenDir string) (kubernetes.Interface, error) {
+// NewClient returns a client of the API server for the Pod's service account,
+// whose token and CA are in serviceAccountPath, as rest.InClusterConfig
+// builds one for the default directory.
+func NewClient(serviceAccountPath string) (kubernetes.Interface, error) {
 	server, err := APIServer()
 	if err != nil {
 		return nil, err
@@ -55,8 +53,8 @@ func NewClient(tokenDir string) (kubernetes.Interface, error) {
 
 	return kubernetes.NewForConfig(&rest.Config{
 		Host:            server,
-		BearerTokenFile: filepath.Join(tokenDir, "token"),
-		TLSClientConfig: rest.TLSClientConfig{CAFile: filepath.Join(tokenDir, "ca.crt")},
+		BearerTokenFile: filepath.Join(serviceAccountPath, "token"),
+		TLSClientConfig: rest.TLSClientConfig{CAFile: filepath.Join(serviceAccountPath, "ca.crt")},
 		QPS:             qps,
 		Burst:           burst,
 		Timeout:         requestTimeout,

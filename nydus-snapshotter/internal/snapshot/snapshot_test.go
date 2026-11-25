@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/fstest"
 
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/testsuite"
@@ -22,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	nydusfs "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs"
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 var (
@@ -46,6 +46,17 @@ var (
 		labelNydusBootstrap:         labelTrue,
 		labelNydusFSVersion:         nydusfs.Version,
 		snapshotters.TargetRefLabel: mockImageRef,
+	}
+
+	mockBlobExtractKey = "k8s.io/1/extract-1 " + mockBlobChainID
+
+	mockBootstrapExtractKey = "k8s.io/1/extract-2 " + mockBootstrapChainID
+
+	mockBootstrapSnapshot = "k8s.io/1/" + mockBootstrapChainID
+
+	mockBootstrapLayer = fstest.MapFS{
+		"image/image.boot":                   &fstest.MapFile{},
+		"image/" + mockBlobID + ".blob.meta": &fstest.MapFile{},
 	}
 )
 
@@ -239,7 +250,12 @@ func TestSnapshotter_Prepare(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sn := newTestSnapshotter(t, t.TempDir(), nil)
+			sn, err := New(t.TempDir(), nil)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			defer func() { assert.NoError(t, sn.Close()) }()
+
 			tc.expect(t, sn)
 		})
 	}
@@ -260,10 +276,14 @@ func TestSnapshotter_Cleanup(t *testing.T) {
 				_, err = sn.Prepare(ctx, "kept", "")
 				assert.NoError(err)
 				assert.NoError(sn.Remove(ctx, "removed"))
-				assert.Len(snapshotDirs(t, root), 2)
+				entries, err := os.ReadDir(filepath.Join(root, snapshotsDirName))
+				assert.NoError(err)
+				assert.Len(entries, 2)
 
 				assert.NoError(sn.Cleanup(ctx))
-				assert.Len(snapshotDirs(t, root), 1)
+				entries, err = os.ReadDir(filepath.Join(root, snapshotsDirName))
+				assert.NoError(err)
+				assert.Len(entries, 1)
 				_, err = sn.Mounts(ctx, "kept")
 				assert.NoError(err)
 			},
@@ -295,12 +315,23 @@ func TestSnapshotter_Cleanup(t *testing.T) {
 				assert.NoError(err)
 				_, err = sn.Prepare(ctx, "removed", "")
 				assert.NoError(err)
-				testutil.MountTmpfs(t, mounts[0].Source, "")
+				if os.Geteuid() != 0 {
+					t.Skip("mounts as root")
+				}
+
+				err = syscall.Mount("tmpfs", mounts[0].Source, "tmpfs", 0, "")
+				if errors.Is(err, syscall.EPERM) {
+					t.Skip("mounts with CAP_SYS_ADMIN")
+				}
+				assert.NoError(err)
+				defer func() { assert.NoError(syscall.Unmount(mounts[0].Source, syscall.MNT_DETACH)) }()
 				assert.NoError(sn.Remove(ctx, "busy"))
 				assert.NoError(sn.Remove(ctx, "removed"))
 
 				assert.NoError(sn.Cleanup(ctx))
-				assert.Len(snapshotDirs(t, root), 1)
+				entries, err := os.ReadDir(filepath.Join(root, snapshotsDirName))
+				assert.NoError(err)
+				assert.Len(entries, 1)
 			},
 		},
 	}
@@ -308,7 +339,12 @@ func TestSnapshotter_Cleanup(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			sn := newTestSnapshotter(t, root, nil)
+			sn, err := New(root, nil)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			defer func() { assert.NoError(t, sn.Close()) }()
+
 			tc.expect(t, sn, root)
 		})
 	}
@@ -403,26 +439,13 @@ func TestSnapshotter_Usage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sn := newTestSnapshotter(t, t.TempDir(), nil)
+			sn, err := New(t.TempDir(), nil)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			defer func() { assert.NoError(t, sn.Close()) }()
+
 			tc.expect(t, sn)
 		})
 	}
-}
-
-func snapshotDirs(t *testing.T, root string) []os.DirEntry {
-	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(root, snapshotsDirName))
-	assert.NoError(t, err)
-	return entries
-}
-
-func newTestSnapshotter(t *testing.T, root string, fileSystem nydusfs.FileSystem) Snapshotter {
-	t.Helper()
-	sn, err := New(root, fileSystem)
-	if !assert.NoError(t, err) {
-		t.FailNow()
-	}
-
-	t.Cleanup(func() { assert.NoError(t, sn.Close()) })
-	return sn
 }

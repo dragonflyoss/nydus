@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	systemddbus "github.com/coreos/go-systemd/v22/dbus"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
@@ -22,7 +21,6 @@ var mockUnit = &Unit{
 	Description:      "nydus daemon",
 	Slice:            "system-nydusd.slice",
 	ExecStart:        []string{"/opt/nydus-snapshotter/bin/3.0.0/nydus", "fuse"},
-	Environment:      []string{"NYDUS_FUSE_CONSOLE=false"},
 	Before:           []string{"containerd.service"},
 	TimeoutStop:      10 * time.Second,
 	OOMScoreAdjust:   -999,
@@ -56,7 +54,6 @@ func TestUnit_properties(t *testing.T) {
 				assert.Equal("nydusd", properties["SyslogIdentifier"])
 				assert.Equal(int32(-999), properties["OOMScoreAdjust"])
 				assert.Equal("system-nydusd.slice", properties["Slice"])
-				assert.Equal([]string{"NYDUS_FUSE_CONSOLE=false"}, properties["Environment"])
 				assert.Equal([][]byte{[]byte("NYDUS_CHAIN_ID=sha256:ab")}, properties["LogExtraFields"])
 				assert.Equal(true, properties["MemoryAccounting"])
 				assert.Equal(uint64(1<<30), properties["MemoryHigh"])
@@ -70,7 +67,6 @@ func TestUnit_properties(t *testing.T) {
 			expect: func(t *testing.T, properties map[string]any) {
 				assert := assert.New(t)
 				assert.NotContains(properties, "Slice")
-				assert.NotContains(properties, "Environment")
 				assert.NotContains(properties, "Before")
 				assert.NotContains(properties, "TimeoutStopUSec")
 				assert.NotContains(properties, "LimitNOFILE")
@@ -96,7 +92,12 @@ func TestUnit_properties(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, propertyValues(tc.unit.properties()))
+			properties := make(map[string]any)
+			for _, p := range tc.unit.properties() {
+				properties[p.Name] = p.Value.Value()
+			}
+
+			tc.expect(t, properties)
 		})
 	}
 }
@@ -131,16 +132,12 @@ func TestResources_properties(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, propertyValues(tc.resources.properties()))
+			properties := make(map[string]any)
+			for _, p := range tc.resources.properties() {
+				properties[p.Name] = p.Value.Value()
+			}
+
+			tc.expect(t, properties)
 		})
 	}
-}
-
-func propertyValues(properties []systemddbus.Property) map[string]any {
-	values := make(map[string]any, len(properties))
-	for _, p := range properties {
-		values[p.Name] = p.Value.Value()
-	}
-
-	return values
 }

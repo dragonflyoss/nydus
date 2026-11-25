@@ -9,10 +9,12 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -20,34 +22,12 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/version"
 )
 
 var (
 	mockConfigPathEnvVar = "NYDUS_SNAPSHOTTER_TEST_CONFIG_PATH"
 )
-
-func executeCommand(t *testing.T, args ...string) (string, error) {
-	t.Helper()
-	out := &bytes.Buffer{}
-	rootCmd.SetOut(out)
-	rootCmd.SetErr(out)
-	rootCmd.SetArgs(args)
-	t.Cleanup(func() {
-		for _, cmd := range []*cobra.Command{rootCmd, installCmd, uninstallCmd} {
-			for _, name := range []string{"config", "help", "version"} {
-				if flag := cmd.Flags().Lookup(name); flag != nil {
-					assert.NoError(t, flag.Value.Set(flag.DefValue))
-					flag.Changed = false
-				}
-			}
-		}
-	})
-
-	err := rootCmd.ExecuteContext(t.Context())
-	return out.String(), err
-}
 
 func TestRootCmd(t *testing.T) {
 	tests := []struct {
@@ -96,8 +76,23 @@ func TestRootCmd(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			assert.NoError(t, os.WriteFile(path, []byte("log:\n  level: debug\n"), 0o644))
 
-			out, err := executeCommand(t, append([]string{"--config", path}, tc.args...)...)
-			tc.expect(t, out, err)
+			out := &bytes.Buffer{}
+			rootCmd.SetOut(out)
+			rootCmd.SetErr(out)
+			rootCmd.SetArgs(append([]string{"--config", path}, tc.args...))
+			t.Cleanup(func() {
+				for _, cmd := range []*cobra.Command{rootCmd, installCmd, uninstallCmd} {
+					for _, name := range []string{"config", "help", "version"} {
+						if flag := cmd.Flags().Lookup(name); flag != nil {
+							assert.NoError(t, flag.Value.Set(flag.DefValue))
+							flag.Changed = false
+						}
+					}
+				}
+			})
+
+			err := rootCmd.ExecuteContext(t.Context())
+			tc.expect(t, out.String(), err)
 		})
 	}
 }
@@ -201,14 +196,29 @@ func TestRunSnapshotter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testutil.NewConfig(t)
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			dir := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(dir, "lib")
+			cfg.RuntimeDir = filepath.Join(dir, "run")
+			cfg.GRPC.Addr = filepath.Join(cfg.RuntimeDir, "s.sock")
+			cfg.Metrics.Addr = "127.0.0.1:0"
+			cfg.Cgroup.Slice = "nydustest" + strconv.Itoa(os.Getpid()) + strconv.Itoa(rand.IntN(1<<30)) + ".slice"
+			t.Cleanup(func() { _ = exec.Command("systemctl", "stop", cfg.Cgroup.Slice).Run() })
 			tc.prepare(t, cfg)
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan error, 1)
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			go func() { done <- runSnapshotter(ctx, cfg, path) }()
+			go func() { done <- runNydusSnapshotter(ctx, cfg, path) }()
 			tc.expect(t, cfg, cancel, done)
 		})
 	}

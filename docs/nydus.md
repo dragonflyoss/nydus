@@ -854,8 +854,9 @@ Current implementation notes:
 	succeeds without a data read.
 - A termination signal ends the process. The state file then still says
 	`running`.
-- `--log-level`, `--log-dir`, and `--log-max-files` control logging: like a
-	daemon subcommand, the process logs to a file under `--log-dir`.
+- `--log-level`, `--log-dir`, `--log-max-files` and `--log-journald` control
+	logging: like a daemon subcommand, the process logs to a file under
+	`--log-dir`, or to the systemd journal.
 - `--state-file` is one JSON document, replaced through a file next to it and
 	a rename, so a reader never finds a part of one. It is written when the
 	preheat starts, when every blob's cache is open, on every finished blob,
@@ -957,11 +958,18 @@ Options:
 		Specify the log directory [env: NYDUS_FUSE_LOG_DIR=] [default: /var/log/nydus/]
 	--log-max-files <LOG_MAX_FILES>
 		Specify the max number of log files [env: NYDUS_FUSE_LOG_MAX_FILES=] [default: 6]
+	--log-journald
+		Specify whether to log to the systemd journal instead of the log directory and the console [env: NYDUS_FUSE_LOG_JOURNALD=]
 ```
 
 Every daemon subcommand logs to a file under `--log-dir`. The file is rolled
 every hour and when it reaches 10 MiB, and `--log-max-files` rolled files are
 kept, so a daemon that logs a line per failed request cannot fill the disk.
+
+With `--log-journald` it logs to the systemd journal alone, which keeps and
+rotates the logs of a service: no file is written and `--log-dir` and
+`--log-max-files` are not used. The level of an event is its priority, and
+`journalctl -u <unit>` reads the logs of a daemon that runs as a unit.
 
 Supported forms:
 

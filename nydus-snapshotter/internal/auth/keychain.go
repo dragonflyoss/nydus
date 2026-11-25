@@ -34,8 +34,8 @@ const kubeconfigPollInterval = 5 * time.Second
 type Keychain interface {
 	// Run watches the kube_secret provider until ctx is done and calls
 	// onChange when a credential may have changed: once the secrets are
-	// synced, then on every secret change. It returns at once when
-	// kube_secret is disabled. A changed docker config is read by the next
+	// synced, then on every secret change. The caller runs it only with
+	// kube_secret enabled. A changed docker config is read by the next
 	// Resolve and reported by no call.
 	Run(ctx context.Context, onChange func())
 
@@ -44,6 +44,7 @@ type Keychain interface {
 	Resolve(ctx context.Context, ref *registry.Reference) (string, error)
 
 	// Synced reports whether every provider finished its initial sync.
+	// Without kube_secret there is none to wait for.
 	Synced() bool
 }
 
@@ -76,15 +77,11 @@ func New(cfg *config.Config) Keychain {
 
 // Run watches the kube_secret provider until ctx is done and calls onChange
 // when a credential may have changed: once the secrets are synced, then on
-// every secret change. It returns at once when kube_secret is disabled. A
+// every secret change. The caller runs it only with kube_secret enabled. A
 // changed docker config is read by the next Resolve and reported by no call.
 func (k *keychain) Run(ctx context.Context, onChange func()) {
-	if !k.cfg.Enable {
-		return
-	}
-
 	// connect fails only once ctx is done.
-	client, err := k.connect(ctx)
+	client, err := k.waitForKubeClient(ctx)
 	if err != nil {
 		return
 	}
@@ -107,10 +104,10 @@ func (k *keychain) Run(ctx context.Context, onChange func()) {
 	}
 }
 
-// connect returns the API client once the kubeconfig loads. The installer
-// keeps the kubeconfig on tmpfs, so after a reboot it appears only once the
-// installer Pod runs again, which needs this snapshotter serving.
-func (k *keychain) connect(ctx context.Context) (kubernetes.Interface, error) {
+// waitForKubeClient returns the API client once the kubeconfig loads. The
+// installer keeps the kubeconfig on tmpfs, so after a reboot it appears only
+// once the installer Pod runs again, which needs this snapshotter serving.
+func (k *keychain) waitForKubeClient(ctx context.Context) (kubernetes.Interface, error) {
 	var (
 		client  kubernetes.Interface
 		lastErr string
@@ -186,12 +183,9 @@ func (k *keychain) logShadowed(ctx context.Context, used credential, rest []cred
 	}
 }
 
-// Synced reports whether every provider finished its initial sync.
+// Synced reports whether every provider finished its initial sync. Without
+// kube_secret there is none to wait for.
 func (k *keychain) Synced() bool {
-	if !k.cfg.Enable {
-		return true
-	}
-
 	secrets := k.secrets.Load()
-	return secrets != nil && secrets.synced()
+	return !k.cfg.Enable || secrets != nil && secrets.synced()
 }

@@ -2,7 +2,7 @@
 # containerd: containerd 1.6, or a 2.x that still reads a version 2 config, as
 # kind's node image ships. The installer never edits containerd's config.
 
-# The proxy snapshotter served by nydus-snapshotter.service through its socket.
+# The proxy snapshotter served by nydus-snapshotter-v3.service through its socket.
 [proxy_plugins.nydus]
   type = "snapshot"
   address = "/run/nydus-snapshotter/nydus-snapshotter.sock"

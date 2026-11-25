@@ -126,8 +126,7 @@ func (e *Endpoint) loadCertFiles(dir string) error {
 }
 
 // hostFileConfig is the subset of a hosts.toml a nydus daemon can express.
-// [host] mirror tables are ignored: a daemon reads from one registry, refer
-// to https://github.com/containerd/containerd/blob/main/docs/hosts.md.
+// [host] mirror tables are ignored: a daemon reads from one registry.
 type hostFileConfig struct {
 	// Server is the upstream registry address.
 	Server string `toml:"server"`
@@ -183,8 +182,7 @@ func (f *hostFileConfig) addr() (string, error) {
 	}
 
 	// containerd reaches Docker Hub through the [host] table its docs put
-	// beside this server; a daemon reads from the server alone, refer to
-	// https://github.com/containerd/containerd/blob/main/docs/hosts.md.
+	// beside this server; a daemon reads from the server alone.
 	host := u.Host
 	if host == DockerHubHost {
 		host = dockerHubRegistryHost
@@ -222,18 +220,15 @@ func (f *hostFileConfig) caCerts() ([]string, error) {
 	}
 }
 
-// Hosts resolves registry endpoints from certs.d directories, as containerd's
-// ConfigureHosts does, refer to
-// https://github.com/containerd/containerd/blob/main/core/remotes/docker/config/hosts.go.
+// Hosts resolves registry endpoints from a containerd certs.d directory.
 type Hosts struct {
-	// roots are the certs.d directories, none for the defaults only.
-	roots []string
+	// root is the certs.d directory, empty for the defaults only.
+	root string
 }
 
-// NewHosts returns the resolver of the certs.d directories of configPath, a
-// path list as containerd's CRI config_path is.
+// NewHosts returns the resolver of the certs.d directory configPath.
 func NewHosts(configPath string) *Hosts {
-	return &Hosts{roots: filepath.SplitList(configPath)}
+	return &Hosts{root: configPath}
 }
 
 // Resolve returns the registry endpoint of host, applying
@@ -273,18 +268,14 @@ func (h *Hosts) Resolve(host string) (*Endpoint, error) {
 	return endpoint, nil
 }
 
-// hostDir returns the host directory of host in the first certs.d directory
-// holding one, as containerd's CRI plugin resolves a config_path list, refer to
-// https://github.com/containerd/containerd/blob/main/internal/cri/server/images/image_pull.go.
+// hostDir returns the host directory of host in the certs.d directory, with
+// containerd's lookup.
 func (h *Hosts) hostDir(host string) (string, error) {
-	for _, root := range h.roots {
-		dir, err := config.HostDirFromRoot(root)(host)
-		if !errors.Is(err, errdefs.ErrNotFound) {
-			return dir, err
-		}
+	if h.root == "" {
+		return "", errdefs.ErrNotFound
 	}
 
-	return "", errdefs.ErrNotFound
+	return config.HostDirFromRoot(h.root)(host)
 }
 
 // defaultEndpoint returns containerd's default endpoint of host.

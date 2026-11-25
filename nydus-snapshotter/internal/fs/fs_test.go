@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/fstest"
 	"testing/synctest"
 	"time"
 
@@ -87,17 +88,23 @@ var (
 	mockBlobID = strings.Repeat("aa", 32)
 
 	mockOtherBlobID = strings.Repeat("bb", 32)
-)
 
-type mockRecorders struct {
-	systemd  *systemdmocks.MockSystemdMockRecorder
-	keychain *authmocks.MockKeychainMockRecorder
-	driver   *MockDriverMockRecorder
-	client   *nydusdmocks.MockClientMockRecorder
-	cancel   context.CancelFunc
-	started  *atomic.Pointer[systemd.Unit]
-	fs       *atomic.Pointer[fileSystem]
-}
+	mockImageRef = "registry.example.com/team/app:v1-nydus-v3"
+
+	mockRootFS = fstest.MapFS{
+		"nydus":                               {Mode: 0o755},
+		"bootstrap/fs/image/" + bootstrapFile: {Data: []byte("boot"), Mode: 0o644},
+		"bootstrap/fs/image/" + mockBlobID + cache.BlobMetaSuffix: {Data: []byte("meta"), Mode: 0o644},
+	}
+
+	mockUsed = func(context.Context) (map[string]struct{}, error) {
+		return map[string]struct{}{mockChainID: {}}, nil
+	}
+
+	mockUnused = func(context.Context) (map[string]struct{}, error) {
+		return map[string]struct{}{}, nil
+	}
+)
 
 func TestNew(t *testing.T) {
 	tests := []struct {
@@ -113,7 +120,7 @@ func TestNew(t *testing.T) {
 				gomock.InOrder(
 					m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(math.MaxUint64), nil).Times(1),
 					m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, systemd.Resources{MemoryMax: 8 << 30, MemoryHigh: 6 << 30, CPUQuotaPerSecUSec: 4_000_000}).Return(nil).Times(1),
-					m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1),
+					m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1),
 					m.SetResources(gomock.Any(), mockUnit, systemd.Resources{MemoryHigh: 1 << 30, CPUQuotaPerSecUSec: 1_000_000}).Return(nil).Times(1),
 				)
 			},
@@ -121,7 +128,7 @@ func TestNew(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.False(f.(*fileSystem).limitsDeferred.Load())
-				for _, dir := range []string{cfg.CacheDir(), cfg.DaemonInstancesDir(), cfg.DaemonRuntimesDir(), cfg.Nydusd.LogDir} {
+				for _, dir := range []string{cfg.CacheDir(), cfg.DaemonInstancesDir(), cfg.DaemonRuntimesDir()} {
 					info, err := os.Stat(dir)
 					assert.NoError(err)
 					assert.Equal(os.ModeDir|0o700, info.Mode())
@@ -133,7 +140,7 @@ func TestNew(t *testing.T) {
 			prepare: func(t *testing.T, cfg *config.Config) {},
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(9<<30), nil).Times(1)
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, nil).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(nil, nil).Times(1)
 			},
 			expect: func(t *testing.T, cfg *config.Config, f FileSystem, err error) {
 				assert := assert.New(t)
@@ -147,7 +154,7 @@ func TestNew(t *testing.T) {
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
 				m.MemoryCurrent(gomock.Any(), config.DefaultCgroupSlice).Return(uint64(math.MaxUint64), nil).Times(1)
 				m.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, errors.New("foo")).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, cfg *config.Config, f FileSystem, err error) {
 				assert := assert.New(t)
@@ -206,7 +213,6 @@ func TestNew(t *testing.T) {
 			cfg := config.New()
 			cfg.RootDir = filepath.Join(root, "lib")
 			cfg.RuntimeDir = filepath.Join(root, "run")
-			cfg.Nydusd.LogDir = filepath.Join(root, "log")
 			tc.prepare(t, cfg)
 
 			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
@@ -222,23 +228,23 @@ func TestNew(t *testing.T) {
 func TestFileSystem_Mount(t *testing.T) {
 	tests := []struct {
 		name   string
-		mock   func(m mockRecorders, mounted *atomic.Bool)
+		mock   func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit])
 		expect func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit])
 	}{
 		{
 			name: "start a daemon",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return(mockCredential, nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, unit *systemd.Unit) error {
-					m.started.Store(unit)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return(mockCredential, nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(1)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, unit *systemd.Unit) error {
+					started.Store(unit)
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -277,16 +283,16 @@ func TestFileSystem_Mount(t *testing.T) {
 				assert.True(unit.Notify)
 				assert.Equal(time.Duration(cfg.Nydusd.MountTimeout), unit.TimeoutStart)
 				assert.Equal(time.Duration(config.DefaultNydusdWatchdogTimeout), unit.Watchdog)
-				assert.NotContains(strings.Join(append(unit.ExecStart, unit.Environment...), " "), mockCredential)
+				assert.NotContains(strings.Join(unit.ExecStart, " "), mockCredential)
 			},
 		},
 		{
 			name: "reuse a ready daemon",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -300,10 +306,10 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "reuse a recorded daemon without asking it again",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -317,11 +323,11 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "complete the record of a running daemon whose version is unknown",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -336,18 +342,18 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "refuse a daemon of another api version",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(2)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(nil, fmt.Errorf("GET /api/v1/daemon: %w", errdefs.ErrNotImplemented)).Times(1)
-				m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(nil, fmt.Errorf("GET /api/v1/daemon: %w", errdefs.ErrNotImplemented)).Times(1)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -361,10 +367,10 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "report a running daemon that does not answer as unavailable",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(errors.New("busy")).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(errors.New("busy")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -374,42 +380,42 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "fail fast before credentials sync",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(false).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(false).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
 				starts := testutil.ToFloat64(metrics.DaemonStartsTotal)
 				_, err := f.Mount(t.Context(), image)
 				assert.ErrorIs(err, errdefs.ErrUnavailable)
-				assert.NoDirExists(f.cfg.Load().Nydusd.LogDir)
+				assert.NoDirExists(f.cfg.Load().DaemonInstanceDir(mockID))
 				assert.Equal(starts, testutil.ToFloat64(metrics.DaemonStartsTotal))
 			},
 		},
 		{
 			name: "fail fast on an invalid image reference",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
 				image.Ref = mockInvalidRef
 				_, err := f.Mount(t.Context(), image)
 				assert.Error(err)
-				assert.NoDirExists(f.cfg.Load().Nydusd.LogDir)
+				assert.NoDirExists(f.cfg.Load().DaemonInstanceDir(mockID))
 			},
 		},
 		{
 			name: "clean up a daemon that fails to start",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(2)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).Return(errors.New("job failed")).Times(1)
-				m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).Return(errors.New("job failed")).Times(1)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -420,18 +426,17 @@ func TestFileSystem_Mount(t *testing.T) {
 				assert.Equal(failures+1, testutil.ToFloat64(metrics.DaemonStartFailuresTotal))
 				_, err = f.store.GetInstance(mockChainID)
 				assert.ErrorIs(err, errdefs.ErrNotFound)
-				assert.DirExists(filepath.Join(f.cfg.Load().Nydusd.LogDir, mockID))
 			},
 		},
 		{
 			name: "stop a daemon that reports ready without its mount",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(2)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).Return(nil).Times(1)
-				m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).Return(nil).Times(1)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -443,17 +448,17 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "stop a daemon that reports ready without its api",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(2)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(errors.New("foo")).Times(1)
-				m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+				mc.Ready(gomock.Any()).Return(errors.New("foo")).Times(1)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -465,7 +470,8 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "bound the wait for another start of the image",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
 				cfg := *f.cfg.Load()
@@ -482,23 +488,23 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "start one daemon for concurrent mounts",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).DoAndReturn(func(context.Context, string) (systemd.ActiveState, error) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).DoAndReturn(func(context.Context, string) (systemd.ActiveState, error) {
 					if mounted.Load() {
 						return systemd.ActiveStateActive, nil
 					}
 
 					return systemd.ActiveStateInactive, nil
 				}).AnyTimes()
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(1)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).AnyTimes()
-				m.client.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).AnyTimes()
+				mc.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -519,7 +525,8 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "invalid chain id",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
 				image.ChainID = "sha512:" + strings.Repeat("ab", 64)
@@ -529,8 +536,8 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "unit state cannot be read",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveState(""), errors.New("foo")).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveState(""), errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -540,10 +547,10 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "request done while a running daemon is checked",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).DoAndReturn(func(ctx context.Context) error {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).DoAndReturn(func(ctx context.Context) error {
 					<-ctx.Done()
 					return ctx.Err()
 				}).Times(1)
@@ -560,10 +567,10 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "running daemon whose image reference is invalid",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -576,10 +583,10 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "running daemon whose bootstrap layer is gone",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -592,11 +599,11 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "running daemon that cannot be identified",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(nil, errors.New("foo")).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -608,10 +615,10 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "running daemon whose record cannot be read",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
 				mounted.Store(true)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -623,13 +630,13 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "stale mount that cannot be detached",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
 				gomock.InOrder(
-					m.driver.Unmount(gomock.Any()).Return(errors.New("foo")).Times(1),
-					m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
-					m.driver.Unmount(gomock.Any()).Return(nil).Times(1),
+					md.Unmount(gomock.Any()).Return(errors.New("foo")).Times(1),
+					ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
+					md.Unmount(gomock.Any()).Return(nil).Times(1),
 				)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
@@ -642,8 +649,11 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "stale api socket that cannot be removed",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -656,22 +666,30 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "daemon dir that cannot be created",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
 				cfg := f.cfg.Load()
-				assert.NoError(os.WriteFile(cfg.Nydusd.LogDir, nil, 0o644))
+				dir := cfg.DaemonRuntimeDir(mockID)
+				assert.NoError(os.MkdirAll(filepath.Dir(dir), 0o700))
+				assert.NoError(os.WriteFile(dir, nil, 0o644))
 				_, err := f.Mount(t.Context(), image)
-				assert.ErrorContains(err, "create "+cfg.Nydusd.LogDir)
+				assert.ErrorContains(err, "create "+dir)
 				assert.NoDirExists(cfg.DaemonInstanceDir(mockID))
 			},
 		},
 		{
 			name: "bootstrap layer without a bootstrap",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -684,8 +702,11 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "record that cannot be written",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -696,9 +717,12 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "credential that cannot be resolved",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", errors.New("foo")).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -709,9 +733,12 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "nydus binary that is missing",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return(mockCredential, nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return(mockCredential, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -724,15 +751,18 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "stop a daemon that cannot be identified after its start",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(nil, errors.New("foo")).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -744,13 +774,13 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "report the start failure when the cleanup fails too",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).Return(errors.New("job failed")).Times(1)
-				m.systemd.StopUnit(gomock.Any(), mockUnit).Return(errors.New("foo")).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(1)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).Return(errors.New("job failed")).Times(1)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -762,29 +792,12 @@ func TestFileSystem_Mount(t *testing.T) {
 			},
 		},
 		{
-			name: "restart the retention of the logs of a start that failed again",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).Return(errors.New("job failed")).Times(1)
-			},
-			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
-				assert := assert.New(t)
-				logDir := filepath.Join(f.cfg.Load().Nydusd.LogDir, mockID)
-				old := time.Now().Add(-2 * failedLogRetention)
-				assert.NoError(os.MkdirAll(logDir, 0o700))
-				assert.NoError(os.Chtimes(logDir, old, old))
-				_, err := f.Mount(t.Context(), image)
-				assert.ErrorContains(err, "job failed")
-				info, err := os.Stat(logDir)
-				assert.NoError(err)
-				assert.WithinDuration(time.Now(), info.ModTime(), time.Minute)
-			},
-		},
-		{
 			name: "blob cache dir that is gone",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				expectFailedStart(m)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(2)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -797,22 +810,21 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "apply the limits of a config reloaded while the daemon started",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
-					f := m.fs.Load()
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(1)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 					cfg := *f.cfg.Load()
 					cfg.Cgroup.Daemon.MemoryHigh = 2 << 30
 					f.cfg.Store(&cfg)
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
-				m.systemd.SetResources(gomock.Any(), mockUnit, systemd.Resources{MemoryHigh: 2 << 30}).Return(nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
+				ms.SetResources(gomock.Any(), mockUnit, systemd.Resources{MemoryHigh: 2 << 30}).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -822,21 +834,20 @@ func TestFileSystem_Mount(t *testing.T) {
 		},
 		{
 			name: "keep a daemon whose reloaded limits cannot be applied",
-			mock: func(m mockRecorders, mounted *atomic.Bool) {
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				m.keychain.Synced().Return(true).Times(1)
-				m.keychain.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
-				m.driver.Unmount(gomock.Any()).Return(nil).Times(1)
-				m.systemd.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
-					f := m.fs.Load()
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, mk *authmocks.MockKeychainMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, f *fileSystem, mounted *atomic.Bool, started *atomic.Pointer[systemd.Unit]) {
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+				mk.Synced().Return(true).Times(1)
+				mk.Resolve(gomock.Any(), gomock.Any()).Return("", nil).Times(1)
+				md.Unmount(gomock.Any()).Return(nil).Times(1)
+				ms.StartTransientUnit(gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *systemd.Unit) error {
 					cfg := *f.cfg.Load()
 					f.cfg.Store(&cfg)
 					mounted.Store(true)
 					return nil
 				}).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-				m.client.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
-				m.systemd.SetResources(gomock.Any(), mockUnit, gomock.Any()).Return(errors.New("foo")).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
+				mc.Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
+				ms.SetResources(gomock.Any(), mockUnit, gomock.Any()).Return(errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, image *Image, started *atomic.Pointer[systemd.Unit]) {
 				assert := assert.New(t)
@@ -859,13 +870,41 @@ func TestFileSystem_Mount(t *testing.T) {
 			var (
 				mounted atomic.Bool
 				started atomic.Pointer[systemd.Unit]
-				fsys    atomic.Pointer[fileSystem]
 			)
-			expectDriver(driver, &mounted)
-			tc.mock(mockRecorders{systemd: mockSystemd.EXPECT(), keychain: keychain.EXPECT(), driver: driver.EXPECT(), client: client.EXPECT(), started: &started, fs: &fsys}, &mounted)
+			driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
+			driver.EXPECT().Args(gomock.Any()).Return([]string{"fuse"}).AnyTimes()
+			driver.EXPECT().Mounted(gomock.Any()).DoAndReturn(func(*Daemon) (bool, error) { return mounted.Load(), nil }).AnyTimes()
 
-			f, image := newTestFileSystem(t, mockSystemd, keychain, driver, client)
-			fsys.Store(f)
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:   mockSystemd,
+				store:     s,
+				keychain:  keychain,
+				hosts:     registry.NewHosts(""),
+				driver:    driver,
+				newClient: func(string) nydusd.Client { return client },
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+			}
+			f.cfg.Store(cfg)
+			image := &Image{ChainID: mockChainID, Ref: mockImageRef, BootstrapDir: filepath.Join(root, "bootstrap", "fs"), PrefetchScope: "all"}
+
+			tc.mock(mockSystemd.EXPECT(), keychain.EXPECT(), driver.EXPECT(), client.EXPECT(), f, &mounted, &started)
 			tc.expect(t, f, image, &started)
 		})
 	}
@@ -874,25 +913,24 @@ func TestFileSystem_Mount(t *testing.T) {
 func TestFileSystem_Release(t *testing.T) {
 	tests := []struct {
 		name         string
-		used         UsedFunc
+		used         []UsedFunc
 		runtimeDir   bool
 		deferred     bool
 		unresponsive bool
-		failedLog    time.Duration
 		canceled     bool
 		prepare      func(t *testing.T, f *fileSystem, d *Daemon)
-		mock         func(m mockRecorders)
+		mock         func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc)
 		expect       func(t *testing.T, f *fileSystem, d *Daemon, err error)
 	}{
 		{
 			name: "stop an unused daemon",
-			used: usedFunc(false, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+			used: []UsedFunc{mockUnused},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
 				gomock.InOrder(
-					m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
-					m.driver.Unmount(gomock.Any()).Return(nil).Times(1),
+					ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
+					md.Unmount(gomock.Any()).Return(nil).Times(1),
 				)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
@@ -900,15 +938,14 @@ func TestFileSystem_Release(t *testing.T) {
 				assert.NoError(err)
 				_, err = f.store.GetInstance(mockChainID)
 				assert.ErrorIs(err, errdefs.ErrNotFound)
-				assert.NoDirExists(d.LogDir)
 			},
 		},
 		{
 			name: "keep a used daemon without asking systemd again",
-			used: usedFunc(true, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+			used: []UsedFunc{mockUsed},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -919,11 +956,11 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:       "keep the record of a used daemon that exited",
-			used:       usedFunc(true, nil),
+			used:       []UsedFunc{mockUsed},
 			runtimeDir: true,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -936,10 +973,10 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "keep the record of a used daemon gone with a reboot",
-			used: usedFunc(true, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+			used: []UsedFunc{mockUsed},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -952,13 +989,13 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "forget an unused daemon gone with a reboot",
-			used: usedFunc(false, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+			used: []UsedFunc{mockUnused},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
 				gomock.InOrder(
-					m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
-					m.driver.Unmount(gomock.Any()).Return(nil).Times(1),
+					ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
+					md.Unmount(gomock.Any()).Return(nil).Times(1),
 				)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
@@ -966,31 +1003,30 @@ func TestFileSystem_Release(t *testing.T) {
 				assert.NoError(err)
 				_, err = f.store.GetInstance(mockChainID)
 				assert.ErrorIs(err, errdefs.ErrNotFound)
-				assert.NoDirExists(d.LogDir)
 			},
 		},
 		{
 			name:       "count a used daemon that exited once across passes",
-			used:       usedFunc(true, nil),
+			used:       []UsedFunc{mockUsed},
 			runtimeDir: true,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(2)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(2)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(2)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(2)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				exits := testutil.ToFloat64(metrics.DaemonUnexpectedExitsTotal)
-				assert.NoError(f.Release(t.Context(), usedFunc(true, nil)))
+				assert.NoError(f.Release(t.Context(), mockUsed))
 				assert.Equal(exits, testutil.ToFloat64(metrics.DaemonUnexpectedExitsTotal))
 			},
 		},
 		{
 			name: "report a used daemon that does not answer",
-			used: usedFunc(true, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(errors.New("foo")).Times(1)
+			used: []UsedFunc{mockUsed},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1004,11 +1040,11 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:         "forget a used daemon that answers again",
-			used:         usedFunc(true, nil),
+			used:         []UsedFunc{mockUsed},
 			unresponsive: true,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1020,14 +1056,14 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:         "forget an unresponsive daemon that is gone",
-			used:         usedFunc(false, nil),
+			used:         []UsedFunc{mockUnused},
 			unresponsive: true,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
 				gomock.InOrder(
-					m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
-					m.driver.Unmount(gomock.Any()).Return(nil).Times(1),
+					ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
+					md.Unmount(gomock.Any()).Return(nil).Times(1),
 				)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
@@ -1040,13 +1076,13 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:     "retry deferred limits",
-			used:     usedFunc(true, nil),
+			used:     []UsedFunc{mockUsed},
 			deferred: true,
-			mock: func(m mockRecorders) {
-				m.systemd.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(2)
-				m.systemd.SetResources(gomock.Any(), mockUnit, gomock.Any()).Return(nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(nil).Times(1)
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(2)
+				ms.SetResources(gomock.Any(), mockUnit, gomock.Any()).Return(nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1056,12 +1092,12 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:     "keep limits deferred while they fail",
-			used:     usedFunc(true, nil),
+			used:     []UsedFunc{mockUsed},
 			deferred: true,
-			mock: func(m mockRecorders) {
-				m.systemd.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(errors.New("foo")).Times(1)
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.StartSlice(gomock.Any(), config.DefaultCgroupSlice, sliceDescription, gomock.Any()).Return(errors.New("foo")).Times(1)
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				mc.Ready(gomock.Any()).Return(nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1070,44 +1106,12 @@ func TestFileSystem_Release(t *testing.T) {
 			},
 		},
 		{
-			name:      "remove the old logs of a failed start",
-			used:      usedFunc(true, nil),
-			failedLog: 2 * failedLogRetention,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockOtherUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-				gomock.InOrder(
-					m.systemd.StopUnit(gomock.Any(), mockOtherUnit).Return(nil).Times(1),
-					m.driver.Unmount(gomock.Any()).Return(nil).Times(1),
-				)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-			},
-			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.NoDirExists(filepath.Join(f.cfg.Load().Nydusd.LogDir, mockOtherID))
-				assert.DirExists(d.LogDir)
-			},
-		},
-		{
-			name:      "keep the recent logs of a failed start",
-			used:      usedFunc(true, nil),
-			failedLog: failedLogRetention / 2,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-			},
-			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.DirExists(filepath.Join(f.cfg.Load().Nydusd.LogDir, mockOtherID))
-			},
-		},
-		{
 			name: "report a failing usage check",
-			used: usedFunc(false, errors.New("metadata unavailable")),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
+			used: []UsedFunc{func(context.Context) (map[string]struct{}, error) {
+				return map[string]struct{}{}, errors.New("metadata unavailable")
+			}},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1116,9 +1120,9 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "units cannot be listed",
-			used: usedFunc(false, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, errors.New("foo")).Times(1)
+			used: []UsedFunc{mockUnused},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1129,12 +1133,12 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "records cannot be listed",
-			used: usedFunc(false, nil),
+			used: []UsedFunc{mockUnused},
 			prepare: func(t *testing.T, f *fileSystem, d *Daemon) {
 				assert.NoError(t, f.store.Close())
 			},
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1142,49 +1146,11 @@ func TestFileSystem_Release(t *testing.T) {
 			},
 		},
 		{
-			name: "log dir that cannot be read holds up no pass",
-			used: usedFunc(true, nil),
-			prepare: func(t *testing.T, f *fileSystem, d *Daemon) {
-				logDir := f.cfg.Load().Nydusd.LogDir
-				assert.NoError(t, os.RemoveAll(logDir))
-				assert.NoError(t, os.WriteFile(logDir, nil, 0o644))
-			},
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-			},
-			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				_, err = f.store.GetInstance(mockChainID)
-				assert.NoError(err)
-			},
-		},
-		{
-			name: "ignore a log dir that names no daemon",
-			used: usedFunc(true, nil),
-			prepare: func(t *testing.T, f *fileSystem, d *Daemon) {
-				dir := filepath.Join(f.cfg.Load().Nydusd.LogDir, "lost+found")
-				old := time.Now().Add(-2 * failedLogRetention)
-				assert.NoError(t, os.Mkdir(dir, 0o700))
-				assert.NoError(t, os.Chtimes(dir, old, old))
-			},
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).Return(nil).Times(1)
-			},
-			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.DirExists(filepath.Join(f.cfg.Load().Nydusd.LogDir, "lost+found"))
-			},
-		},
-		{
 			name: "daemon state cannot be read",
-			used: usedFunc(false, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveState(""), errors.New("foo")).Times(1)
+			used: []UsedFunc{mockUnused},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveState(""), errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1195,10 +1161,10 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "keep a daemon a container took while the pass ran",
-			used: usedThen(false, true, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+			used: []UsedFunc{mockUnused, mockUsed},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1209,9 +1175,11 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "usage cannot be told under the lock of the daemon",
-			used: usedThen(false, false, errors.New("foo")),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+			used: []UsedFunc{mockUnused, func(context.Context) (map[string]struct{}, error) {
+				return map[string]struct{}{}, errors.New("foo")
+			}},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1222,10 +1190,10 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:     "pass that ended before the lock of the daemon",
-			used:     usedFunc(false, nil),
+			used:     []UsedFunc{mockUnused},
 			canceled: true,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1236,10 +1204,10 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name:     "pass that ended probes no daemon in use",
-			used:     usedFunc(true, nil),
+			used:     []UsedFunc{mockUsed},
 			canceled: true,
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
@@ -1250,11 +1218,11 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "pass that ended during a probe tells nothing about the daemon",
-			used: usedFunc(true, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.client.Ready(gomock.Any()).DoAndReturn(func(context.Context) error {
-					m.cancel()
+			used: []UsedFunc{mockUsed},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				mc.Ready(gomock.Any()).DoAndReturn(func(context.Context) error {
+					cancel()
 					return context.Canceled
 				}).Times(1)
 			},
@@ -1267,29 +1235,28 @@ func TestFileSystem_Release(t *testing.T) {
 		},
 		{
 			name: "keep the record of a daemon that cannot be stopped",
-			used: usedFunc(false, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
-				m.systemd.StopUnit(gomock.Any(), mockUnit).Return(errors.New("foo")).Times(1)
+			used: []UsedFunc{mockUnused},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+				ms.StopUnit(gomock.Any(), mockUnit).Return(errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "release "+mockUnit+": foo")
 				_, err = f.store.GetInstance(mockChainID)
 				assert.NoError(err)
-				assert.DirExists(d.LogDir)
 			},
 		},
 		{
 			name: "keep the record of a daemon whose mount cannot be detached",
-			used: usedFunc(false, nil),
-			mock: func(m mockRecorders) {
-				m.systemd.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
-				m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
+			used: []UsedFunc{mockUnused},
+			mock: func(ms *systemdmocks.MockSystemdMockRecorder, md *MockDriverMockRecorder, mc *nydusdmocks.MockClientMockRecorder, cancel context.CancelFunc) {
+				ms.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				ms.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateActive, nil).Times(1)
 				gomock.InOrder(
-					m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
-					m.driver.Unmount(gomock.Any()).Return(errors.New("foo")).Times(1),
+					ms.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1),
+					md.Unmount(gomock.Any()).Return(errors.New("foo")).Times(1),
 				)
 			},
 			expect: func(t *testing.T, f *fileSystem, d *Daemon, err error) {
@@ -1310,12 +1277,41 @@ func TestFileSystem_Release(t *testing.T) {
 			client := nydusdmocks.NewMockClient(ctl)
 			mounted := &atomic.Bool{}
 			mounted.Store(true)
-			expectDriver(driver, mounted)
+			driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
+			driver.EXPECT().Args(gomock.Any()).Return([]string{"fuse"}).AnyTimes()
+			driver.EXPECT().Mounted(gomock.Any()).DoAndReturn(func(*Daemon) (bool, error) { return mounted.Load(), nil }).AnyTimes()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			tc.mock(mockRecorders{systemd: mockSystemd.EXPECT(), driver: driver.EXPECT(), client: client.EXPECT(), cancel: cancel})
+			tc.mock(mockSystemd.EXPECT(), driver.EXPECT(), client.EXPECT(), cancel)
 
-			f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), driver, client)
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:   mockSystemd,
+				store:     s,
+				keychain:  authmocks.NewMockKeychain(ctl),
+				hosts:     registry.NewHosts(""),
+				driver:    driver,
+				newClient: func(string) nydusd.Client { return client },
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+			}
+			f.cfg.Store(cfg)
+
 			id, err := daemonIDFromChainID(mockChainID)
 			assert.NoError(t, err)
 			if tc.unresponsive {
@@ -1324,16 +1320,8 @@ func TestFileSystem_Release(t *testing.T) {
 
 			d := f.daemon(f.cfg.Load(), id)
 			assert.NoError(t, f.store.PutInstance(d.Instance))
-			assert.NoError(t, os.MkdirAll(d.LogDir, 0o700))
 			if tc.runtimeDir {
 				assert.NoError(t, os.MkdirAll(d.RuntimeDir, 0o700))
-			}
-
-			if tc.failedLog != 0 {
-				dir := filepath.Join(f.cfg.Load().Nydusd.LogDir, mockOtherID)
-				modTime := time.Now().Add(-tc.failedLog)
-				assert.NoError(t, os.Mkdir(dir, 0o700))
-				assert.NoError(t, os.Chtimes(dir, modTime, modTime))
 			}
 
 			f.limitsDeferred.Store(tc.deferred)
@@ -1345,7 +1333,11 @@ func TestFileSystem_Release(t *testing.T) {
 				cancel()
 			}
 
-			tc.expect(t, f, d, f.Release(ctx, tc.used))
+			calls := 0
+			tc.expect(t, f, d, f.Release(ctx, func(ctx context.Context) (map[string]struct{}, error) {
+				calls++
+				return tc.used[min(calls, len(tc.used))-1](ctx)
+			}))
 		})
 	}
 }
@@ -1391,7 +1383,9 @@ func TestFileSystem_MountRelease(t *testing.T) {
 			driver := NewMockDriver(ctl)
 			client := nydusdmocks.NewMockClient(ctl)
 			var mounted atomic.Bool
-			expectDriver(driver, &mounted)
+			driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
+			driver.EXPECT().Args(gomock.Any()).Return([]string{"fuse"}).AnyTimes()
+			driver.EXPECT().Mounted(gomock.Any()).DoAndReturn(func(*Daemon) (bool, error) { return mounted.Load(), nil }).AnyTimes()
 
 			starting, proceed := make(chan struct{}), make(chan struct{})
 			state := func(context.Context, string) (systemd.ActiveState, error) {
@@ -1402,7 +1396,7 @@ func TestFileSystem_MountRelease(t *testing.T) {
 				return systemd.ActiveStateInactive, nil
 			}
 			mockSystemd.EXPECT().ActiveState(gomock.Any(), mockUnit).DoAndReturn(state).AnyTimes()
-			mockSystemd.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).DoAndReturn(func(ctx context.Context, _, _ string) (map[string]systemd.ActiveState, error) {
+			mockSystemd.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).DoAndReturn(func(ctx context.Context, _, _ string) (map[string]systemd.ActiveState, error) {
 				active, err := state(ctx, mockUnit)
 				return map[string]systemd.ActiveState{mockUnit: active}, err
 			}).AnyTimes()
@@ -1419,7 +1413,35 @@ func TestFileSystem_MountRelease(t *testing.T) {
 			client.EXPECT().Ready(gomock.Any()).Return(nil).AnyTimes()
 			client.EXPECT().Info(gomock.Any()).Return(mockDaemonInfo, nil).Times(1)
 
-			f, image := newTestFileSystem(t, mockSystemd, keychain, driver, client)
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:   mockSystemd,
+				store:     s,
+				keychain:  keychain,
+				hosts:     registry.NewHosts(""),
+				driver:    driver,
+				newClient: func(string) nydusd.Client { return client },
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+			}
+			f.cfg.Store(cfg)
+			image := &Image{ChainID: mockChainID, Ref: mockImageRef, BootstrapDir: filepath.Join(root, "bootstrap", "fs"), PrefetchScope: "all"}
+
 			tc.expect(t, f, image, starting, proceed)
 		})
 	}
@@ -1479,7 +1501,9 @@ func TestFileSystem_ReleaseConcurrent(t *testing.T) {
 				defer ctl.Finish()
 				mockSystemd := systemdmocks.NewMockSystemd(ctl)
 				driver := NewMockDriver(ctl)
-				expectDriver(driver, &atomic.Bool{})
+				driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
+				driver.EXPECT().Args(gomock.Any()).Return([]string{"fuse"}).AnyTimes()
+				driver.EXPECT().Mounted(gomock.Any()).Return(false, nil).AnyTimes()
 				driver.EXPECT().Unmount(gomock.Any()).Return(nil).AnyTimes()
 
 				ids := make([]daemonID, tc.count)
@@ -1492,18 +1516,45 @@ func TestFileSystem_ReleaseConcurrent(t *testing.T) {
 				}
 
 				stopping, proceed := &atomic.Int32{}, make(chan struct{})
-				mockSystemd.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(units, nil).Times(1)
+				mockSystemd.EXPECT().ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(units, nil).Times(1)
 				mockSystemd.EXPECT().ActiveState(gomock.Any(), gomock.Any()).Return(systemd.ActiveStateActive, nil).Times(tc.count)
 				tc.mock(mockSystemd.EXPECT(), ids, stopping, proceed)
 
-				f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), driver, nydusdmocks.NewMockClient(ctl))
+				root := t.TempDir()
+				cfg := config.New()
+				cfg.RootDir = filepath.Join(root, "lib")
+				cfg.RuntimeDir = filepath.Join(root, "run")
+				cfg.Registry.ConfigPath = ""
+				cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+				cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+				cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+				assert.NoError(t, os.CopyFS(root, mockRootFS))
+				assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+				s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+				assert.NoError(t, err)
+				t.Cleanup(func() { s.Close() })
+
+				f := &fileSystem{
+					systemd:   mockSystemd,
+					store:     s,
+					keychain:  authmocks.NewMockKeychain(ctl),
+					hosts:     registry.NewHosts(""),
+					driver:    driver,
+					newClient: func(string) nydusd.Client { return nydusdmocks.NewMockClient(ctl) },
+					locker:    kmutex.New(),
+					startLock: &sync.Mutex{},
+					preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+				}
+				f.cfg.Store(cfg)
+
 				for _, id := range ids {
 					assert.NoError(t, f.store.PutInstance(f.daemon(f.cfg.Load(), id).Instance))
 				}
 
 				released := make(chan error, 1)
 				go func() {
-					released <- f.Release(t.Context(), usedFunc(false, nil))
+					released <- f.Release(t.Context(), mockUnused)
 				}()
 
 				synctest.Wait()
@@ -1527,7 +1578,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 			name:      "blobs of every recorded daemon",
 			instances: []*store.Instance{{ChainID: mockChainID, Unit: mockUnit, Blobs: []string{"aaaa", "bbbb"}}},
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
@@ -1538,7 +1589,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		{
 			name: "no blobs without records",
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
@@ -1549,7 +1600,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		{
 			name: "daemon running without a record",
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
@@ -1560,7 +1611,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		{
 			name: "stopped unit without a record",
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateFailed}, nil).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateFailed}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
@@ -1571,7 +1622,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 		{
 			name: "units cannot be listed",
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(nil, errors.New("foo")).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(nil, errors.New("foo")).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
@@ -1594,7 +1645,7 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 			name:      "unit that is no daemon",
 			instances: []*store.Instance{{ChainID: mockChainID, Unit: mockUnit, Blobs: []string{"aaaa"}}},
 			mock: func(m *systemdmocks.MockSystemdMockRecorder) {
-				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, unitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive, "nydusd-helper.service": systemd.ActiveStateActive}, nil).Times(1)
+				m.ListUnits(gomock.Any(), config.DefaultCgroupSlice, daemonUnitPattern).Return(map[string]systemd.ActiveState{mockUnit: systemd.ActiveStateActive, "nydusd-helper.service": systemd.ActiveStateActive}, nil).Times(1)
 			},
 			expect: func(t *testing.T, blobs map[string]struct{}, err error) {
 				assert := assert.New(t)
@@ -1611,7 +1662,34 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 			mockSystemd := systemdmocks.NewMockSystemd(ctl)
 			tc.mock(mockSystemd.EXPECT())
 
-			f, _ := newTestFileSystem(t, mockSystemd, authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), nydusdmocks.NewMockClient(ctl))
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:   mockSystemd,
+				store:     s,
+				keychain:  authmocks.NewMockKeychain(ctl),
+				hosts:     registry.NewHosts(""),
+				driver:    NewMockDriver(ctl),
+				newClient: func(string) nydusd.Client { return nydusdmocks.NewMockClient(ctl) },
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+			}
+			f.cfg.Store(cfg)
+
 			for _, instance := range tc.instances {
 				assert.NoError(t, f.store.PutInstance(instance))
 			}
@@ -1623,85 +1701,5 @@ func TestFileSystem_RunningBlobs(t *testing.T) {
 			blobs, err := f.RunningBlobs(t.Context())
 			tc.expect(t, blobs, err)
 		})
-	}
-}
-
-func usedFunc(used bool, err error) UsedFunc {
-	return func(context.Context) (map[string]struct{}, error) {
-		if !used {
-			return map[string]struct{}{}, err
-		}
-
-		return map[string]struct{}{mockChainID: {}}, err
-	}
-}
-
-func usedThen(first, then bool, err error) UsedFunc {
-	calls := 0
-	return func(ctx context.Context) (map[string]struct{}, error) {
-		calls++
-		if calls == 1 {
-			return usedFunc(first, nil)(ctx)
-		}
-
-		return usedFunc(then, err)(ctx)
-	}
-}
-
-func expectFailedStart(m mockRecorders) {
-	m.systemd.ActiveState(gomock.Any(), mockUnit).Return(systemd.ActiveStateInactive, nil).Times(1)
-	m.keychain.Synced().Return(true).Times(1)
-	m.driver.Unmount(gomock.Any()).Return(nil).Times(2)
-	m.systemd.StopUnit(gomock.Any(), mockUnit).Return(nil).Times(1)
-}
-
-func expectDriver(driver *MockDriver, mounted *atomic.Bool) {
-	driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
-	driver.EXPECT().Args(gomock.Any()).Return([]string{"fuse"}).AnyTimes()
-	driver.EXPECT().Environment().Return(nil).AnyTimes()
-	driver.EXPECT().Mounted(gomock.Any()).DoAndReturn(func(*Daemon) (bool, error) { return mounted.Load(), nil }).AnyTimes()
-}
-
-func newTestFileSystem(t *testing.T, systemd systemd.Systemd, keychain *authmocks.MockKeychain, driver Driver, client nydusd.Client) (*fileSystem, *Image) {
-	t.Helper()
-	root := t.TempDir()
-	cfg := config.New()
-	cfg.RootDir = filepath.Join(root, "lib")
-	cfg.RuntimeDir = filepath.Join(root, "run")
-	cfg.Registry.ConfigPath = ""
-	cfg.Nydusd.Binary = filepath.Join(root, "nydus")
-	cfg.Nydusd.LogDir = filepath.Join(root, "log")
-	cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
-	cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
-	assert.NoError(t, os.WriteFile(cfg.Nydusd.Binary, nil, 0o755))
-	assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
-
-	imageDir := filepath.Join(root, "bootstrap", "fs", "image")
-	assert.NoError(t, os.MkdirAll(imageDir, 0o755))
-	assert.NoError(t, os.WriteFile(filepath.Join(imageDir, bootstrapFile), []byte("boot"), 0o644))
-	assert.NoError(t, os.WriteFile(filepath.Join(imageDir, mockBlobID+cache.BlobMetaSuffix), []byte("meta"), 0o644))
-
-	s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
-	assert.NoError(t, err)
-	t.Cleanup(func() { s.Close() })
-
-	f := &fileSystem{
-		systemd:   systemd,
-		store:     s,
-		keychain:  keychain,
-		hosts:     registry.NewHosts(""),
-		driver:    driver,
-		newClient: func(string) nydusd.Client { return client },
-		locker:    kmutex.New(),
-		startLock: &sync.Mutex{},
-		preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
-	}
-	f.cfg.Store(cfg)
-
-	return f, &Image{
-		ChainID:       mockChainID,
-		Ref:           "registry.example.com/team/app:v1-nydus-v3",
-		BootstrapDir:  filepath.Join(root, "bootstrap", "fs"),
-		PrefetchScope: "all",
 	}
 }

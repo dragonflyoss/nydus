@@ -7,9 +7,11 @@
 package snapshot
 
 import (
-	"maps"
+	"os"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
 
@@ -49,11 +51,12 @@ func TestSnapshotter_NydusImage(t *testing.T) {
 		},
 		{
 			name: "bootstrap layer of another format version",
-			labels: func() map[string]string {
-				labels := maps.Clone(mockBootstrapLabels)
-				labels[labelNydusFSVersion] = "6"
-				return labels
-			}(),
+			labels: map[string]string{
+				labelSnapshotRef:            mockBootstrapChainID,
+				labelNydusBootstrap:         labelTrue,
+				labelNydusFSVersion:         "6",
+				snapshotters.TargetRefLabel: mockImageRef,
+			},
 			chainIDs: []string{mockBootstrapChainID},
 			expect: func(t *testing.T, image *nydusfs.Image, err error) {
 				assert := assert.New(t)
@@ -65,8 +68,22 @@ func TestSnapshotter_NydusImage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sn := newTestSnapshotter(t, t.TempDir(), nil)
-			pullNydusImage(t, sn, tc.labels)
+			sn, err := New(t.TempDir(), nil)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			defer func() { assert.NoError(t, sn.Close()) }()
+
+			_, err = sn.Prepare(t.Context(), mockBlobExtractKey, "", snapshots.WithLabels(mockBlobLabels))
+			assert.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+			_, err = sn.Prepare(t.Context(), mockBootstrapExtractKey, mockBlobChainID, snapshots.WithLabels(tc.labels))
+			assert.NoError(t, err)
+			mounts, err := sn.Mounts(t.Context(), mockBootstrapExtractKey)
+			assert.NoError(t, err)
+			assert.Equal(t, "bind", mounts[0].Type)
+			assert.NoError(t, os.CopyFS(mounts[0].Source, mockBootstrapLayer))
+			assert.NoError(t, sn.Commit(t.Context(), mockBootstrapSnapshot, mockBootstrapExtractKey, snapshots.WithLabels(tc.labels)))
+
 			image, err := sn.NydusImage(t.Context(), tc.chainIDs)
 			tc.expect(t, image, err)
 		})

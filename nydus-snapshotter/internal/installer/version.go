@@ -14,99 +14,104 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/containerd/log"
-
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	utilversion "k8s.io/apimachinery/pkg/util/version"
 )
 
-// versionRegexp matches a nydus version usable as a directory name.
-var versionRegexp = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z.+_-]*$`)
-
-// nydusVersion returns the version the payload's nydus binary prints, 3.0.0
+// nydusBinaryVersion returns the version the image's nydus binary prints, 3.0.0
 // in "nydus 3.0.0 (1a2b3c4d5, 2026-01-02)".
-func (i *Installer) nydusVersion(ctx context.Context) (string, error) {
-	binary := i.payload(payloadNydusBinary)
-	out, err := exec.CommandContext(ctx, binary, "--version").Output()
+func (i *Installer) nydusBinaryVersion(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, nydusBinary, "--version").Output()
 	if err != nil {
-		return "", fmt.Errorf("run %s --version: %w", binary, err)
+		return "", fmt.Errorf("run %s --version: %w", nydusBinary, err)
 	}
 
 	fields := strings.Fields(string(out))
-	if len(fields) < 2 || !versionRegexp.MatchString(fields[1]) {
-		return "", fmt.Errorf("unexpected %s --version output %q", binary, out)
+	if len(fields) < 2 {
+		return "", fmt.Errorf("unexpected %s --version output %q", nydusBinary, out)
 	}
 
-	return fields[1], nil
+	// A semantic version holds no path separator, so it names the directory
+	// of the version.
+	version, err := utilversion.ParseSemantic(fields[1])
+	if err != nil {
+		return "", fmt.Errorf("unexpected %s --version output %q: %w", nydusBinary, out, err)
+	}
+
+	return version.String(), nil
 }
 
-// nydusBinary returns the host path of the nydus binary of a version.
-// config.DefaultNydusdBinary is <bin dir>/current/nydus; each version gets its
-// own dir so running daemons keep the binary they started with.
-func (i *Installer) nydusBinary(version string) string {
-	binDir := filepath.Dir(filepath.Dir(config.DefaultNydusdBinary))
-	return filepath.Join(binDir, version, filepath.Base(config.DefaultNydusdBinary))
-}
-
-// switchVersion atomically points the current link at a version whose binary
-// is in place and removes the versions no daemon start can resolve anymore.
-func (i *Installer) switchVersion(ctx context.Context, version string) error {
-	link, err := i.host(filepath.Dir(config.DefaultNydusdBinary))
+// switchNydusBinaryVersion atomically links nydusd.binary to a version whose
+// binary is in place and removes the versions no daemon start can resolve
+// anymore.
+//
+//	nydusd.binary ──▶ /opt/nydus-snapshotter/versions/<version>/nydus
+func (i *Installer) switchNydusBinaryVersion(ctx context.Context, version string) error {
+	containerLink, err := i.containerPath(i.cfg.Nydusd.Binary)
 	if err != nil {
 		return err
 	}
 
-	previous, err := os.Readlink(link)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("read %s: %w", link, err)
+	// A path that is no link, such as a binary put there by hand or nothing
+	// yet, has no previous version and is replaced.
+	hostTarget := filepath.Join(nydusBinaryVersionsDir, version, filepath.Base(nydusBinary))
+	previous, _ := os.Readlink(containerLink)
+	if previous == hostTarget {
+		return nil
 	}
 
-	if previous == version {
-		return nil
+	if err := os.MkdirAll(filepath.Dir(containerLink), 0o755); err != nil {
+		return fmt.Errorf("create dir of %s: %w", containerLink, err)
 	}
 
 	// Rename a new link over the old one, which a daemon start resolves
 	// either before or after.
-	tmp := link + temporarySuffix
+	tmp := containerLink + temporarySuffix
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove %s: %w", tmp, err)
 	}
 
-	if err := os.Symlink(version, tmp); err != nil {
+	if err := os.Symlink(hostTarget, tmp); err != nil {
 		return fmt.Errorf("create symlink %s: %w", tmp, err)
 	}
 
-	if err := os.Rename(tmp, link); err != nil {
+	if err := os.Rename(tmp, containerLink); err != nil {
 		return fmt.Errorf("rename %s: %w", tmp, err)
 	}
 
 	log.G(ctx).WithFields(log.Fields{"version": version, "previous": previous}).Info("switched nydus version")
-	if err := i.pruneVersions(ctx, filepath.Dir(link), version, previous); err != nil {
+	containerVersionsDir, err := i.containerPath(nydusBinaryVersionsDir)
+	if err != nil {
+		return err
+	}
+
+	if err := i.pruneNydusBinaryVersions(ctx, containerVersionsDir, version, filepath.Base(filepath.Dir(previous))); err != nil {
 		log.G(ctx).WithError(err).Warn("prune nydus versions")
 	}
 
 	return nil
 }
 
-// pruneVersions removes the nydus version dirs of binDir other than keep.
-// Running daemons keep the inode of the binary they started with, and
-// nothing restarts them; the version current pointed at before is kept for
-// a daemon start that resolved it just before the switch.
-func (i *Installer) pruneVersions(ctx context.Context, binDir string, keep ...string) error {
-	entries, err := os.ReadDir(binDir)
+// pruneNydusBinaryVersions removes the nydus version dirs of containerVersionsDir
+// other than keep. Running daemons keep the inode of the binary they started
+// with, and nothing restarts them; the version nydusd.binary linked to before
+// is kept for a daemon start that resolved it just before the switch.
+func (i *Installer) pruneNydusBinaryVersions(ctx context.Context, containerVersionsDir string, keep ...string) error {
+	entries, err := os.ReadDir(containerVersionsDir)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", binDir, err)
+		return fmt.Errorf("read %s: %w", containerVersionsDir, err)
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() || !versionRegexp.MatchString(entry.Name()) || slices.Contains(keep, entry.Name()) {
+		// What is no version dir is not the installer's to remove.
+		if _, err := utilversion.ParseSemantic(entry.Name()); err != nil || !entry.IsDir() || slices.Contains(keep, entry.Name()) {
 			continue
 		}
 
-		path := filepath.Join(binDir, entry.Name())
+		path := filepath.Join(containerVersionsDir, entry.Name())
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove %s: %w", path, err)
 		}

@@ -7,14 +7,11 @@
 package kubeutil
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/client-go/kubernetes"
-
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 func TestAPIServer(t *testing.T) {
@@ -78,13 +75,13 @@ func TestNewClient(t *testing.T) {
 	tests := []struct {
 		name   string
 		host   string
-		ca     string
+		dir    string
 		expect func(t *testing.T, client kubernetes.Interface, err error)
 	}{
 		{
 			name: "client of the pod's api server",
 			host: "10.96.0.1",
-			ca:   testutil.NewCertificate(t),
+			dir:  filepath.Join("testdata", "serviceaccount"),
 			expect: func(t *testing.T, client kubernetes.Interface, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -94,7 +91,7 @@ func TestNewClient(t *testing.T) {
 		{
 			name: "ca that is no certificate",
 			host: "10.96.0.1",
-			ca:   "ca",
+			dir:  filepath.Join("testdata", "serviceaccount-invalid-ca"),
 			expect: func(t *testing.T, client kubernetes.Interface, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "unable to load root certificates")
@@ -102,7 +99,7 @@ func TestNewClient(t *testing.T) {
 		},
 		{
 			name: "pod without an api server",
-			ca:   "ca",
+			dir:  filepath.Join("testdata", "serviceaccount"),
 			expect: func(t *testing.T, client kubernetes.Interface, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
@@ -115,10 +112,7 @@ func TestNewClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_HOST", tc.host)
 			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-			dir := t.TempDir()
-			assert.NoError(t, os.WriteFile(filepath.Join(dir, "token"), []byte("token"), 0o600))
-			assert.NoError(t, os.WriteFile(filepath.Join(dir, "ca.crt"), []byte(tc.ca), 0o644))
-			client, err := NewClient(dir)
+			client, err := NewClient(tc.dir)
 			tc.expect(t, client, err)
 		})
 	}

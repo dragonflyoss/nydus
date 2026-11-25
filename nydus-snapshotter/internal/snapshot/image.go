@@ -24,7 +24,7 @@ import (
 func (s *snapshotter) NydusImage(ctx context.Context, chainIDs []string) (*nydusfs.Image, error) {
 	var image *nydusfs.Image
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-		return s.walkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
+		return s.walkSnapshots(ctx, func(ctx context.Context, info snapshots.Info) error {
 			bootstrapLabels := labels(info.Labels)
 			chainID := bootstrapLabels[labelSnapshotRef]
 			if image != nil || info.Kind != snapshots.KindCommitted || !bootstrapLabels.isNydusBootstrap() || !slices.Contains(chainIDs, chainID) {

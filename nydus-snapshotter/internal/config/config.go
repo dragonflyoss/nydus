@@ -48,14 +48,14 @@ type Config struct {
 	// Metrics is the metrics server config.
 	Metrics MetricsConfig `yaml:"metrics"`
 
+	// Containerd is the config of the containerd the snapshotter serves.
+	Containerd ContainerdConfig `yaml:"containerd"`
+
 	// Registry is the registry host config.
 	Registry RegistryConfig `yaml:"registry"`
 
 	// Auth is the registry credential config.
 	Auth AuthConfig `yaml:"auth"`
-
-	// Nydusd is the daemon config.
-	Nydusd NydusdConfig `yaml:"nydusd"`
 
 	// Cgroup is the daemon resource config.
 	Cgroup CgroupConfig `yaml:"cgroup"`
@@ -68,6 +68,9 @@ type Config struct {
 
 	// Installer is the installer config, which the snapshotter ignores.
 	Installer InstallerConfig `yaml:"installer"`
+
+	// Nydusd is the daemon config.
+	Nydusd NydusdConfig `yaml:"nydusd"`
 }
 
 // GRPCConfig is the gRPC server config, a section of its own as in
@@ -90,10 +93,16 @@ type MetricsConfig struct {
 	Addr string `yaml:"addr"`
 }
 
+// ContainerdConfig is the config of the containerd the snapshotter serves.
+type ContainerdConfig struct {
+	// Addr is the socket of containerd. A preheat asks it for the layers of
+	// an image, and the installer whether it loaded the snapshotter.
+	Addr string `yaml:"addr"`
+}
+
 // RegistryConfig is the registry host config.
 type RegistryConfig struct {
-	// ConfigPath is the certs.d directory holding <host>/hosts.toml, or a
-	// list of them as containerd's config_path is.
+	// ConfigPath is the certs.d directory holding <host>/hosts.toml.
 	ConfigPath string `yaml:"config_path"`
 }
 
@@ -124,6 +133,100 @@ type AuthKubeSecretConfig struct {
 	LabelSelector string `yaml:"label_selector"`
 }
 
+// CgroupConfig is the daemon resource config.
+type CgroupConfig struct {
+	// Slice is the slice daemons run in, which holds their total budget.
+	Slice string `yaml:"slice"`
+
+	// MemoryMax is the total memory.max of all daemons, 0 for no limit.
+	MemoryMax Size `yaml:"memory_max"`
+
+	// MemoryHigh is the total memory.high of all daemons, 0 for no limit.
+	MemoryHigh Size `yaml:"memory_high"`
+
+	// CPUQuota is the total CPU quota of all daemons, 0% for no limit.
+	CPUQuota CPUQuota `yaml:"cpu_quota"`
+
+	// Daemon is the per-daemon budget.
+	Daemon CgroupDaemonConfig `yaml:"daemon"`
+}
+
+// CgroupDaemonConfig is the per-daemon resource config.
+type CgroupDaemonConfig struct {
+	// MemoryHigh is the per-daemon memory.high, 0 for no limit.
+	MemoryHigh Size `yaml:"memory_high"`
+
+	// CPUQuota is the per-daemon CPU quota, 0% for no limit.
+	CPUQuota CPUQuota `yaml:"cpu_quota"`
+}
+
+// GCConfig is the blob cache GC config.
+type GCConfig struct {
+	// Interval is the GC interval.
+	Interval Duration `yaml:"interval"`
+
+	// Policy is the eviction policy.
+	Policy GCPolicyConfig `yaml:"policy"`
+}
+
+// GCPolicyConfig is the blob cache eviction policy.
+type GCPolicyConfig struct {
+	// BlobTTL evicts blobs unused for longer.
+	BlobTTL Duration `yaml:"blob_ttl"`
+
+	// DiskThreshold is the capacity the percentages apply to, 0 for the
+	// whole filesystem.
+	DiskThreshold Size `yaml:"disk_threshold"`
+
+	// DiskHighThresholdPercent starts watermark eviction.
+	DiskHighThresholdPercent int `yaml:"disk_high_threshold_percent"`
+
+	// DiskLowThresholdPercent stops watermark eviction.
+	DiskLowThresholdPercent int `yaml:"disk_low_threshold_percent"`
+}
+
+// PreheatConfig is the image preheat config. A preheat downloads every blob
+// of an image containerd has pulled, refer to the Preheat section of
+// docs/snapshotter.md.
+type PreheatConfig struct {
+	// MaxConcurrentImages is the number of images preheated at once, the rest
+	// wait.
+	MaxConcurrentImages int `yaml:"max_concurrent_images"`
+}
+
+// InstallerConfig is the config of the installer, the DaemonSet Pod that
+// installs the snapshotter onto the host, read once when it starts. It holds
+// what every node shares.
+type InstallerConfig struct {
+	// ServiceAccountPath is where the Pod mounts its service account token
+	// and CA.
+	ServiceAccountPath string `yaml:"service_account_path"`
+
+	// SyncInterval is how often the token and the config are copied to the
+	// host and the node label is checked.
+	SyncInterval Duration `yaml:"sync_interval"`
+
+	// Registries is the registries config of the installer.
+	Registries InstallerRegistriesConfig `yaml:"registries"`
+
+	// NodeLabel is the node label config.
+	NodeLabel InstallerNodeLabelConfig `yaml:"node_label"`
+}
+
+// InstallerRegistriesConfig is the registries config of the installer.
+type InstallerRegistriesConfig struct {
+	// Enable installs the certs.d of the ConfigMap to the host, where
+	// registry.config_path reads it. Without it the host keeps its own.
+	Enable bool `yaml:"enable"`
+}
+
+// InstallerNodeLabelConfig is the node label config of the installer.
+type InstallerNodeLabelConfig struct {
+	// Enable labels the node while its Pods can use the snapshotter. The
+	// node is the one NODE_NAME names.
+	Enable bool `yaml:"enable"`
+}
+
 // NydusdConfig is the daemon config.
 type NydusdConfig struct {
 	// Driver is the mount driver, only fuse today.
@@ -133,15 +236,8 @@ type NydusdConfig struct {
 	// so an upgrade never changes a running unit.
 	Binary string `yaml:"binary"`
 
-	// LogDir is the parent of per-daemon log dirs.
-	LogDir string `yaml:"log_dir"`
-
-	// LogLevel is the log level of a daemon: trace, debug, info, warn or
-	// error.
-	LogLevel string `yaml:"log_level"`
-
-	// LogMaxFiles is the number of log files a daemon keeps.
-	LogMaxFiles int `yaml:"log_max_files"`
+	// Log is the logging config of a daemon.
+	Log NydusdLogConfig `yaml:"log"`
 
 	// MountTimeout bounds a daemon start, a unit job and a mount wait.
 	MountTimeout Duration `yaml:"mount_timeout"`
@@ -152,6 +248,15 @@ type NydusdConfig struct {
 
 	// Config is the config of each daemon.
 	Config NydusdDaemonConfig `yaml:"config"`
+}
+
+// NydusdLogConfig is the logging config of a daemon, laid out as the
+// snapshotter's own log section. A daemon logs to the journal, as the
+// snapshotter does.
+type NydusdLogConfig struct {
+	// Level is the log level of a daemon: trace, debug, info, warn or
+	// error.
+	Level string `yaml:"level"`
 }
 
 // NydusdDaemonConfig is what the daemons' configs share. It mirrors
@@ -286,112 +391,6 @@ type NydusdFallbackConfig struct {
 	RateLimit int `yaml:"rate_limit"`
 }
 
-// CgroupConfig is the daemon resource config.
-type CgroupConfig struct {
-	// Slice is the slice daemons run in, which holds their total budget.
-	Slice string `yaml:"slice"`
-
-	// MemoryMax is the total memory.max of all daemons, 0 for no limit.
-	MemoryMax Size `yaml:"memory_max"`
-
-	// MemoryHigh is the total memory.high of all daemons, 0 for no limit.
-	MemoryHigh Size `yaml:"memory_high"`
-
-	// CPUQuota is the total CPU quota of all daemons, 0% for no limit.
-	CPUQuota CPUQuota `yaml:"cpu_quota"`
-
-	// Daemon is the per-daemon budget.
-	Daemon CgroupDaemonConfig `yaml:"daemon"`
-}
-
-// CgroupDaemonConfig is the per-daemon resource config.
-type CgroupDaemonConfig struct {
-	// MemoryHigh is the per-daemon memory.high, 0 for no limit.
-	MemoryHigh Size `yaml:"memory_high"`
-
-	// CPUQuota is the per-daemon CPU quota, 0% for no limit.
-	CPUQuota CPUQuota `yaml:"cpu_quota"`
-}
-
-// GCConfig is the blob cache GC config, refer to dfdaemon's gc config.
-type GCConfig struct {
-	// Interval is the GC interval.
-	Interval Duration `yaml:"interval"`
-
-	// Policy is the eviction policy.
-	Policy GCPolicyConfig `yaml:"policy"`
-}
-
-// GCPolicyConfig is the blob cache eviction policy.
-type GCPolicyConfig struct {
-	// BlobTTL evicts blobs unused for longer.
-	BlobTTL Duration `yaml:"blob_ttl"`
-
-	// DiskThreshold is the capacity the percentages apply to, 0 for the
-	// whole filesystem.
-	DiskThreshold Size `yaml:"disk_threshold"`
-
-	// DiskHighThresholdPercent starts watermark eviction.
-	DiskHighThresholdPercent int `yaml:"disk_high_threshold_percent"`
-
-	// DiskLowThresholdPercent stops watermark eviction.
-	DiskLowThresholdPercent int `yaml:"disk_low_threshold_percent"`
-}
-
-// PreheatConfig is the image preheat config. A preheat downloads every blob
-// of an image containerd has pulled, refer to the Preheat section of
-// docs/snapshotter.md.
-type PreheatConfig struct {
-	// MaxConcurrentImages is the number of images preheated at once, the
-	// rest wait. It is named as containerd names max_concurrent_downloads,
-	// refer to https://github.com/containerd/containerd/blob/v2.2.10/internal/cri/config/config.go.
-	MaxConcurrentImages int `yaml:"max_concurrent_images"`
-
-	// ContainerdAddr is the socket of containerd, which is asked for the
-	// layers of the image a preheat names.
-	ContainerdAddr string `yaml:"containerd_addr"`
-}
-
-// InstallerConfig is the config of the installer, the DaemonSet Pod that
-// installs the snapshotter onto the host, read once when it starts. It holds
-// what every node shares, as kubelet keeps that in its config file and not
-// in flags, refer to
-// https://github.com/kubernetes/kubernetes/blob/v1.34.0/cmd/kubelet/app/options/options.go.
-type InstallerConfig struct {
-	// RootfsDir is where the Pod mounts the root filesystem of the host, /
-	// when the installer runs on the host.
-	RootfsDir string `yaml:"rootfs_dir"`
-
-	// PayloadDir holds what the image ships to install: bin/ and systemd/.
-	PayloadDir string `yaml:"payload_dir"`
-
-	// TokenDir is the Pod's service account token directory.
-	TokenDir string `yaml:"token_dir"`
-
-	// RegistryConfigPath is the certs.d directory to install, where the Pod
-	// mounts the ConfigMap's, named after registry.config_path, which reads
-	// it on the host; nothing is installed from a missing one.
-	RegistryConfigPath string `yaml:"registry_config_path"`
-
-	// SyncInterval is how often the token and the config are copied to the
-	// host and the node label is checked.
-	SyncInterval Duration `yaml:"sync_interval"`
-
-	// NodeLabel is the node label config.
-	NodeLabel InstallerNodeLabelConfig `yaml:"node_label"`
-}
-
-// InstallerNodeLabelConfig is the node label config of the installer.
-type InstallerNodeLabelConfig struct {
-	// Enable labels the node while its Pods can use the snapshotter. The
-	// node is the one NODE_NAME names.
-	Enable bool `yaml:"enable"`
-
-	// ContainerdAddr is the socket of the host's containerd, which is asked
-	// whether it loaded the snapshotter.
-	ContainerdAddr string `yaml:"containerd_addr"`
-}
-
 // New returns a config holding the defaults.
 func New() *Config {
 	return &Config{
@@ -406,6 +405,9 @@ func New() *Config {
 		Metrics: MetricsConfig{
 			Addr: DefaultMetricsAddr,
 		},
+		Containerd: ContainerdConfig{
+			Addr: DefaultContainerdAddr,
+		},
 		Registry: RegistryConfig{
 			ConfigPath: DefaultRegistryConfigPath,
 		},
@@ -414,12 +416,37 @@ func New() *Config {
 				Kubeconfig: DefaultAuthKubeconfig,
 			},
 		},
+		Cgroup: CgroupConfig{
+			Slice:      DefaultCgroupSlice,
+			MemoryMax:  DefaultCgroupMemoryMax,
+			MemoryHigh: DefaultCgroupMemoryHigh,
+			CPUQuota:   DefaultCgroupCPUQuota,
+			Daemon: CgroupDaemonConfig{
+				MemoryHigh: DefaultCgroupDaemonMemoryHigh,
+				CPUQuota:   DefaultCgroupDaemonCPUQuota,
+			},
+		},
+		GC: GCConfig{
+			Interval: DefaultGCInterval,
+			Policy: GCPolicyConfig{
+				BlobTTL:                  DefaultGCBlobTTL,
+				DiskHighThresholdPercent: DefaultGCDiskHighThresholdPercent,
+				DiskLowThresholdPercent:  DefaultGCDiskLowThresholdPercent,
+			},
+		},
+		Preheat: PreheatConfig{
+			MaxConcurrentImages: DefaultPreheatMaxConcurrentImages,
+		},
+		Installer: InstallerConfig{
+			ServiceAccountPath: DefaultInstallerServiceAccountPath,
+			SyncInterval:       DefaultInstallerSyncInterval,
+		},
 		Nydusd: NydusdConfig{
-			Driver:          DriverFUSE,
-			Binary:          DefaultNydusdBinary,
-			LogDir:          DefaultNydusdLogDir,
-			LogLevel:        DefaultNydusdLogLevel,
-			LogMaxFiles:     DefaultNydusdLogMaxFiles,
+			Driver: DriverFUSE,
+			Binary: DefaultNydusdBinary,
+			Log: NydusdLogConfig{
+				Level: DefaultNydusdLogLevel,
+			},
 			MountTimeout:    DefaultNydusdMountTimeout,
 			WatchdogTimeout: DefaultNydusdWatchdogTimeout,
 			Config: NydusdDaemonConfig{
@@ -453,38 +480,6 @@ func New() *Config {
 					RetryInterval:       DefaultNydusdPrefetchRetryInterval,
 					Scope:               DefaultNydusdPrefetchScope,
 				},
-			},
-		},
-		Cgroup: CgroupConfig{
-			Slice:      DefaultCgroupSlice,
-			MemoryMax:  DefaultCgroupMemoryMax,
-			MemoryHigh: DefaultCgroupMemoryHigh,
-			CPUQuota:   DefaultCgroupCPUQuota,
-			Daemon: CgroupDaemonConfig{
-				MemoryHigh: DefaultCgroupDaemonMemoryHigh,
-				CPUQuota:   DefaultCgroupDaemonCPUQuota,
-			},
-		},
-		GC: GCConfig{
-			Interval: DefaultGCInterval,
-			Policy: GCPolicyConfig{
-				BlobTTL:                  DefaultGCBlobTTL,
-				DiskHighThresholdPercent: DefaultGCDiskHighThresholdPercent,
-				DiskLowThresholdPercent:  DefaultGCDiskLowThresholdPercent,
-			},
-		},
-		Preheat: PreheatConfig{
-			MaxConcurrentImages: DefaultPreheatMaxConcurrentImages,
-			ContainerdAddr:      DefaultPreheatContainerdAddr,
-		},
-		Installer: InstallerConfig{
-			RootfsDir:          DefaultInstallerRootfsDir,
-			PayloadDir:         DefaultInstallerPayloadDir,
-			TokenDir:           DefaultInstallerTokenDir,
-			RegistryConfigPath: DefaultInstallerRegistryConfigPath,
-			SyncInterval:       DefaultInstallerSyncInterval,
-			NodeLabel: InstallerNodeLabelConfig{
-				ContainerdAddr: DefaultInstallerContainerdAddr,
 			},
 		},
 	}
@@ -539,18 +534,14 @@ func (c *Config) Validate() error {
 		{name: "root_dir", path: c.RootDir},
 		{name: "runtime_dir", path: c.RuntimeDir},
 		{name: "grpc.addr", path: c.GRPC.Addr},
+		{name: "registry.config_path", path: c.Registry.ConfigPath, optional: true},
 		{name: "auth.docker_config.path", path: c.Auth.DockerConfig.Path, optional: true},
 		{name: "auth.kube_secret.kubeconfig", path: c.Auth.KubeSecret.Kubeconfig, optional: true},
 		{name: "nydusd.binary", path: c.Nydusd.Binary},
-		{name: "nydusd.log_dir", path: c.Nydusd.LogDir},
 		{name: "nydusd.config.runtime_dir", path: c.Nydusd.Config.RuntimeDir},
 		{name: "nydusd.config.storage.dir", path: c.Nydusd.Config.Storage.Dir, optional: true},
-		{name: "preheat.containerd_addr", path: c.Preheat.ContainerdAddr},
-		{name: "installer.rootfs_dir", path: c.Installer.RootfsDir},
-		{name: "installer.payload_dir", path: c.Installer.PayloadDir},
-		{name: "installer.token_dir", path: c.Installer.TokenDir},
-		{name: "installer.registry_config_path", path: c.Installer.RegistryConfigPath},
-		{name: "installer.node_label.containerd_addr", path: c.Installer.NodeLabel.ContainerdAddr},
+		{name: "containerd.addr", path: c.Containerd.Addr},
+		{name: "installer.service_account_path", path: c.Installer.ServiceAccountPath},
 	} {
 		if p.optional && p.path == "" {
 			continue
@@ -558,12 +549,6 @@ func (c *Config) Validate() error {
 
 		if !filepath.IsAbs(p.path) {
 			return fmt.Errorf("%s must be an absolute path, got %q", p.name, p.path)
-		}
-	}
-
-	for _, path := range filepath.SplitList(c.Registry.ConfigPath) {
-		if !filepath.IsAbs(path) {
-			return fmt.Errorf("registry.config_path must hold absolute paths, got %q", c.Registry.ConfigPath)
 		}
 	}
 
@@ -593,12 +578,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("unsupported nydusd.driver %q", c.Nydusd.Driver)
 	}
 
-	if !slices.Contains(nydusdLogLevels, c.Nydusd.LogLevel) {
-		return fmt.Errorf("invalid nydusd.log_level %q, want one of %s", c.Nydusd.LogLevel, strings.Join(nydusdLogLevels, ", "))
-	}
-
-	if c.Nydusd.LogMaxFiles < 1 {
-		return errors.New("nydusd.log_max_files must be at least 1")
+	if !slices.Contains(nydusdLogLevels, c.Nydusd.Log.Level) {
+		return fmt.Errorf("invalid nydusd.log.level %q, want one of %s", c.Nydusd.Log.Level, strings.Join(nydusdLogLevels, ", "))
 	}
 
 	if time.Duration(c.Nydusd.MountTimeout) < minMountTimeout {
@@ -698,6 +679,10 @@ func (c *Config) Validate() error {
 		return errors.New("installer.sync_interval must be positive")
 	}
 
+	if c.Installer.Registries.Enable && c.Registry.ConfigPath == "" {
+		return errors.New("registry.config_path must not be empty with installer.registries.enable, which installs certs.d there")
+	}
+
 	return nil
 }
 
@@ -754,12 +739,6 @@ func (c *Config) PreheatRuntimesDir() string {
 // PreheatRuntimeDir returns the tmpfs directory of a preheat.
 func (c *Config) PreheatRuntimeDir(id string) string {
 	return filepath.Join(c.PreheatRuntimesDir(), id)
-}
-
-// PreheatLogDir returns the directory every preheat process logs to. Its
-// name is no daemon ID, so no daemon logs there.
-func (c *Config) PreheatLogDir() string {
-	return filepath.Join(c.Nydusd.LogDir, "preheat")
 }
 
 // CacheDir returns the shared blob cache directory.

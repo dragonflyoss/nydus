@@ -9,6 +9,7 @@ package systemd
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -52,7 +53,17 @@ func TestSystemd_connection(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestSystemd(t).(*systemd))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New().(*systemd)
+			defer s.Close()
+			tc.expect(t, s)
 		})
 	}
 }
@@ -138,7 +149,17 @@ func TestSystemd_unitProperty(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestSystemd(t).(*systemd))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New().(*systemd)
+			defer s.Close()
+			tc.expect(t, s)
 		})
 	}
 }

@@ -10,6 +10,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -20,15 +23,18 @@ import (
 	"go.uber.org/mock/gomock"
 
 	authmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth/mocks"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/kmutex"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/metrics"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd"
 	nydusdmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd/mocks"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 	storemocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store/mocks"
 	systemdmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd/mocks"
 )
 
-func TestPusher_push(t *testing.T) {
+func TestPusher_pushCredential(t *testing.T) {
 	tests := []struct {
 		name   string
 		mock   func(k *authmocks.MockKeychainMockRecorder, s *storemocks.MockStoreMockRecorder, c *nydusdmocks.MockClientMockRecorder)
@@ -44,7 +50,7 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				success := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultSuccess))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Equal(success+1, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultSuccess)))
 			},
 		},
@@ -57,8 +63,8 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 		{
@@ -74,8 +80,8 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 		{
@@ -92,8 +98,8 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 		{
@@ -107,8 +113,8 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				unsupported := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Equal(unsupported+1, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported)))
 			},
 		},
@@ -122,7 +128,7 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				unsupported := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported))
-				assert.Error(p.push(t.Context(), mockInstance.ChainID))
+				assert.Error(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Equal(unsupported, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported)))
 				assert.Empty(p.pushed)
 			},
@@ -139,7 +145,7 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				success := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultSuccess))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Equal(success+1, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultSuccess)))
 			},
 		},
@@ -151,7 +157,7 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 		{
@@ -162,7 +168,7 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				p.pushed[mockInstance.ChainID] = pushRecord{}
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.NotContains(p.pushed, mockInstance.ChainID)
 			},
 		},
@@ -173,7 +179,7 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.EqualError(p.push(t.Context(), mockInstance.ChainID), "foo")
+				assert.EqualError(p.pushCredential(t.Context(), mockInstance.ChainID), "foo")
 			},
 		},
 		{
@@ -185,7 +191,7 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 		{
@@ -196,7 +202,7 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 		{
@@ -209,8 +215,8 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				unsupported := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Equal(unsupported+1, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported)))
 			},
 		},
@@ -224,8 +230,8 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				failure := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultFailure))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Equal(failure+1, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultFailure)))
 			},
 		},
@@ -242,9 +248,9 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.Contains(p.pushed, mockInstance.ChainID)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 				assert.NotContains(p.pushed, mockInstance.ChainID)
 			},
 		},
@@ -260,7 +266,7 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				failure := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultFailure))
-				assert.ErrorIs(p.push(t.Context(), mockInstance.ChainID), syscall.ENOENT)
+				assert.ErrorIs(p.pushCredential(t.Context(), mockInstance.ChainID), syscall.ENOENT)
 				assert.Equal(failure, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultFailure)))
 				assert.Empty(p.pushed)
 			},
@@ -275,7 +281,7 @@ func TestPusher_push(t *testing.T) {
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
 				failure := testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultFailure))
-				assert.EqualError(p.push(t.Context(), mockInstance.ChainID), "foo")
+				assert.EqualError(p.pushCredential(t.Context(), mockInstance.ChainID), "foo")
 				assert.Equal(failure+1, testutil.ToFloat64(metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultFailure)))
 				assert.Empty(p.pushed)
 			},
@@ -294,9 +300,9 @@ func TestPusher_push(t *testing.T) {
 			},
 			expect: func(t *testing.T, p *pusher) {
 				assert := assert.New(t)
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
-				assert.EqualError(p.push(t.Context(), mockInstance.ChainID), "foo")
-				assert.NoError(p.push(t.Context(), mockInstance.ChainID))
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
+				assert.EqualError(p.pushCredential(t.Context(), mockInstance.ChainID), "foo")
+				assert.NoError(p.pushCredential(t.Context(), mockInstance.ChainID))
 			},
 		},
 	}
@@ -450,12 +456,14 @@ func TestPusher_enqueue(t *testing.T) {
 
 func TestFileSystem_Run(t *testing.T) {
 	tests := []struct {
-		name   string
-		mock   func(k *authmocks.MockKeychainMockRecorder, c *nydusdmocks.MockClientMockRecorder, pushed chan<- string)
-		expect func(t *testing.T, pushed <-chan string)
+		name       string
+		kubeSecret bool
+		mock       func(k *authmocks.MockKeychainMockRecorder, c *nydusdmocks.MockClientMockRecorder, pushed chan<- string)
+		expect     func(t *testing.T, pushed <-chan string)
 	}{
 		{
-			name: "push the credentials the keychain reports changed",
+			name:       "push the credentials the keychain reports changed",
+			kubeSecret: true,
 			mock: func(k *authmocks.MockKeychainMockRecorder, c *nydusdmocks.MockClientMockRecorder, pushed chan<- string) {
 				rotated := make(chan struct{})
 				k.Run(gomock.Any(), gomock.Any()).Do(func(ctx context.Context, onChange func()) {
@@ -494,9 +502,16 @@ func TestFileSystem_Run(t *testing.T) {
 			},
 		},
 		{
-			name: "push nothing while the keychain reports no change",
+			name:       "push nothing while the keychain reports no change",
+			kubeSecret: true,
 			mock: func(k *authmocks.MockKeychainMockRecorder, c *nydusdmocks.MockClientMockRecorder, pushed chan<- string) {
 				k.Run(gomock.Any(), gomock.Any()).Times(1)
+			},
+			expect: func(t *testing.T, pushed <-chan string) {},
+		},
+		{
+			name: "leave the keychain alone without kube secret",
+			mock: func(k *authmocks.MockKeychainMockRecorder, c *nydusdmocks.MockClientMockRecorder, pushed chan<- string) {
 			},
 			expect: func(t *testing.T, pushed <-chan string) {},
 		},
@@ -510,7 +525,35 @@ func TestFileSystem_Run(t *testing.T) {
 			pushed := make(chan string, 2)
 			tc.mock(keychain.EXPECT(), client.EXPECT(), pushed)
 
-			f, _ := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), keychain, NewMockDriver(ctl), client)
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			cfg.Auth.KubeSecret.Enable = tc.kubeSecret
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:   systemdmocks.NewMockSystemd(ctl),
+				store:     s,
+				keychain:  keychain,
+				hosts:     registry.NewHosts(""),
+				driver:    NewMockDriver(ctl),
+				newClient: func(string) nydusd.Client { return client },
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+			}
+			f.cfg.Store(cfg)
+
 			assert.NoError(t, f.store.PutInstance(mockInstance))
 			ctx, cancel := context.WithCancel(t.Context())
 			done := make(chan struct{})

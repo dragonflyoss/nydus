@@ -190,7 +190,17 @@ func TestNew(t *testing.T) {
 		{
 			name: "read a newer compatible schema version",
 			prepare: func(t *testing.T, path string) {
-				writeVersion(t, path, "2")
+				db, err := bolt.Open(path, 0o600, nil)
+				assert.NoError(t, err)
+				assert.NoError(t, db.Update(func(tx *bolt.Tx) error {
+					root, err := tx.CreateBucket(bucketKeyV1)
+					if err != nil {
+						return err
+					}
+
+					return root.Put(bucketKeyDBVersion, []byte("2"))
+				}))
+				assert.NoError(t, db.Close())
 			},
 			expect: func(t *testing.T, s Store, err error) {
 				assert := assert.New(t)
@@ -201,7 +211,17 @@ func TestNew(t *testing.T) {
 		{
 			name: "schema version that is no number",
 			prepare: func(t *testing.T, path string) {
-				writeVersion(t, path, "one")
+				db, err := bolt.Open(path, 0o600, nil)
+				assert.NoError(t, err)
+				assert.NoError(t, db.Update(func(tx *bolt.Tx) error {
+					root, err := tx.CreateBucket(bucketKeyV1)
+					if err != nil {
+						return err
+					}
+
+					return root.Put(bucketKeyDBVersion, []byte("one"))
+				}))
+				assert.NoError(t, db.Close())
 			},
 			expect: func(t *testing.T, s Store, err error) {
 				assert := assert.New(t)
@@ -212,7 +232,17 @@ func TestNew(t *testing.T) {
 		{
 			name: "unsupported schema version",
 			prepare: func(t *testing.T, path string) {
-				writeVersion(t, path, "0")
+				db, err := bolt.Open(path, 0o600, nil)
+				assert.NoError(t, err)
+				assert.NoError(t, db.Update(func(tx *bolt.Tx) error {
+					root, err := tx.CreateBucket(bucketKeyV1)
+					if err != nil {
+						return err
+					}
+
+					return root.Put(bucketKeyDBVersion, []byte("0"))
+				}))
+				assert.NoError(t, db.Close())
 			},
 			expect: func(t *testing.T, s Store, err error) {
 				assert := assert.New(t)
@@ -294,19 +324,4 @@ func TestStore_decode(t *testing.T) {
 			tc.expect(t, s)
 		})
 	}
-}
-
-func writeVersion(t *testing.T, path, version string) {
-	t.Helper()
-	db, err := bolt.Open(path, 0o600, nil)
-	assert.NoError(t, err)
-	assert.NoError(t, db.Update(func(tx *bolt.Tx) error {
-		root, err := tx.CreateBucket(bucketKeyV1)
-		if err != nil {
-			return err
-		}
-
-		return root.Put(bucketKeyDBVersion, []byte(version))
-	}))
-	assert.NoError(t, db.Close())
 }

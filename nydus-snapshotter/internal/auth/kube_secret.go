@@ -122,8 +122,7 @@ func (k *kubeSecretProvider) ownsData(entry metav1.ManagedFieldsEntry) bool {
 //     data changed;
 //   - annotations, which may hold a last-applied copy of the data.
 //
-// It is idempotent, as client-go asks of a transform, refer to
-// https://github.com/kubernetes/client-go/blob/master/tools/cache/delta_fifo.go.
+// It is idempotent, as client-go asks of a transform.
 func (k *kubeSecretProvider) transform(obj any) (any, error) {
 	s, ok := obj.(*corev1.Secret)
 	if !ok {
@@ -171,7 +170,7 @@ func (k *kubeSecretProvider) delete(obj any) {
 		return
 	}
 
-	k.set(name, nil)
+	k.setSecret(name, nil)
 }
 
 // add parses a secret and keeps it, or forgets it when malformed.
@@ -185,7 +184,7 @@ func (k *kubeSecretProvider) add(obj any) {
 	data, ok := s.Data[corev1.DockerConfigJsonKey]
 	if !ok || s.Type != corev1.SecretTypeDockerConfigJson {
 		log.L.WithFields(log.Fields{"secret": name, "key": corev1.DockerConfigJsonKey}).Warn("skip secret without key")
-		k.set(name, nil)
+		k.setSecret(name, nil)
 		return
 	}
 
@@ -195,11 +194,11 @@ func (k *kubeSecretProvider) add(obj any) {
 	var cfg dockerConfigJSON
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		log.L.WithError(err).WithField("secret", name).Warn("skip malformed secret")
-		k.set(name, nil)
+		k.setSecret(name, nil)
 		return
 	}
 
-	k.set(name, &secret{name: name, updatedAt: k.updatedAt(s), auths: cfg.Auths})
+	k.setSecret(name, &secret{name: name, updatedAt: k.updatedAt(s), auths: cfg.Auths})
 }
 
 // updatedAt returns when a secret last changed: the newest time of its
@@ -216,10 +215,10 @@ func (k *kubeSecretProvider) updatedAt(s *corev1.Secret) time.Time {
 	return updatedAt
 }
 
-// set replaces the secret of a namespace/name, nil to forget it, and calls
-// onChange. The secrets of the initial list are reported together once it is
-// complete, by whoever waits for synced.
-func (k *kubeSecretProvider) set(name string, s *secret) {
+// setSecret replaces the secret of a namespace/name, nil to forget it, and
+// calls onChange. The secrets of the initial list are reported together once
+// it is complete, by whoever waits for synced.
+func (k *kubeSecretProvider) setSecret(name string, s *secret) {
 	k.mu.Lock()
 	if s == nil {
 		delete(k.secrets, name)

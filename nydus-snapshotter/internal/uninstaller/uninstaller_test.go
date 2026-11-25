@@ -36,129 +36,109 @@ var (
 	mockNodeNotFound = apierrors.NewNotFound(corev1.Resource("nodes"), "node-1")
 )
 
-type mockCluster struct {
-	client *fake.Clientset
-}
-
-func (c *mockCluster) verbs() []string {
-	verbs := []string{}
-	for _, action := range c.client.Actions() {
-		verbs = append(verbs, action.GetVerb())
-	}
-
-	return verbs
-}
-
-func (c *mockCluster) nodes(t *testing.T, selector string) []corev1.Node {
-	t.Helper()
-	nodes, err := c.client.CoreV1().Nodes().List(t.Context(), metav1.ListOptions{LabelSelector: selector})
-	assert.NoError(t, err)
-	return nodes.Items
-}
-
-func (c *mockCluster) fail(verb string, err error) {
-	failed := false
-	c.client.PrependReactor(verb, "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
-		if failed {
-			return false, nil, nil
-		}
-
-		failed = true
-		return true, nil, err
-	})
-}
-
-func newMockCluster(t *testing.T, nodes ...*corev1.Node) *mockCluster {
-	t.Helper()
-	c := &mockCluster{client: fake.NewClientset()}
-	for _, node := range nodes {
-		_, err := c.client.CoreV1().Nodes().Create(t.Context(), node.DeepCopy(), metav1.CreateOptions{})
-		assert.NoError(t, err)
-	}
-	c.client.ClearActions()
-
-	return c
-}
-
 func TestUninstaller_Run(t *testing.T) {
 	tests := []struct {
-		name    string
-		nodes   []*corev1.Node
-		prepare func(t *testing.T, u *Uninstaller, c *mockCluster)
-		expect  func(t *testing.T, c *mockCluster, err error)
+		name   string
+		nodes  []runtime.Object
+		mock   func(u *Uninstaller, client *fake.Clientset)
+		expect func(t *testing.T, client *fake.Clientset, verbs []string, err error)
 	}{
 		{
-			name:    "remove the label from every node that carries it",
-			nodes:   []*corev1.Node{mockLabeledNode, mockOtherLabeledNode, mockUnlabeledNode},
-			prepare: func(t *testing.T, u *Uninstaller, c *mockCluster) {},
-			expect: func(t *testing.T, c *mockCluster, err error) {
+			name:  "remove the label from every node that carries it",
+			nodes: []runtime.Object{mockLabeledNode, mockOtherLabeledNode, mockUnlabeledNode},
+			mock:  func(u *Uninstaller, client *fake.Clientset) {},
+			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"list", "patch", "patch"}, c.verbs())
-				assert.Empty(c.nodes(t, installer.NodeLabel))
-				for _, node := range c.nodes(t, "") {
+				assert.Equal([]string{"list", "patch", "patch"}, verbs)
+				labeled, err := client.CoreV1().Nodes().List(t.Context(), metav1.ListOptions{LabelSelector: installer.NodeLabel})
+				assert.NoError(err)
+				assert.Empty(labeled.Items)
+				nodes, err := client.CoreV1().Nodes().List(t.Context(), metav1.ListOptions{})
+				assert.NoError(err)
+				for _, node := range nodes.Items {
 					assert.Equal(mockLabels, node.Labels)
 				}
 			},
 		},
 		{
-			name:    "leave a cluster without the label alone",
-			nodes:   []*corev1.Node{mockNode, mockUnlabeledNode},
-			prepare: func(t *testing.T, u *Uninstaller, c *mockCluster) {},
-			expect: func(t *testing.T, c *mockCluster, err error) {
+			name:  "leave a cluster without the label alone",
+			nodes: []runtime.Object{mockNode, mockUnlabeledNode},
+			mock:  func(u *Uninstaller, client *fake.Clientset) {},
+			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"list"}, c.verbs())
+				assert.Equal([]string{"list"}, verbs)
 			},
 		},
 		{
 			name:  "go on to the next node when a patch fails",
-			nodes: []*corev1.Node{mockLabeledNode, mockOtherLabeledNode},
-			prepare: func(t *testing.T, u *Uninstaller, c *mockCluster) {
-				c.fail("patch", errors.New("foo"))
+			nodes: []runtime.Object{mockLabeledNode, mockOtherLabeledNode},
+			mock: func(u *Uninstaller, client *fake.Clientset) {
+				failed := false
+				client.PrependReactor("patch", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+					if failed {
+						return false, nil, nil
+					}
+
+					failed = true
+					return true, nil, errors.New("foo")
+				})
 			},
-			expect: func(t *testing.T, c *mockCluster, err error) {
+			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "patch node ")
 				assert.ErrorContains(err, ": foo")
-				assert.Equal([]string{"list", "patch", "patch"}, c.verbs())
-				assert.Len(c.nodes(t, installer.NodeLabel), 1)
+				assert.Equal([]string{"list", "patch", "patch"}, verbs)
+				labeled, err := client.CoreV1().Nodes().List(t.Context(), metav1.ListOptions{LabelSelector: installer.NodeLabel})
+				assert.NoError(err)
+				assert.Len(labeled.Items, 1)
 			},
 		},
 		{
 			name:  "skip a node deleted since it was listed",
-			nodes: []*corev1.Node{mockLabeledNode, mockOtherLabeledNode},
-			prepare: func(t *testing.T, u *Uninstaller, c *mockCluster) {
-				c.fail("patch", mockNodeNotFound)
+			nodes: []runtime.Object{mockLabeledNode, mockOtherLabeledNode},
+			mock: func(u *Uninstaller, client *fake.Clientset) {
+				failed := false
+				client.PrependReactor("patch", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+					if failed {
+						return false, nil, nil
+					}
+
+					failed = true
+					return true, nil, mockNodeNotFound
+				})
 			},
-			expect: func(t *testing.T, c *mockCluster, err error) {
+			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal([]string{"list", "patch", "patch"}, c.verbs())
+				assert.Equal([]string{"list", "patch", "patch"}, verbs)
 			},
 		},
 		{
 			name:  "nodes that cannot be listed",
-			nodes: []*corev1.Node{mockLabeledNode},
-			prepare: func(t *testing.T, u *Uninstaller, c *mockCluster) {
-				c.fail("list", errors.New("foo"))
+			nodes: []runtime.Object{mockLabeledNode},
+			mock: func(u *Uninstaller, client *fake.Clientset) {
+				client.PrependReactor("list", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+					return true, nil, errors.New("foo")
+				})
 			},
-			expect: func(t *testing.T, c *mockCluster, err error) {
+			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "list labeled nodes: foo")
-				assert.Equal([]string{"list"}, c.verbs())
+				assert.Equal([]string{"list"}, verbs)
 			},
 		},
 		{
 			name:  "pod without an api server",
-			nodes: []*corev1.Node{mockLabeledNode},
-			prepare: func(t *testing.T, u *Uninstaller, c *mockCluster) {
+			nodes: []runtime.Object{mockLabeledNode},
+			mock: func(u *Uninstaller, client *fake.Clientset) {
 				u.kubeClient = nil
 			},
-			expect: func(t *testing.T, c *mockCluster, err error) {
+			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
-				assert.Empty(c.verbs())
+				assert.Empty(verbs)
 			},
 		},
 	}
@@ -166,11 +146,18 @@ func TestUninstaller_Run(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_HOST", "")
-			c := newMockCluster(t, tc.nodes...)
+			client := fake.NewClientset(tc.nodes...)
 			u := New(config.New())
-			u.kubeClient = c.client
-			tc.prepare(t, u, c)
-			tc.expect(t, c, u.Run(t.Context()))
+			u.kubeClient = client
+			tc.mock(u, client)
+
+			err := u.Run(t.Context())
+			var verbs []string
+			for _, action := range client.Actions() {
+				verbs = append(verbs, action.GetVerb())
+			}
+
+			tc.expect(t, client, verbs, err)
 		})
 	}
 }

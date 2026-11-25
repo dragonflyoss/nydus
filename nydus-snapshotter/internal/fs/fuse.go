@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/moby/sys/mountinfo"
@@ -37,24 +36,15 @@ func (*fuseDriver) Args(d *Daemon) []string {
 		"--config", d.ConfigPath,
 		"--mountpoint", instance.Mountpoint,
 		"--apiserver", "unix://" + instance.APISocket,
-		"--log-dir", d.LogDir,
 		"--log-level", d.LogLevel,
-		"--log-max-files", strconv.Itoa(d.LogMaxFiles),
+		"--log-journald",
 		"--fsname", "nydus-" + d.id.Short(),
 	}
 }
 
-// Environment returns the daemon's KEY=VALUE variables. The console log is
-// off: it duplicates the --log-dir files with terminal colors.
-func (*fuseDriver) Environment() []string {
-	return []string{"NYDUS_FUSE_CONSOLE=false"}
-}
-
 // Mounted reports whether the daemon's mount is in place. mountinfo lists
-// resolved paths, so the mountpoint's parent is resolved first, as
-// containerd's mount.Lookup does; never the mountpoint itself, whose lstat
-// fails or hangs on a dead FUSE server, refer to
-// https://github.com/containerd/containerd/blob/main/core/mount/lookup_unix.go.
+// resolved paths, so the mountpoint's parent is resolved first; never the
+// mountpoint itself, whose lstat fails or hangs on a dead FUSE server.
 func (*fuseDriver) Mounted(d *Daemon) (bool, error) {
 	parent, err := filepath.EvalSymlinks(filepath.Dir(d.Instance.Mountpoint))
 	if err != nil {

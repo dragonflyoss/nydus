@@ -34,14 +34,20 @@ const (
 )
 
 // Run keeps the registry credentials of the daemons current and runs the
-// preheats until ctx is done: it watches the keychain and pushes a changed
-// credential to the daemons reading with it.
+// preheats until ctx is done: with kube_secret it watches the keychain and
+// pushes a changed credential to the daemons reading with it.
 func (f *fileSystem) Run(ctx context.Context) {
 	// A start is over, one way or the other, within the bound of a Mount.
-	p := newPusher(f.keychain, f.store, f.newClient, f.mountBound(f.cfg.Load()))
+	cfg := f.cfg.Load()
+	p := newPusher(f.keychain, f.store, f.newClient, f.mountTimeout(cfg))
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Go(func() { f.keychain.Run(ctx, p.enqueue) })
+
+	// Only the credentials of kube_secret change behind the snapshotter.
+	if cfg.Auth.KubeSecret.Enable {
+		wg.Go(func() { f.keychain.Run(ctx, p.enqueue) })
+	}
+
 	wg.Go(func() { f.runPreheats(ctx) })
 	p.run(ctx)
 }
@@ -56,10 +62,9 @@ type pushRecord struct {
 	sum [sha256.Size]byte
 }
 
-// pusher keeps the registry credential of every recorded daemon current:
-// when a credential may have changed it resolves each daemon's again and
-// pushes the ones that differ from what the daemon was last given, refer to
-// https://github.com/kubernetes/sample-controller/blob/master/controller.go.
+// pusher keeps the registry credential of every recorded daemon current: when
+// a credential may have changed it resolves each daemon's again and pushes
+// the ones that differ from what the daemon was last given.
 type pusher struct {
 	// keychain resolves credentials.
 	keychain auth.Keychain
@@ -144,7 +149,7 @@ func (p *pusher) processNextWorkItem(ctx context.Context) bool {
 	}
 	defer p.queue.Done(chainID)
 
-	if err := p.push(ctx, chainID); err != nil {
+	if err := p.pushCredential(ctx, chainID); err != nil {
 		log.G(ctx).WithError(err).WithField("chain_id", chainID).Warn("push credential, retrying")
 		p.queue.AddRateLimited(chainID)
 		return true
@@ -154,13 +159,13 @@ func (p *pusher) processNextWorkItem(ctx context.Context) bool {
 	return true
 }
 
-// push resolves the credential of an instance again and pushes it to the
-// daemon, unless the daemon already accepted or rejected it. Only failures
-// worth a retry are returned.
-func (p *pusher) push(ctx context.Context, chainID string) error {
+// pushCredential resolves the credential of an instance again and pushes it
+// to the daemon, unless the daemon already accepted or rejected it. Only
+// failures worth a retry are returned.
+func (p *pusher) pushCredential(ctx context.Context, chainID string) error {
 	instance, err := p.store.GetInstance(chainID)
 	if errdefs.IsNotFound(err) {
-		p.forget(chainID)
+		p.forgetPush(chainID)
 		return nil
 	}
 
@@ -171,7 +176,7 @@ func (p *pusher) push(ctx context.Context, chainID string) error {
 	// A daemon recorded without its version while its start may still run
 	// resolved its credential before this change, so retry until it is
 	// identified.
-	if instance.Version == "" && p.starting(instance) {
+	if instance.Version == "" && p.daemonStarting(instance) {
 		return fmt.Errorf("daemon %s is not identified yet", instance.Unit)
 	}
 
@@ -208,27 +213,27 @@ func (p *pusher) push(ctx context.Context, chainID string) error {
 	if instance.Version != "" && !slices.Contains(instance.Capabilities, nydusd.CapabilityBackendAuthBasic) {
 		metrics.AuthUpdatesTotal.WithLabelValues(metrics.ResultUnsupported).Inc()
 		logger.Debug("skip pushing credential to a daemon without the capability")
-		p.record(chainID, current)
+		p.recordPush(chainID, current)
 		return nil
 	}
 
 	// Without an answer the daemon may hold either credential, so the next
 	// push is sent whatever was pushed before.
-	answered, err := p.update(ctx, instance, credential)
+	answered, err := p.updateCredential(ctx, instance, credential)
 	if !answered {
-		p.forget(chainID)
+		p.forgetPush(chainID)
 		return err
 	}
 
-	p.record(chainID, current)
+	p.recordPush(chainID, current)
 	return nil
 }
 
-// update sends a credential to a daemon and reports whether the daemon
-// answered, accepting or rejecting it for good. Without an answer, the error
-// is worth a retry; it is nil for a stopped daemon, which gets the credential
-// when it starts.
-func (p *pusher) update(ctx context.Context, instance *store.Instance, credential string) (bool, error) {
+// updateCredential sends a credential to a daemon and reports whether the
+// daemon answered, accepting or rejecting it for good. Without an answer, the
+// error is worth a retry; it is nil for a stopped daemon, which gets the
+// credential when it starts.
+func (p *pusher) updateCredential(ctx context.Context, instance *store.Instance, credential string) (bool, error) {
 	logger := log.G(ctx).WithField("unit", instance.Unit)
 	err := p.newClient(instance.APISocket).UpdateAuth(ctx, credential)
 	switch {
@@ -247,7 +252,7 @@ func (p *pusher) update(ctx context.Context, instance *store.Instance, credentia
 	case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED):
 		// A starting daemon resolved its credential before this change, so
 		// retry until it listens.
-		if p.starting(instance) {
+		if p.daemonStarting(instance) {
 			return false, err
 		}
 
@@ -259,21 +264,21 @@ func (p *pusher) update(ctx context.Context, instance *store.Instance, credentia
 	}
 }
 
-// starting reports whether the start of a daemon may still run, during which
-// the daemon may not be identified or listening yet.
-func (p *pusher) starting(instance *store.Instance) bool {
+// daemonStarting reports whether the start of a daemon may still run, during
+// which the daemon may not be identified or listening yet.
+func (p *pusher) daemonStarting(instance *store.Instance) bool {
 	return time.Since(instance.CreatedAt) < p.startTimeout
 }
 
-// record keeps the credential a daemon accepted or rejected.
-func (p *pusher) record(chainID string, r pushRecord) {
+// recordPush keeps the credential a daemon accepted or rejected.
+func (p *pusher) recordPush(chainID string, r pushRecord) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.pushed[chainID] = r
 }
 
-// forget drops the record of a daemon, so the next credential is sent.
-func (p *pusher) forget(chainID string) {
+// forgetPush drops the record of a daemon, so the next credential is sent.
+func (p *pusher) forgetPush(chainID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.pushed, chainID)

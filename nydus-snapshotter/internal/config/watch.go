@@ -20,9 +20,7 @@ import (
 const watchInterval = 10 * time.Second
 
 // Watcher polls a config file for changes. Polling survives the symlink swap
-// of a ConfigMap update, which fsnotify watches miss, as Dragonfly's config
-// watcher does, refer to
-// https://github.com/dragonflyoss/dragonfly/blob/main/cmd/dependency/dependency.go.
+// of a ConfigMap update, which fsnotify watches miss.
 type Watcher struct {
 	// path is the config file.
 	path string

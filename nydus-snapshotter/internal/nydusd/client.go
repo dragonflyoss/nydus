@@ -70,9 +70,7 @@ type Info struct {
 	PID int `json:"pid"`
 
 	// Capabilities are the optional calls the daemon serves. A caller gates
-	// such a call on its capability, never on Version, as a CSI driver's
-	// capabilities are read, refer to
-	// https://github.com/container-storage-interface/spec/blob/master/spec.md.
+	// such a call on its capability, never on Version.
 	Capabilities []string `json:"capabilities"`
 }
 
@@ -156,8 +154,7 @@ func (c *client) Metrics(ctx context.Context) (map[string]*dto.MetricFamily, err
 // errdefs.ErrNotImplemented means the daemon has no such route or no
 // registry backend.
 func (c *client) UpdateAuth(ctx context.Context, auth string) error {
-	// The API takes the user name and the password apart, as the Docker
-	// Engine API does.
+	// The API takes the user name and the password apart.
 	decoded, err := base64.StdEncoding.DecodeString(auth)
 	if err != nil {
 		return fmt.Errorf("decode auth: %w: %w", err, errdefs.ErrInvalidArgument)
@@ -180,9 +177,9 @@ func (c *client) UpdateAuth(ctx context.Context, auth string) error {
 	return c.do(ctx, http.MethodPut, endpointBackendAuthBasic, body, http.StatusNoContent, nil)
 }
 
-// do sends a request, checks the answer's status and, when read is given,
-// hands it the body of an answer with the wanted status.
-func (c *client) do(ctx context.Context, method, path string, body []byte, want int, read func(body io.Reader) error) error {
+// do sends a request, checks that the answer has statusCode and, when read
+// is given, hands it the body of such an answer.
+func (c *client) do(ctx context.Context, method, path string, body []byte, statusCode int, read func(body io.Reader) error) error {
 	req, err := http.NewRequestWithContext(ctx, method, "http://nydusd"+path, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -198,7 +195,7 @@ func (c *client) do(ctx context.Context, method, path string, body []byte, want 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == want {
+	if resp.StatusCode == statusCode {
 		if read == nil {
 			return nil
 		}

@@ -18,9 +18,8 @@ auth:
 nydusd:
   driver: fuse
   binary: /opt/nydus-snapshotter/bin/current/nydus
-  log_dir: /var/log/nydus-snapshotter/nydusd
-  log_level: debug
-  log_max_files: 3
+  log:
+    level: debug
   mount_timeout: 20s
   watchdog_timeout: 1m
   config:

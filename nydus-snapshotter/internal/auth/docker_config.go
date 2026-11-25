@@ -21,10 +21,8 @@ import (
 )
 
 // defaultDockerConfigPaths are kubelet's docker config.json search paths for
-// a root process, its root directory, $HOME/.docker and /.docker, without
-// the working directory kubelet also searches, which means nothing to a
-// service, refer to
-// https://github.com/kubernetes/kubernetes/blob/6575724b63e50cd5dd454e774bc293c6de1e4e12/pkg/credentialprovider/config.go.
+// a root process, its root directory, $HOME/.docker and /.docker, without the
+// working directory kubelet also searches, which means nothing to a service.
 var defaultDockerConfigPaths = []string{
 	"/var/lib/kubelet/config.json",
 	"/root/.docker/config.json",
@@ -51,8 +49,7 @@ type authConfig struct {
 }
 
 // decodeAuth decodes the auth field, padded or not, into a username and a
-// password, refer to
-// https://github.com/kubernetes/kubernetes/blob/6575724b63e50cd5dd454e774bc293c6de1e4e12/pkg/credentialprovider/config.go.
+// password.
 func (a *authConfig) decodeAuth() (string, string, error) {
 	encoding := base64.RawStdEncoding
 	if strings.HasSuffix(strings.TrimSpace(a.Auth), "=") {

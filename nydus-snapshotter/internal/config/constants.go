@@ -62,32 +62,28 @@ const (
 	// DefaultMetricsAddr is the default metrics address.
 	DefaultMetricsAddr = "127.0.0.1:4010"
 
+	// DefaultContainerdAddr is containerd's own default socket.
+	DefaultContainerdAddr = defaults.DefaultAddress
+
 	// DefaultRegistryConfigPath is the default certs.d directory.
 	DefaultRegistryConfigPath = "/etc/nydus-snapshotter/certs.d"
 
-	// DefaultAuthKubeconfig is the kubeconfig the installer keeps in sync. It
-	// names the service account token, so it lives on tmpfs.
+	// DefaultAuthKubeconfig is the default kubeconfig, which the installer
+	// keeps in sync. The service account token lies beside it, so it lives
+	// on tmpfs.
 	DefaultAuthKubeconfig = "/run/nydus-snapshotter/kubernetes/kubeconfig"
 )
 
 const (
-	// DefaultNydusdBinary is the nydus binary the installer points at the
-	// current version.
+	// DefaultNydusdBinary is the default nydus binary, which the installer
+	// links to the version it installed.
 	DefaultNydusdBinary = "/opt/nydus-snapshotter/bin/current/nydus"
-
-	// DefaultNydusdLogDir is the default parent of per-daemon log dirs.
-	DefaultNydusdLogDir = "/var/log/nydus-snapshotter/nydusd"
 
 	// DefaultNydusdLogLevel is the default log level of a daemon.
 	DefaultNydusdLogLevel = "info"
 
-	// DefaultNydusdLogMaxFiles is the number of log files a daemon keeps by
-	// default, nydus's own default.
-	DefaultNydusdLogMaxFiles = 6
-
 	// DefaultNydusdWatchdogTimeout is the default watchdog timeout of a
-	// daemon, the one systemd gives its own daemons, refer to
-	// https://github.com/systemd/systemd/blob/main/units/systemd-journald.service.in.
+	// daemon, the one systemd gives its own daemons.
 	DefaultNydusdWatchdogTimeout = Duration(3 * time.Minute)
 
 	// DefaultNydusdMountTimeout bounds a daemon start, a unit job and a mount
@@ -162,7 +158,7 @@ const (
 
 const (
 	// DefaultCgroupSlice is the slice daemons run in, named as systemd names
-	// the slice of a service's instances, refer to systemd.slice(5).
+	// the slice of a service's instances.
 	DefaultCgroupSlice = "system-nydusd.slice"
 
 	// DefaultCgroupMemoryMax is the default memory.max of all daemons.
@@ -185,7 +181,7 @@ const (
 )
 
 const (
-	// DefaultGCInterval is the default cache GC interval, as dfdaemon's.
+	// DefaultGCInterval is the default cache GC interval.
 	DefaultGCInterval = Duration(15 * time.Minute)
 
 	// DefaultGCBlobTTL is the default cache TTL of an unused blob.
@@ -200,36 +196,18 @@ const (
 
 const (
 	// DefaultPreheatMaxConcurrentImages is the number of images preheated at
-	// once by default, as kubelet pulls images one at a time by default.
+	// once by default.
 	DefaultPreheatMaxConcurrentImages = 1
-
-	// DefaultPreheatContainerdAddr is containerd's own default socket.
-	DefaultPreheatContainerdAddr = defaults.DefaultAddress
 )
 
 const (
-	// DefaultInstallerRootfsDir is where the DaemonSet mounts the root
-	// filesystem of the host.
-	DefaultInstallerRootfsDir = "/host"
-
-	// DefaultInstallerPayloadDir holds what the image ships to install: bin/
-	// and systemd/.
-	DefaultInstallerPayloadDir = "/opt/nydus-snapshotter/payload"
-
-	// DefaultInstallerTokenDir is the Pod's projected service account token
-	// directory.
-	DefaultInstallerTokenDir = "/var/run/secrets/kubernetes.io/serviceaccount"
-
-	// DefaultInstallerRegistryConfigPath is where the DaemonSet mounts the
-	// certs.d of the ConfigMap, the path it is installed to on the host.
-	DefaultInstallerRegistryConfigPath = DefaultRegistryConfigPath
+	// DefaultInstallerServiceAccountPath is where Kubernetes mounts the
+	// service account token and CA of a Pod.
+	DefaultInstallerServiceAccountPath = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 	// DefaultInstallerSyncInterval is how often the installer syncs, well
 	// within the hour a projected token lives.
 	DefaultInstallerSyncInterval = Duration(time.Minute)
-
-	// DefaultInstallerContainerdAddr is containerd's own default socket.
-	DefaultInstallerContainerdAddr = defaults.DefaultAddress
 )
 
 var (
@@ -239,7 +217,6 @@ var (
 	// nydusdLogLevels are the log levels nydusd accepts.
 	nydusdLogLevels = []string{"trace", "debug", "info", "warn", "error"}
 
-	// sliceRegexp matches a slice unit name, refer to
-	// https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html.
+	// sliceRegexp matches a slice unit name.
 	sliceRegexp = regexp.MustCompile(`^[0-9A-Za-z:_\\-][0-9A-Za-z:_.\\-]*\.slice$`)
 )

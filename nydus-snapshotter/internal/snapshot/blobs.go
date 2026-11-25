@@ -21,7 +21,7 @@ import (
 func (s *snapshotter) CommittedBlobs(ctx context.Context) (map[string]struct{}, error) {
 	var dirs []string
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-		return s.walkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
+		return s.walkSnapshots(ctx, func(ctx context.Context, info snapshots.Info) error {
 			if info.Kind != snapshots.KindCommitted || !labels(info.Labels).isNydusBootstrap() {
 				return nil
 			}

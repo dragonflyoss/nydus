@@ -8,9 +8,7 @@ package snapshot
 
 import (
 	"context"
-	"maps"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -29,11 +27,13 @@ import (
 func TestSnapshotter_Mounts(t *testing.T) {
 	tests := []struct {
 		name   string
+		labels map[string]string
 		mock   func(m *mocks.MockFileSystemMockRecorder)
 		expect func(t *testing.T, sn Snapshotter, root string)
 	}{
 		{
-			name: "mount container on the nydus daemon",
+			name:   "mount container on the nydus daemon",
+			labels: mockBootstrapLabels,
 			mock: func(m *mocks.MockFileSystemMockRecorder) {
 				m.Mount(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, image *nydusfs.Image) (string, error) {
 					if image.ChainID != mockBootstrapChainID || image.Ref != mockImageRef || !strings.HasSuffix(image.BootstrapDir, "/fs") {
@@ -46,9 +46,7 @@ func TestSnapshotter_Mounts(t *testing.T) {
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
 				ctx := t.Context()
-				parent := pullNydusImage(t, sn, mockBootstrapLabels)
-
-				mounts, err := sn.Prepare(ctx, "container", parent)
+				mounts, err := sn.Prepare(ctx, "container", mockBootstrapSnapshot)
 				assert.NoError(err)
 				assert.Equal("overlay", mounts[0].Type)
 				assert.Contains(mounts[0].Options, "lowerdir="+mockMountpoint)
@@ -59,30 +57,28 @@ func TestSnapshotter_Mounts(t *testing.T) {
 			},
 		},
 		{
-			name: "bind a view of the nydus daemon read only",
+			name:   "bind a view of the nydus daemon read only",
+			labels: mockBootstrapLabels,
 			mock: func(m *mocks.MockFileSystemMockRecorder) {
 				m.Mount(gomock.Any(), gomock.Any()).Return(mockMountpoint, nil).Times(1)
 			},
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
-				parent := pullNydusImage(t, sn, mockBootstrapLabels)
-
-				mounts, err := sn.View(t.Context(), "view", parent)
+				mounts, err := sn.View(t.Context(), "view", mockBootstrapSnapshot)
 				assert.NoError(err)
 				assert.Equal([]mount.Mount{{Type: "bind", Source: mockMountpoint, Options: []string{"ro", "rbind"}}}, mounts)
 			},
 		},
 		{
-			name: "remove a container snapshot whose daemon fails",
+			name:   "remove a container snapshot whose daemon fails",
+			labels: mockBootstrapLabels,
 			mock: func(m *mocks.MockFileSystemMockRecorder) {
 				m.Mount(gomock.Any(), gomock.Any()).Return("", errdefs.ErrUnavailable).Times(1)
 			},
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
 				ctx := t.Context()
-				parent := pullNydusImage(t, sn, mockBootstrapLabels)
-
-				_, err := sn.Prepare(ctx, "container", parent)
+				_, err := sn.Prepare(ctx, "container", mockBootstrapSnapshot)
 				assert.ErrorIs(err, errdefs.ErrUnavailable)
 				_, err = sn.Stat(ctx, "container")
 				assert.ErrorIs(err, errdefs.ErrNotFound)
@@ -90,56 +86,61 @@ func TestSnapshotter_Mounts(t *testing.T) {
 		},
 		{
 			name: "reject bootstrap without image reference",
+			labels: map[string]string{
+				labelSnapshotRef:    mockBootstrapChainID,
+				labelNydusBootstrap: labelTrue,
+				labelNydusFSVersion: nydusfs.Version,
+			},
 			mock: func(m *mocks.MockFileSystemMockRecorder) {},
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
-				labels := map[string]string{}
-				maps.Copy(labels, mockBootstrapLabels)
-				delete(labels, snapshotters.TargetRefLabel)
-				parent := pullNydusImage(t, sn, labels)
-
-				_, err := sn.Prepare(t.Context(), "container", parent)
+				_, err := sn.Prepare(t.Context(), "container", mockBootstrapSnapshot)
 				assert.ErrorIs(err, errdefs.ErrFailedPrecondition)
 			},
 		},
 		{
 			name: "reject bootstrap without chain id",
+			labels: map[string]string{
+				labelNydusBootstrap:         labelTrue,
+				labelNydusFSVersion:         nydusfs.Version,
+				snapshotters.TargetRefLabel: mockImageRef,
+			},
 			mock: func(m *mocks.MockFileSystemMockRecorder) {},
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
-				labels := maps.Clone(mockBootstrapLabels)
-				delete(labels, labelSnapshotRef)
-				parent := pullNydusImage(t, sn, labels)
-
-				_, err := sn.Prepare(t.Context(), "container", parent)
+				_, err := sn.Prepare(t.Context(), "container", mockBootstrapSnapshot)
 				assert.ErrorIs(err, errdefs.ErrFailedPrecondition)
 				assert.ErrorContains(err, labelSnapshotRef)
 			},
 		},
 		{
 			name: "reject bootstrap with an unknown prefetch scope",
+			labels: map[string]string{
+				labelSnapshotRef:            mockBootstrapChainID,
+				labelNydusBootstrap:         labelTrue,
+				labelNydusFSVersion:         nydusfs.Version,
+				labelNydusPrefetch:          "some",
+				snapshotters.TargetRefLabel: mockImageRef,
+			},
 			mock: func(m *mocks.MockFileSystemMockRecorder) {},
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
-				labels := maps.Clone(mockBootstrapLabels)
-				labels[labelNydusPrefetch] = "some"
-				parent := pullNydusImage(t, sn, labels)
-
-				_, err := sn.Prepare(t.Context(), "container", parent)
+				_, err := sn.Prepare(t.Context(), "container", mockBootstrapSnapshot)
 				assert.ErrorIs(err, errdefs.ErrInvalidArgument)
 			},
 		},
 		{
 			name: "reject unsupported nydus format",
+			labels: map[string]string{
+				labelSnapshotRef:            mockBootstrapChainID,
+				labelNydusBootstrap:         labelTrue,
+				labelNydusFSVersion:         "6",
+				snapshotters.TargetRefLabel: mockImageRef,
+			},
 			mock: func(m *mocks.MockFileSystemMockRecorder) {},
 			expect: func(t *testing.T, sn Snapshotter, root string) {
 				assert := assert.New(t)
-				labels := map[string]string{}
-				maps.Copy(labels, mockBootstrapLabels)
-				labels[labelNydusFSVersion] = "6"
-				parent := pullNydusImage(t, sn, labels)
-
-				_, err := sn.Prepare(t.Context(), "container", parent)
+				_, err := sn.Prepare(t.Context(), "container", mockBootstrapSnapshot)
 				assert.ErrorIs(err, errdefs.ErrNotImplemented)
 			},
 		},
@@ -188,39 +189,24 @@ func TestSnapshotter_Mounts(t *testing.T) {
 			tc.mock(fileSystem.EXPECT())
 
 			root := t.TempDir()
-			sn := newTestSnapshotter(t, root, fileSystem)
+			sn, err := New(root, fileSystem)
+			if !assert.NoError(t, err) {
+				t.FailNow()
+			}
+			defer func() { assert.NoError(t, sn.Close()) }()
+			if tc.labels != nil {
+				_, err := sn.Prepare(t.Context(), mockBlobExtractKey, "", snapshots.WithLabels(mockBlobLabels))
+				assert.ErrorIs(t, err, errdefs.ErrAlreadyExists)
+				_, err = sn.Prepare(t.Context(), mockBootstrapExtractKey, mockBlobChainID, snapshots.WithLabels(tc.labels))
+				assert.NoError(t, err)
+				mounts, err := sn.Mounts(t.Context(), mockBootstrapExtractKey)
+				assert.NoError(t, err)
+				assert.Equal(t, "bind", mounts[0].Type)
+				assert.NoError(t, os.CopyFS(mounts[0].Source, mockBootstrapLayer))
+				assert.NoError(t, sn.Commit(t.Context(), mockBootstrapSnapshot, mockBootstrapExtractKey, snapshots.WithLabels(tc.labels)))
+			}
+
 			tc.expect(t, sn, root)
 		})
 	}
-}
-
-func pullNydusImage(t *testing.T, sn Snapshotter, bootstrapLabels map[string]string) string {
-	t.Helper()
-	return pullNydusImageAs(t, sn, bootstrapLabels, "k8s.io/1/")
-}
-
-func pullNydusImageAs(t *testing.T, sn Snapshotter, bootstrapLabels map[string]string, prefix string) string {
-	t.Helper()
-	assert := assert.New(t)
-	ctx := t.Context()
-
-	_, err := sn.Prepare(ctx, prefix+"extract-1 "+mockBlobChainID, "", snapshots.WithLabels(mockBlobLabels))
-	assert.ErrorIs(err, errdefs.ErrAlreadyExists)
-
-	key := prefix + "extract-2 " + mockBootstrapChainID
-	_, err = sn.Prepare(ctx, key, mockBlobChainID, snapshots.WithLabels(bootstrapLabels))
-	assert.NoError(err)
-
-	mounts, err := sn.Mounts(ctx, key)
-	assert.NoError(err)
-	assert.Equal("bind", mounts[0].Type)
-	imageDir := filepath.Join(mounts[0].Source, "image")
-	assert.NoError(os.MkdirAll(imageDir, 0o755))
-	assert.NoError(os.WriteFile(filepath.Join(imageDir, "image.boot"), nil, 0o644))
-	assert.NoError(os.WriteFile(filepath.Join(imageDir, mockBlobID+".blob.meta"), nil, 0o644))
-
-	name := prefix + mockBootstrapChainID
-	assert.NoError(sn.Commit(ctx, name, key, snapshots.WithLabels(bootstrapLabels)))
-
-	return name
 }

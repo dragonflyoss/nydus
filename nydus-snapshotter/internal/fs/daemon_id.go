@@ -15,18 +15,18 @@ import (
 )
 
 const (
-	// unitPrefix prefixes every daemon unit.
-	unitPrefix = "nydusd-"
+	// daemonUnitPrefix prefixes every daemon unit.
+	daemonUnitPrefix = "nydusd-"
 
 	// unitSuffix is the unit type of a daemon and of a preheat.
 	unitSuffix = ".service"
 
-	// unitPattern matches every daemon unit. It matches the preheat units
+	// daemonUnitPattern matches every daemon unit. It matches the preheat units
 	// too, which daemonIDFromUnit rejects: their names hold no daemon ID.
-	unitPattern = unitPrefix + "*" + unitSuffix
+	daemonUnitPattern = daemonUnitPrefix + "*" + unitSuffix
 
 	// preheatUnitPrefix prefixes every preheat unit.
-	preheatUnitPrefix = unitPrefix + "preheat-"
+	preheatUnitPrefix = daemonUnitPrefix + "preheat-"
 
 	// preheatUnitPattern matches every preheat unit.
 	preheatUnitPattern = preheatUnitPrefix + "*" + unitSuffix
@@ -54,7 +54,7 @@ func daemonIDFromChainID(chainID string) (daemonID, error) {
 
 // daemonIDFromUnit returns the daemon ID of a daemon unit name.
 func daemonIDFromUnit(unit string) (daemonID, bool) {
-	hex, ok := strings.CutPrefix(unit, unitPrefix)
+	hex, ok := strings.CutPrefix(unit, daemonUnitPrefix)
 	if !ok {
 		return "", false
 	}
@@ -83,7 +83,7 @@ func (d daemonID) ChainID() string {
 
 // Unit returns the systemd unit of the daemon.
 func (d daemonID) Unit() string {
-	return unitPrefix + string(d) + unitSuffix
+	return daemonUnitPrefix + string(d) + unitSuffix
 }
 
 // PreheatUnit returns the systemd unit of the image's preheat.

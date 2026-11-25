@@ -81,7 +81,7 @@ func TestKeychain_Resolve(t *testing.T) {
 		},
 		{
 			name:                 "kube secret before docker config",
-			secrets:              []*corev1.Secret{newMockSecret("a", "y", "1", "docker.io", "secret")},
+			secrets:              []*corev1.Secret{mockSecret("a", "y", "1", "docker.io", "secret")},
 			dockerConfigProvider: `{"auths":{"docker.io/library":{"username":"file","password":"pass"}}}`,
 			ref:                  mockDockerHubReference,
 			expect: func(t *testing.T, auth string, err error) {
@@ -129,8 +129,8 @@ func TestKeychain_Resolve(t *testing.T) {
 		{
 			name: "secret updated last shadows another",
 			secrets: []*corev1.Secret{
-				newMockSecret("a", "y", "1", "registry.example.com", "a"),
-				newMockUpdatedSecret("b", "x", "1", "registry.example.com", "b"),
+				mockSecret("a", "y", "1", "registry.example.com", "a"),
+				mockUpdatedSecret("b", "x", "1", "registry.example.com", "b"),
 			},
 			ref: mockRegistryReference,
 			expect: func(t *testing.T, auth string, err error) {
@@ -150,8 +150,12 @@ func TestKeychain_Resolve(t *testing.T) {
 
 			k := &keychain{docker: newDockerConfigProvider(path)}
 			if len(tc.secrets) > 0 {
-				var changed int
-				secrets := newTestKubeSecretProvider(true, &changed)
+				secrets := &kubeSecretProvider{
+					secrets:  make(map[string]*secret),
+					synced:   func() bool { return true },
+					onChange: func() {},
+				}
+
 				for _, s := range tc.secrets {
 					secrets.add(s)
 				}
@@ -217,7 +221,7 @@ func TestKeychain_Synced(t *testing.T) {
 	}
 }
 
-func TestKeychain_connect(t *testing.T) {
+func TestKeychain_waitForKubeClient(t *testing.T) {
 	tests := []struct {
 		name       string
 		kubeconfig string
@@ -254,7 +258,7 @@ func TestKeychain_connect(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
 			k := New(cfg).(*keychain)
-			client, err := k.connect(ctx)
+			client, err := k.waitForKubeClient(ctx)
 			tc.expect(t, k, client, err)
 		})
 	}
@@ -263,12 +267,10 @@ func TestKeychain_connect(t *testing.T) {
 func TestKeychain_Run(t *testing.T) {
 	tests := []struct {
 		name   string
-		enable bool
 		expect func(t *testing.T, k *keychain, client *fake.Clientset, changes *atomic.Int32, done <-chan struct{})
 	}{
 		{
-			name:   "report the synced secrets once, then every change",
-			enable: true,
+			name: "report the synced secrets once, then every change",
 			expect: func(t *testing.T, k *keychain, client *fake.Clientset, changes *atomic.Int32, done <-chan struct{}) {
 				assert := assert.New(t)
 				assert.Eventually(func() bool { return changes.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
@@ -277,7 +279,7 @@ func TestKeychain_Run(t *testing.T) {
 				assert.NoError(err)
 				assert.Equal("YTpwYXNz", auth)
 
-				rotated := newMockSecret("a", "y", "2", "registry.example.com", "b")
+				rotated := mockSecret("a", "y", "2", "registry.example.com", "b")
 				_, err = client.CoreV1().Secrets("a").Update(t.Context(), rotated, metav1.UpdateOptions{})
 				assert.NoError(err)
 				assert.Eventually(func() bool { return changes.Load() == 2 }, 5*time.Second, 10*time.Millisecond)
@@ -292,24 +294,14 @@ func TestKeychain_Run(t *testing.T) {
 				assert.Empty(auth)
 			},
 		},
-		{
-			name:   "return at once without kube secret",
-			enable: false,
-			expect: func(t *testing.T, k *keychain, client *fake.Clientset, changes *atomic.Int32, done <-chan struct{}) {
-				assert := assert.New(t)
-				<-done
-				assert.Zero(changes.Load())
-				assert.True(k.Synced())
-			},
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			client := fake.NewClientset(newMockSecret("a", "y", "1", "registry.example.com", "a"))
+			client := fake.NewClientset(mockSecret("a", "y", "1", "registry.example.com", "a"))
 			ctx, cancel := context.WithCancel(t.Context())
 			k := &keychain{
-				cfg:        config.AuthKubeSecretConfig{Enable: tc.enable},
+				cfg:        config.AuthKubeSecretConfig{Enable: true},
 				kubeClient: func() (kubernetes.Interface, error) { return client, nil },
 				docker:     newDockerConfigProvider(filepath.Join(t.TempDir(), "config.json")),
 			}

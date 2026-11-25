@@ -172,7 +172,13 @@ func TestClient_UpdateAuth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := serve(t, tc.handler)
+			socket := filepath.Join(t.TempDir(), "api.sock")
+			listener, err := net.Listen("unix", socket)
+			assert.NoError(t, err)
+			server := &http.Server{Handler: tc.handler}
+			go func() { _ = server.Serve(listener) }()
+			defer server.Close()
+
 			tc.expect(t, NewClient(socket).UpdateAuth(t.Context(), tc.auth))
 		})
 	}
@@ -215,9 +221,13 @@ func TestClient_Ready(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := filepath.Join(t.TempDir(), "missing.sock")
+			socket := filepath.Join(t.TempDir(), "api.sock")
 			if tc.handler != nil {
-				socket = serve(t, tc.handler)
+				listener, err := net.Listen("unix", socket)
+				assert.NoError(t, err)
+				server := &http.Server{Handler: tc.handler}
+				go func() { _ = server.Serve(listener) }()
+				defer server.Close()
 			}
 
 			tc.expect(t, NewClient(socket).Ready(t.Context()))
@@ -294,9 +304,13 @@ func TestClient_Info(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := filepath.Join(t.TempDir(), "missing.sock")
+			socket := filepath.Join(t.TempDir(), "api.sock")
 			if tc.handler != nil {
-				socket = serve(t, tc.handler)
+				listener, err := net.Listen("unix", socket)
+				assert.NoError(t, err)
+				server := &http.Server{Handler: tc.handler}
+				go func() { _ = server.Serve(listener) }()
+				defer server.Close()
 			}
 
 			info, err := NewClient(socket).Info(t.Context())
@@ -359,24 +373,17 @@ func TestClient_Metrics(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			socket := filepath.Join(t.TempDir(), "missing.sock")
+			socket := filepath.Join(t.TempDir(), "api.sock")
 			if tc.handler != nil {
-				socket = serve(t, tc.handler)
+				listener, err := net.Listen("unix", socket)
+				assert.NoError(t, err)
+				server := &http.Server{Handler: tc.handler}
+				go func() { _ = server.Serve(listener) }()
+				defer server.Close()
 			}
 
 			families, err := NewClient(socket).Metrics(t.Context())
 			tc.expect(t, families, err)
 		})
 	}
-}
-
-func serve(t *testing.T, handler http.Handler) string {
-	t.Helper()
-	socket := filepath.Join(t.TempDir(), "api.sock")
-	listener, err := net.Listen("unix", socket)
-	assert.NoError(t, err)
-	server := &http.Server{Handler: handler}
-	go func() { _ = server.Serve(listener) }()
-	t.Cleanup(func() { _ = server.Close() })
-	return socket
 }

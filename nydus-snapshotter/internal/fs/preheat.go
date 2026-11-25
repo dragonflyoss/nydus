@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -536,7 +535,7 @@ func (f *fileSystem) startPreheat(ctx context.Context, cfg *config.Config, job *
 	}
 
 	layer := NewBootstrapLayer(job.image.BootstrapDir)
-	bootstrap, err := layer.bootstrap()
+	bootstrap, err := layer.bootstrapPath()
 	if err != nil {
 		return err
 	}
@@ -560,7 +559,7 @@ func (f *fileSystem) startPreheat(ctx context.Context, cfg *config.Config, job *
 	opts.prefetchScope = cfg.Nydusd.Config.Prefetch.Scope
 	job.credential = nil
 	dir := cfg.PreheatRuntimeDir(string(job.id))
-	if err := f.writeConfig(cfg, ref, endpoint, dir, filepath.Join(dir, preheatConfigFile), opts); err != nil {
+	if err := f.writeNydusConfig(cfg, ref, endpoint, dir, filepath.Join(dir, preheatConfigFile), opts); err != nil {
 		return err
 	}
 
@@ -573,7 +572,7 @@ func (f *fileSystem) startPreheat(ctx context.Context, cfg *config.Config, job *
 	// that already runs is the preheat of a previous run of the snapshotter
 	// that was not recovered when it started, and is watched as it is.
 	if err := f.systemd.StartTransientUnit(ctx, unit); err != nil && !errdefs.IsAlreadyExists(err) {
-		return fmt.Errorf("%w, see journalctl -u %s and %s", err, unit.Name, cfg.PreheatLogDir())
+		return fmt.Errorf("%w, see journalctl -u %s", err, unit.Name)
 	}
 	job.running.Store(true)
 
@@ -581,8 +580,8 @@ func (f *fileSystem) startPreheat(ctx context.Context, cfg *config.Config, job *
 }
 
 // preheatUnit returns the transient unit running a preheat. It runs in the
-// daemons' slice with the limits of one daemon. The console log is off, as a
-// daemon's: it duplicates the --log-dir files.
+// daemons' slice with the limits of one daemon, and logs to the journal as a
+// daemon does.
 func (f *fileSystem) preheatUnit(cfg *config.Config, id daemonID, ref *registry.Reference, bootstrap string) (*systemd.Unit, error) {
 	binary, err := filepath.EvalSymlinks(cfg.Nydusd.Binary)
 	if err != nil {
@@ -599,11 +598,9 @@ func (f *fileSystem) preheatUnit(cfg *config.Config, id daemonID, ref *registry.
 			"--bootstrap", bootstrap,
 			"--config", filepath.Join(dir, preheatConfigFile),
 			"--state-file", filepath.Join(dir, preheatStateFile),
-			"--log-dir", cfg.PreheatLogDir(),
-			"--log-level", cfg.Nydusd.LogLevel,
-			"--log-max-files", strconv.Itoa(cfg.Nydusd.LogMaxFiles),
+			"--log-level", cfg.Nydusd.Log.Level,
+			"--log-journald",
 		},
-		Environment:      []string{"NYDUS_PREHEAT_CONSOLE=false"},
 		TimeoutStop:      time.Duration(cfg.Nydusd.MountTimeout),
 		LimitNOFILE:      limitNOFILE,
 		SyslogIdentifier: "nydusd-preheat",
@@ -626,7 +623,7 @@ func (f *fileSystem) finishPreheat(ctx context.Context, cfg *config.Config, id d
 
 	if !progress.finished() {
 		progress.State, progress.UpdatedAt = PreheatStateFailed, time.Now()
-		progress.Description = fmt.Sprintf("preheat process exited without a result, see journalctl -u %s and %s", id.PreheatUnit(), cfg.PreheatLogDir())
+		progress.Description = "preheat process exited without a result, see journalctl -u " + id.PreheatUnit()
 		if startErr != nil {
 			progress.Description = "start preheat: " + startErr.Error()
 		}

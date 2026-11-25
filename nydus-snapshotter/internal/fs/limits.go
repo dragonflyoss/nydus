@@ -21,18 +21,18 @@ import (
 // rest to daemons started later.
 func (f *fileSystem) Reload(ctx context.Context, cfg *config.Config) error {
 	f.cfg.Store(cfg)
-	return f.applyLimits(ctx)
+	return f.applyCgroupLimits(ctx)
 }
 
-// applyLimits applies the cgroup limits of the current config: the slice's,
-// then every daemon's. What is deferred or fails leaves limitsDeferred set,
-// so Release retries it.
-func (f *fileSystem) applyLimits(ctx context.Context) error {
+// applyCgroupLimits applies the cgroup limits of the current config: the
+// slice's, then every daemon's. What is deferred or fails leaves
+// limitsDeferred set, so Release retries it.
+func (f *fileSystem) applyCgroupLimits(ctx context.Context) error {
 	f.limitsMu.Lock()
 	defer f.limitsMu.Unlock()
 
 	cfg := f.cfg.Load()
-	deferred, err := f.startSlice(ctx, cfg)
+	deferred, err := f.startDaemonSlice(ctx, cfg)
 	if err == nil {
 		err = f.limitDaemons(ctx, cfg)
 	}
@@ -41,11 +41,11 @@ func (f *fileSystem) applyLimits(ctx context.Context) error {
 	return err
 }
 
-// startSlice starts the daemon slice with the total budget of cfg. It
+// startDaemonSlice starts the daemon slice with the total budget of cfg. It
 // reports whether the limits were deferred: a memory.max below the current
 // usage would OOM kill a daemon and break its containers for good, so the
 // slice is left as it is until Release retries.
-func (f *fileSystem) startSlice(ctx context.Context, cfg *config.Config) (bool, error) {
+func (f *fileSystem) startDaemonSlice(ctx context.Context, cfg *config.Config) (bool, error) {
 	total := systemd.Resources{
 		MemoryMax:          uint64(cfg.Cgroup.MemoryMax),
 		MemoryHigh:         uint64(cfg.Cgroup.MemoryHigh),

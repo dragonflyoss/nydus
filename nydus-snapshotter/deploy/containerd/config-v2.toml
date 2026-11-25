@@ -2,7 +2,7 @@
 # own format, then restart containerd. The installer never edits containerd's
 # config.
 
-# The proxy snapshotter served by nydus-snapshotter.service through its socket.
+# The proxy snapshotter served by nydus-snapshotter-v3.service through its socket.
 [proxy_plugins.nydus]
   type = "snapshot"
   address = "/run/nydus-snapshotter/nydus-snapshotter.sock"

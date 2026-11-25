@@ -4,7 +4,7 @@ use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifySer
 use nydus::mount::unmount;
 use nydus::signal;
 use nydus_config::Config;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -78,6 +78,13 @@ pub struct FanotifyCommand {
         help = "Specify whether to print log"
     )]
     console: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_FANOTIFY_LOG_JOURNALD",
+        help = "Specify whether to log to the systemd journal instead of the log directory and the console"
+    )]
+    log_journald: bool,
 }
 
 /// Determine the default maximum number of concurrent blob fetches.
@@ -127,13 +134,17 @@ impl FanotifyCommand {
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
-        let _guards = init_tracing(
-            NAME,
-            self.log_dir.clone(),
-            self.log_level,
-            self.log_max_files,
-            self.console,
-        )?;
+        let _guards = if self.log_journald {
+            init_journald_tracing(NAME, self.log_level)?
+        } else {
+            init_tracing(
+                NAME,
+                self.log_dir.clone(),
+                self.log_level,
+                self.log_max_files,
+                self.console,
+            )?
+        };
 
         // Load the storage config and run the fanotify service until shutdown.
         Config::load(&self.config)

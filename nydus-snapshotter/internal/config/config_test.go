@@ -75,8 +75,7 @@ func TestLoad(t *testing.T) {
 				assert.Equal(NydusdStorageConfig{Dir: "/data/nydus-cache", SkipVerifyChecksums: true, FetchSize: 4 << 20}, cfg.Nydusd.Config.Storage)
 				assert.Equal("/data/nydus-cache", cfg.CacheDir())
 				assert.Equal(NydusdPrefetchConfig{ConcurrentBlobCount: 4, RequestTimeout: Duration(2 * time.Hour), RetryInterval: Duration(3 * time.Hour), Scope: "ondemand"}, cfg.Nydusd.Config.Prefetch)
-				assert.Equal("debug", cfg.Nydusd.LogLevel)
-				assert.Equal(3, cfg.Nydusd.LogMaxFiles)
+				assert.Equal("debug", cfg.Nydusd.Log.Level)
 				assert.Equal(Duration(time.Minute), cfg.Nydusd.WatchdogTimeout)
 				assert.Equal("http://dragonfly-scheduler.dragonfly-system.svc:8002", cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint)
 				assert.Equal(Duration(30*time.Second), cfg.Nydusd.Config.Backend.Config.Dragonfly.RequestTimeout)
@@ -215,19 +214,19 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:   "registry config path list",
-			mutate: func(cfg *Config) { cfg.Registry.ConfigPath = "/etc/containerd/certs.d:/etc/docker/certs.d" },
+			name:   "no registry config path",
+			mutate: func(cfg *Config) { cfg.Registry.ConfigPath = "" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 			},
 		},
 		{
-			name:   "relative path in the registry config path list",
-			mutate: func(cfg *Config) { cfg.Registry.ConfigPath = "/etc/containerd/certs.d:certs.d" },
+			name:   "relative registry config path",
+			mutate: func(cfg *Config) { cfg.Registry.ConfigPath = "certs.d" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "registry.config_path must hold absolute paths")
+				assert.ErrorContains(err, "registry.config_path must be an absolute path")
 			},
 		},
 		{
@@ -288,18 +287,10 @@ func TestConfig_Validate(t *testing.T) {
 		},
 		{
 			name:   "invalid daemon log level",
-			mutate: func(cfg *Config) { cfg.Nydusd.LogLevel = "verbose" },
+			mutate: func(cfg *Config) { cfg.Nydusd.Log.Level = "verbose" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid nydusd.log_level")
-			},
-		},
-		{
-			name:   "no daemon log file",
-			mutate: func(cfg *Config) { cfg.Nydusd.LogMaxFiles = 0 },
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.ErrorContains(err, "nydusd.log_max_files must be at least 1")
+				assert.ErrorContains(err, "invalid nydusd.log.level")
 			},
 		},
 		{
@@ -537,11 +528,11 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:   "preheat containerd addr that is relative",
-			mutate: func(cfg *Config) { cfg.Preheat.ContainerdAddr = "containerd.sock" },
+			name:   "containerd addr that is relative",
+			mutate: func(cfg *Config) { cfg.Containerd.Addr = "containerd.sock" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.EqualError(err, `preheat.containerd_addr must be an absolute path, got "containerd.sock"`)
+				assert.EqualError(err, `containerd.addr must be an absolute path, got "containerd.sock"`)
 			},
 		},
 		{
@@ -553,43 +544,11 @@ func TestConfig_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:   "installer rootfs dir that is relative",
-			mutate: func(cfg *Config) { cfg.Installer.RootfsDir = "host" },
+			name:   "installer service account path that is empty",
+			mutate: func(cfg *Config) { cfg.Installer.ServiceAccountPath = "" },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.EqualError(err, `installer.rootfs_dir must be an absolute path, got "host"`)
-			},
-		},
-		{
-			name:   "installer payload dir that is relative",
-			mutate: func(cfg *Config) { cfg.Installer.PayloadDir = "payload" },
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, `installer.payload_dir must be an absolute path, got "payload"`)
-			},
-		},
-		{
-			name:   "installer token dir that is empty",
-			mutate: func(cfg *Config) { cfg.Installer.TokenDir = "" },
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, `installer.token_dir must be an absolute path, got ""`)
-			},
-		},
-		{
-			name:   "installer registry config path that is relative",
-			mutate: func(cfg *Config) { cfg.Installer.RegistryConfigPath = "certs.d" },
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, `installer.registry_config_path must be an absolute path, got "certs.d"`)
-			},
-		},
-		{
-			name:   "installer containerd addr that is relative",
-			mutate: func(cfg *Config) { cfg.Installer.NodeLabel.ContainerdAddr = "containerd.sock" },
-			expect: func(t *testing.T, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, `installer.node_label.containerd_addr must be an absolute path, got "containerd.sock"`)
+				assert.EqualError(err, `installer.service_account_path must be an absolute path, got ""`)
 			},
 		},
 		{
@@ -598,6 +557,17 @@ func TestConfig_Validate(t *testing.T) {
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
 				assert.EqualError(err, "installer.sync_interval must be positive")
+			},
+		},
+		{
+			name: "installer registries without a registry config path",
+			mutate: func(cfg *Config) {
+				cfg.Installer.Registries.Enable = true
+				cfg.Registry.ConfigPath = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "registry.config_path must not be empty with installer.registries.enable, which installs certs.d there")
 			},
 		},
 	}

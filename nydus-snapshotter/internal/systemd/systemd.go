@@ -6,9 +6,7 @@
 
 //go:generate mockgen -destination mocks/systemd_mock.go -source systemd.go -package mocks
 
-// Package systemd manages units over systemd's D-Bus API, as runc's systemd
-// cgroup driver does, refer to
-// https://github.com/opencontainers/cgroups/blob/main/systemd/dbus.go.
+// Package systemd manages units over systemd's D-Bus API.
 package systemd
 
 import (
@@ -40,8 +38,7 @@ const (
 	ActiveStateFailed ActiveState = "failed"
 )
 
-// ActiveState is the ActiveState property of a unit, refer to
-// https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html.
+// ActiveState is the ActiveState property of a unit.
 type ActiveState string
 
 // Running reports whether the unit runs or starts.
@@ -55,13 +52,11 @@ func (s ActiveState) Stopped() bool {
 }
 
 const (
-	// defaultJobTimeout bounds a job, from the call that queues it to its
-	// result. It is longer than systemd takes over any job here, so the
-	// result is systemd's: restarting the snapshotter's socket stops the
-	// service, then starts the socket and the service again, 90s each by
-	// default, refer to
-	// https://www.freedesktop.org/software/systemd/man/latest/systemd-system.conf.html#DefaultTimeoutStartSec=.
-	defaultJobTimeout = 5 * time.Minute
+	// jobTimeout bounds a job, from the call that queues it to its result. It
+	// is longer than systemd takes over any job here, so the result is
+	// systemd's: restarting the snapshotter stops the service and starts it
+	// again, 90s each by default.
+	jobTimeout = 5 * time.Minute
 
 	// jobResultDone is the result of a successful job.
 	jobResultDone = "done"
@@ -129,12 +124,8 @@ type Systemd interface {
 	Close()
 }
 
-// systemd is the D-Bus backed Systemd. It reconnects when the bus goes away,
-// refer to https://github.com/opencontainers/cgroups/blob/main/systemd/dbus.go.
+// systemd is the D-Bus backed Systemd. It reconnects when the bus goes away.
 type systemd struct {
-	// jobTimeout bounds a job, defaultJobTimeout outside tests.
-	jobTimeout time.Duration
-
 	// mu guards conn.
 	mu sync.Mutex
 
@@ -142,9 +133,9 @@ type systemd struct {
 	conn *systemddbus.Conn
 }
 
-// New returns a Systemd whose jobs take at most defaultJobTimeout.
+// New returns a Systemd whose jobs take at most jobTimeout.
 func New() Systemd {
-	return &systemd{jobTimeout: defaultJobTimeout}
+	return &systemd{}
 }
 
 // StartTransientUnit starts a transient service unit and waits for the job.
@@ -158,9 +149,8 @@ func (s *systemd) StartTransientUnit(ctx context.Context, unit *Unit) error {
 
 	properties := unit.properties()
 
-	// Reset a failed unit holding the name and retry once, as runc does,
-	// refer to https://github.com/opencontainers/cgroups/blob/main/systemd/common.go.
-	err := s.startTransient(ctx, unit.Name, properties)
+	// Reset a failed unit holding the name and retry once.
+	err := s.startTransientUnitJob(ctx, unit.Name, properties)
 	if dbusUnitExists.is(err) {
 		state, stateErr := s.ActiveState(ctx, unit.Name)
 		if stateErr != nil {
@@ -175,7 +165,7 @@ func (s *systemd) StartTransientUnit(ctx context.Context, unit *Unit) error {
 			return err
 		}
 
-		err = s.startTransient(ctx, unit.Name, properties)
+		err = s.startTransientUnitJob(ctx, unit.Name, properties)
 	}
 
 	if err != nil {
@@ -185,9 +175,9 @@ func (s *systemd) StartTransientUnit(ctx context.Context, unit *Unit) error {
 	return nil
 }
 
-// startTransient starts a transient unit, a service or a slice, and waits for
-// the job.
-func (s *systemd) startTransient(ctx context.Context, name string, properties []systemddbus.Property) error {
+// startTransientUnitJob starts a transient unit, a service or a slice, and
+// waits for the job.
+func (s *systemd) startTransientUnitJob(ctx context.Context, name string, properties []systemddbus.Property) error {
 	return s.runJob(ctx, func(ctx context.Context, conn *systemddbus.Conn, ch chan<- string) error {
 		_, err := conn.StartTransientUnitContext(ctx, name, jobModeReplace, properties, ch)
 		return err
@@ -204,7 +194,7 @@ func (s *systemd) StopUnit(ctx context.Context, name string) error {
 
 	var jobErr *jobError
 	if errors.As(err, &jobErr) {
-		return s.confirmStopped(ctx, name, jobErr)
+		return s.confirmUnitStopped(ctx, name, jobErr)
 	}
 
 	if err != nil && !dbusNoSuchUnit.is(err) {
@@ -214,12 +204,11 @@ func (s *systemd) StopUnit(ctx context.Context, name string) error {
 	return nil
 }
 
-// confirmStopped returns an error unless a unit is down after a stop job
+// confirmUnitStopped returns an error unless a unit is down after a stop job
 // that did not end in done: a job that was canceled or timed out can leave
 // the unit running, which the caller must not take for stopped. The unit is
-// reset first so its name is free, as runc resets it, refer to
-// https://github.com/opencontainers/cgroups/blob/main/systemd/common.go.
-func (s *systemd) confirmStopped(ctx context.Context, name string, jobErr *jobError) error {
+// reset first so its name is free.
+func (s *systemd) confirmUnitStopped(ctx context.Context, name string, jobErr *jobError) error {
 	log.G(ctx).WithFields(log.Fields{"unit": name, "result": jobErr.result}).Warn("unit stop did not finish cleanly")
 	if err := s.resetFailedUnit(ctx, name); err != nil {
 		return err
@@ -320,7 +309,7 @@ func (s *systemd) StartSlice(ctx context.Context, name, description string, reso
 		systemddbus.PropDescription(description),
 	}, resources.properties()...)
 
-	err := s.startTransient(ctx, name, properties)
+	err := s.startTransientUnitJob(ctx, name, properties)
 	if dbusUnitExists.is(err) {
 		return s.SetResources(ctx, name, resources)
 	}
@@ -354,10 +343,8 @@ func (s *systemd) MemoryCurrent(ctx context.Context, name string) (uint64, error
 	return current, nil
 }
 
-// EnableUnitFiles enables unit files, then reloads the manager, as systemctl
-// enable does: systemd reads a unit file to enable from disk, so a new one
-// needs no reload first, refer to
-// https://github.com/systemd/systemd/blob/v255/src/systemctl/systemctl-enable.c.
+// EnableUnitFiles enables unit files, then reloads the manager: systemd reads
+// a unit file to enable from disk, so a new one needs no reload first.
 func (s *systemd) EnableUnitFiles(ctx context.Context, files []string) error {
 	if err := s.retryOnDisconnect(ctx, func(conn *systemddbus.Conn) error {
 		if _, _, err := conn.EnableUnitFilesContext(ctx, files, false, true); err != nil {
@@ -372,9 +359,7 @@ func (s *systemd) EnableUnitFiles(ctx context.Context, files []string) error {
 	return nil
 }
 
-// Ping verifies that systemd answers, connecting when not connected, as
-// database/sql's DB.Ping verifies a connection and establishes one if
-// necessary, refer to https://pkg.go.dev/database/sql#DB.PingContext. The
+// Ping verifies that systemd answers, connecting when not connected. The
 // round trip is a read of the manager's SystemState property.
 func (s *systemd) Ping(ctx context.Context) error {
 	if err := s.retryOnDisconnect(ctx, func(conn *systemddbus.Conn) error {
@@ -397,24 +382,19 @@ func (s *systemd) Close() {
 	}
 }
 
-// runJob queues a job with start and waits for its result, as runc's
-// startUnit and cri-o's RunUnderSystemdScope do, refer to
-// https://github.com/opencontainers/cgroups/blob/main/systemd/common.go and
-// https://github.com/cri-o/cri-o/blob/main/utils/utils_linux.go. Only done is
-// a success; any other result, such as failed, timeout, canceled or skipped,
+// runJob queues a job with start and waits for its result. Only done is a
+// success; any other result, such as failed, timeout, canceled or skipped,
 // returns a jobError.
 //
 //	start ─▶ systemd queues the job ─▶ job removed ─▶ result on ch
 //	         jobTimeout or ctx done ──▶ error, the job goes on in systemd
 //
-// One deadline bounds the call that queues the job and the wait, as gVisor
-// bounds its call, refer to
-// https://github.com/google/gvisor/blob/master/runsc/cgroup/systemd.go. The
-// channel is buffered because go-systemd sends the result under the lock
-// every job start takes, refer to
+// One deadline bounds the call that queues the job and the wait. The channel
+// is buffered because go-systemd sends the result under the lock every job
+// start takes, refer to
 // https://github.com/coreos/go-systemd/blob/main/dbus/methods.go.
 func (s *systemd) runJob(ctx context.Context, start func(context.Context, *systemddbus.Conn, chan<- string) error) error {
-	ctx, cancel := context.WithTimeout(ctx, s.jobTimeout)
+	ctx, cancel := context.WithTimeout(ctx, jobTimeout)
 	defer cancel()
 
 	ch := make(chan string, 1)

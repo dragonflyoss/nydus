@@ -59,8 +59,7 @@ func (s *Size) UnmarshalText(text []byte) error {
 const usecPerPercent = 10_000
 
 // CPUQuota is a CPU quota decoded from a percentage such as "150%", where
-// 100% is one CPU, as systemd's CPUQuota, refer to
-// https://www.freedesktop.org/software/systemd/man/latest/systemd.resource-control.html#CPUQuota=.
+// 100% is one CPU, as systemd's CPUQuota.
 type CPUQuota uint64
 
 // UnmarshalText decodes a percentage string.

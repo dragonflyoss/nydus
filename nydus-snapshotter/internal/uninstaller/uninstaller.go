@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package uninstaller removes what the installers left in the cluster, as
-// helm keeps its uninstall action apart from its install action, refer to
-// https://github.com/helm/helm/blob/v3.17.0/pkg/action/uninstall.go.
+// Package uninstaller removes what the installers left in the cluster.
 package uninstaller
 
 import (
@@ -30,7 +28,7 @@ import (
 
 const (
 	// unlabelPatch removes installer.NodeLabel, which a node without it
-	// accepts, refer to https://datatracker.ietf.org/doc/html/rfc7386.
+	// accepts.
 	unlabelPatch = `{"metadata":{"labels":{"` + installer.NodeLabel + `":null}}}`
 )
 
@@ -52,15 +50,13 @@ func New(cfg *config.Config) *Uninstaller {
 
 // Run removes installer.NodeLabel from every node that carries it. It is the
 // post-delete hook of the chart: an installer that stops keeps its label, so
-// the uninstall removes them, as node-feature-discovery prunes its labels
-// with such a hook, refer to
-// https://github.com/kubernetes-sigs/node-feature-discovery/blob/master/deployment/helm/node-feature-discovery/templates/post-delete-job.yaml.
+// the uninstall removes them.
 //
 //	installer stops ─▶ label kept, the next installer Pod takes it over
 //	helm uninstall ──▶ post-delete hook ─▶ Run ─▶ label removed
 func (u *Uninstaller) Run(ctx context.Context) error {
 	if u.kubeClient == nil {
-		client, err := kubeutil.NewClient(u.cfg.Installer.TokenDir)
+		client, err := kubeutil.NewClient(u.cfg.Installer.ServiceAccountPath)
 		if err != nil {
 			return err
 		}
@@ -82,7 +78,7 @@ func (u *Uninstaller) Run(ctx context.Context) error {
 		}
 
 		// A node deleted since it was listed has no label left to remove.
-		switch err := u.unlabelNode(ctx, node.GetName()); {
+		switch err := u.removeNodeLabel(ctx, node.GetName()); {
 		case apierrors.IsNotFound(err):
 		case err != nil:
 			errs = append(errs, err)
@@ -98,8 +94,8 @@ func (u *Uninstaller) Run(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// unlabelNode removes installer.NodeLabel from a node.
-func (u *Uninstaller) unlabelNode(ctx context.Context, name string) error {
+// removeNodeLabel removes installer.NodeLabel from a node.
+func (u *Uninstaller) removeNodeLabel(ctx context.Context, name string) error {
 	if _, err := u.kubeClient.CoreV1().Nodes().Patch(ctx, name, types.MergePatchType, []byte(unlabelPatch), metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("patch node %s: %w", name, err)
 	}

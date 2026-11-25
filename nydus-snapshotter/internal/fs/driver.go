@@ -23,9 +23,6 @@ type Driver interface {
 	// Args returns the daemon's arguments after the nydus binary.
 	Args(d *Daemon) []string
 
-	// Environment returns the daemon's KEY=VALUE variables.
-	Environment() []string
-
 	// Mounted reports whether the daemon's mount is in place.
 	Mounted(d *Daemon) (bool, error)
 

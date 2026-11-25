@@ -20,8 +20,7 @@ import (
 
 const (
 	// labelSnapshotRef is the chain ID the unpacker prepares a layer for, a
-	// private constant of containerd's unpacker before v2.4, refer to
-	// https://github.com/containerd/containerd/blob/v2.2.10/core/unpack/unpacker.go.
+	// private constant of containerd's unpacker before v2.4.
 	labelSnapshotRef = "containerd.io/snapshot.ref"
 
 	// labelNydusBlob marks a nydus data layer, set by nydusify, refer to
@@ -47,9 +46,8 @@ const (
 // layer.
 var remoteLabels = []string{labelNydusBlob, labelNydusBootstrap, labelNydusFSVersion, labelNydusPrefetch}
 
-// snapshotKey is a backend snapshot key. containerd's metadata store
-// prefixes keys with <namespace>/<id>/, refer to
-// https://github.com/containerd/containerd/blob/v2.2.10/core/metadata/snapshot.go.
+// snapshotKey is a backend snapshot key. containerd's metadata store prefixes
+// keys with <namespace>/<id>/.
 type snapshotKey string
 
 // isUnpack reports whether containerd's unpacker created the key, see
@@ -104,8 +102,7 @@ func (l labels) prefetchScope() (string, error) {
 // rootPair returns the host uid and gid container root maps to under the
 // uid/gid mapping labels of a user namespace, and whether the labels are set.
 // The format is containerd's, "<container id>:<host id>:<size>" ranges joined
-// by commas, refer to
-// https://github.com/containerd/containerd/blob/v2.2.10/internal/userns/idmap.go.
+// by commas.
 func (l labels) rootPair() (uid, gid int, ok bool, err error) {
 	uidMap, hasUID := l[snapshots.LabelSnapshotUIDMapping]
 	gidMap, hasGID := l[snapshots.LabelSnapshotGIDMapping]

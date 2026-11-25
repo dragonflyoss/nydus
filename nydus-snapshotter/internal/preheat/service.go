@@ -25,15 +25,13 @@ import (
 
 const (
 	// defaultNamespace is the containerd namespace of the images kubelet
-	// pulls, refer to
-	// https://github.com/containerd/containerd/blob/v2.2.10/internal/cri/constants/constants.go.
+	// pulls.
 	defaultNamespace = "k8s.io"
 )
 
 // Service is the NydusSnapshotter gRPC service, served on the snapshotter's
 // socket next to containerd's snapshots service, refer to the Preheat section
-// of docs/snapshotter.md. Both calls name the image, as PreheatImage and
-// StatImage of Dragonfly's scheduler do.
+// of docs/snapshotter.md.
 //
 //	PreheatImage ─▶ resolve the image ─▶ queue ─▶ nydus preheat downloads
 //	StatImage    ─▶ resolve the image ─▶ state of its preheat and of its blobs
@@ -68,8 +66,7 @@ func (s *Service) PreheatImage(ctx context.Context, req *nydussnapshotterv1.Preh
 		BearerToken: req.GetBearerToken(),
 	}
 
-	// A colon ends the username of a basic credential, refer to
-	// https://datatracker.ietf.org/doc/html/rfc7617#section-2.
+	// A colon ends the username of a basic credential.
 	if strings.Contains(credential.Username, ":") {
 		return nil, status.Error(codes.InvalidArgument, "invalid PreheatImageRequest.BasicAuth.Username: value must not contain a colon")
 	}

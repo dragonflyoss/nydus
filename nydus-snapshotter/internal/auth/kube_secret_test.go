@@ -27,7 +27,7 @@ var (
 	mockUpdatedAt = metav1.NewTime(time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC))
 )
 
-func newMockSecret(namespace, name, resourceVersion, registry, username string) *corev1.Secret {
+func mockSecret(namespace, name, resourceVersion, registry, username string) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       namespace,
@@ -42,18 +42,10 @@ func newMockSecret(namespace, name, resourceVersion, registry, username string) 
 	}
 }
 
-func newMockUpdatedSecret(namespace, name, resourceVersion, registry, username string) *corev1.Secret {
-	s := newMockSecret(namespace, name, resourceVersion, registry, username)
+func mockUpdatedSecret(namespace, name, resourceVersion, registry, username string) *corev1.Secret {
+	s := mockSecret(namespace, name, resourceVersion, registry, username)
 	s.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "kubectl", Time: &mockUpdatedAt}}
 	return s
-}
-
-func newTestKubeSecretProvider(synced bool, changed *int) *kubeSecretProvider {
-	return &kubeSecretProvider{
-		secrets:  make(map[string]*secret),
-		synced:   func() bool { return synced },
-		onChange: func() { *changed++ },
-	}
 }
 
 func TestKubeSecretProvider_lookup(t *testing.T) {
@@ -65,8 +57,8 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "ties in namespace/name order",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("b", "x", "1", "registry.example.com", "b"))
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.add(mockSecret("b", "x", "1", "registry.example.com", "b"))
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -80,8 +72,8 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "secret updated last wins",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
-				k.add(newMockUpdatedSecret("b", "x", "1", "registry.example.com", "b"))
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.add(mockUpdatedSecret("b", "x", "1", "registry.example.com", "b"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -91,9 +83,9 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "updated secret wins",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
-				k.add(newMockSecret("b", "x", "1", "registry.example.com", "b"))
-				k.update(newMockSecret("b", "x", "1", "registry.example.com", "b"), newMockUpdatedSecret("b", "x", "2", "registry.example.com", "b2"))
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.add(mockSecret("b", "x", "1", "registry.example.com", "b"))
+				k.update(mockSecret("b", "x", "1", "registry.example.com", "b"), mockUpdatedSecret("b", "x", "2", "registry.example.com", "b2"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -104,8 +96,8 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "skip update of the same resource version",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
-				k.update(newMockSecret("a", "y", "1", "registry.example.com", "a"), newMockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.update(mockSecret("a", "y", "1", "registry.example.com", "a"), mockSecret("a", "y", "1", "registry.example.com", "a"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -115,8 +107,8 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "forget deleted secret",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
-				k.delete(newMockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.delete(mockSecret("a", "y", "1", "registry.example.com", "a"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -127,8 +119,8 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "forget secret deleted while unwatched",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
-				k.delete(cache.DeletedFinalStateUnknown{Key: "a/y", Obj: newMockSecret("a", "y", "1", "registry.example.com", "a")})
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
+				k.delete(cache.DeletedFinalStateUnknown{Key: "a/y", Obj: mockSecret("a", "y", "1", "registry.example.com", "a")})
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -138,10 +130,10 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "skip malformed secret",
 			events: func(k *kubeSecretProvider) {
-				malformed := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				malformed := mockSecret("a", "y", "1", "registry.example.com", "a")
 				malformed.Data[corev1.DockerConfigJsonKey] = []byte(`{"auths":`)
 				k.add(malformed)
-				k.add(newMockSecret("b", "x", "1", "registry.example.com", "b"))
+				k.add(mockSecret("b", "x", "1", "registry.example.com", "b"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -153,10 +145,10 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "forget secret updated to malformed",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "y", "1", "registry.example.com", "a"))
-				malformed := newMockSecret("a", "y", "2", "registry.example.com", "a")
+				k.add(mockSecret("a", "y", "1", "registry.example.com", "a"))
+				malformed := mockSecret("a", "y", "2", "registry.example.com", "a")
 				malformed.Data[corev1.DockerConfigJsonKey] = []byte(`{"auths":`)
-				k.update(newMockSecret("a", "y", "1", "registry.example.com", "a"), malformed)
+				k.update(mockSecret("a", "y", "1", "registry.example.com", "a"), malformed)
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -167,8 +159,8 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 			name: "skip an object that is no secret",
 			events: func(k *kubeSecretProvider) {
 				k.add("no secret")
-				k.update("no secret", newMockSecret("a", "y", "2", "registry.example.com", "a"))
-				k.update(newMockSecret("a", "y", "1", "registry.example.com", "a"), "no secret")
+				k.update("no secret", mockSecret("a", "y", "2", "registry.example.com", "a"))
+				k.update(mockSecret("a", "y", "1", "registry.example.com", "a"), "no secret")
 				k.delete("no secret")
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
@@ -180,7 +172,7 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "skip secret of another type",
 			events: func(k *kubeSecretProvider) {
-				opaque := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				opaque := mockSecret("a", "y", "1", "registry.example.com", "a")
 				opaque.Type = corev1.SecretTypeOpaque
 				k.add(opaque)
 			},
@@ -192,9 +184,9 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 		{
 			name: "secrets of other registries do not multiply",
 			events: func(k *kubeSecretProvider) {
-				k.add(newMockSecret("a", "x", "1", "one.example.com", "a"))
-				k.add(newMockSecret("a", "y", "1", "two.example.com", "b"))
-				k.add(newMockSecret("a", "z", "1", "registry.example.com", "c"))
+				k.add(mockSecret("a", "x", "1", "one.example.com", "a"))
+				k.add(mockSecret("a", "y", "1", "two.example.com", "b"))
+				k.add(mockSecret("a", "z", "1", "registry.example.com", "c"))
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, changed int) {
 				assert := assert.New(t)
@@ -208,14 +200,19 @@ func TestKubeSecretProvider_lookup(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var changed int
-			k := newTestKubeSecretProvider(true, &changed)
+			k := &kubeSecretProvider{
+				secrets:  make(map[string]*secret),
+				synced:   func() bool { return true },
+				onChange: func() { changed++ },
+			}
+
 			tc.events(k)
 			tc.expect(t, k, changed)
 		})
 	}
 }
 
-func TestKubeSecretProvider_set(t *testing.T) {
+func TestKubeSecretProvider_setSecret(t *testing.T) {
 	tests := []struct {
 		name   string
 		synced bool
@@ -244,8 +241,13 @@ func TestKubeSecretProvider_set(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var changed int
-			k := newTestKubeSecretProvider(tc.synced, &changed)
-			k.set("a/y", &secret{name: "a/y", auths: map[string]authConfig{"registry.example.com": mockAuthConfig}})
+			k := &kubeSecretProvider{
+				secrets:  make(map[string]*secret),
+				synced:   func() bool { return tc.synced },
+				onChange: func() { changed++ },
+			}
+
+			k.setSecret("a/y", &secret{name: "a/y", auths: map[string]authConfig{"registry.example.com": mockAuthConfig}})
 			tc.expect(t, k, changed)
 		})
 	}
@@ -262,7 +264,7 @@ func TestKubeSecretProvider_transform(t *testing.T) {
 			name:   "keep the times of data owners only",
 			passes: 1,
 			secret: func() *corev1.Secret {
-				s := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				s := mockSecret("a", "y", "1", "registry.example.com", "a")
 				s.Data["extra"] = []byte("unread")
 				s.Annotations = map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "{}"}
 				s.ManagedFields = []metav1.ManagedFieldsEntry{
@@ -288,7 +290,7 @@ func TestKubeSecretProvider_transform(t *testing.T) {
 			name:   "a manager of a label named data owns no data",
 			passes: 1,
 			secret: func() *corev1.Secret {
-				s := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				s := mockSecret("a", "y", "1", "registry.example.com", "a")
 				s.ManagedFields = []metav1.ManagedFieldsEntry{
 					{Manager: "creator", Time: &mockUpdatedAt, FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:data":{".":{}},"f:type":{}}`)}},
 					{Manager: "labeler", Time: &mockUpdatedAt, FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:labels":{"f:data":{}},"f:annotations":{"f:stringData":{}}}}`)}},
@@ -306,7 +308,7 @@ func TestKubeSecretProvider_transform(t *testing.T) {
 			name:   "a second pass keeps the data owners",
 			passes: 2,
 			secret: func() *corev1.Secret {
-				s := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				s := mockSecret("a", "y", "1", "registry.example.com", "a")
 				s.ManagedFields = []metav1.ManagedFieldsEntry{
 					{Manager: "creator", Time: &mockUpdatedAt, FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:data":{".":{}},"f:type":{}}`)}},
 					{Manager: "labeler", Time: &mockUpdatedAt, FieldsV1: &metav1.FieldsV1{Raw: []byte(`{"f:metadata":{"f:labels":{}}}`)}},
@@ -323,7 +325,7 @@ func TestKubeSecretProvider_transform(t *testing.T) {
 			name:   "drop the data of a secret without a docker config",
 			passes: 1,
 			secret: func() *corev1.Secret {
-				s := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				s := mockSecret("a", "y", "1", "registry.example.com", "a")
 				s.Data = map[string][]byte{"extra": []byte("unread")}
 				return s
 			},
@@ -414,9 +416,9 @@ func TestNewKubeSecretProvider(t *testing.T) {
 			name:          "watch labelled secrets",
 			labelSelector: "app=nydus",
 			objects: func() []*corev1.Secret {
-				labelled := newMockSecret("a", "y", "1", "registry.example.com", "a")
+				labelled := mockSecret("a", "y", "1", "registry.example.com", "a")
 				labelled.Annotations = map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "{}"}
-				unlabelled := newMockSecret("a", "z", "1", "registry.example.com", "z")
+				unlabelled := mockSecret("a", "z", "1", "registry.example.com", "z")
 				unlabelled.Labels = nil
 				return []*corev1.Secret{labelled, unlabelled}
 			},
@@ -441,13 +443,13 @@ func TestNewKubeSecretProvider(t *testing.T) {
 			name:          "secret updated after the initial list wins",
 			labelSelector: "app=nydus",
 			objects: func() []*corev1.Secret {
-				return []*corev1.Secret{newMockSecret("a", "y", "1", "registry.example.com", "a")}
+				return []*corev1.Secret{mockSecret("a", "y", "1", "registry.example.com", "a")}
 			},
 			expect: func(t *testing.T, k *kubeSecretProvider, client *fake.Clientset, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Eventually(k.synced, 5*time.Second, 10*time.Millisecond)
-				_, err = client.CoreV1().Secrets("z").Create(t.Context(), newMockUpdatedSecret("z", "z", "", "registry.example.com", "z"), metav1.CreateOptions{})
+				_, err = client.CoreV1().Secrets("z").Create(t.Context(), mockUpdatedSecret("z", "z", "", "registry.example.com", "z"), metav1.CreateOptions{})
 				assert.NoError(err)
 				assert.Eventually(func() bool {
 					creds := k.lookup(mockRegistryTarget)

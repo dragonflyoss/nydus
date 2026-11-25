@@ -12,12 +12,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/cache"
+)
+
+var (
+	mockLayerFS = fstest.MapFS{
+		"image/" + bootstrapFile: {Data: []byte(bootstrapFile), Mode: 0o644},
+	}
 )
 
 func TestBootstrapLayer_Blobs(t *testing.T) {
@@ -108,10 +115,14 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fsDir := t.TempDir()
-			writeLayer(t, fsDir, tc.files)
+			for _, name := range tc.files {
+				assert.NoError(t, os.MkdirAll(filepath.Join(fsDir, "image"), 0o755))
+				assert.NoError(t, os.WriteFile(filepath.Join(fsDir, "image", name), []byte(name), 0o644))
+			}
+
 			if tc.hostDir {
 				hostDir := t.TempDir()
-				writeLayer(t, hostDir, []string{"host.blob.meta"})
+				assert.NoError(t, os.CopyFS(hostDir, fstest.MapFS{"image/host.blob.meta": {Data: []byte("host.blob.meta"), Mode: 0o644}}))
 				assert.NoError(t, os.Symlink(filepath.Join(hostDir, "image"), filepath.Join(fsDir, "image")))
 			}
 
@@ -125,7 +136,7 @@ func TestBootstrapLayer_Blobs(t *testing.T) {
 	}
 }
 
-func TestBootstrapLayer_bootstrap(t *testing.T) {
+func TestBootstrapLayer_bootstrapPath(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(t *testing.T, fsDir string)
@@ -170,7 +181,7 @@ func TestBootstrapLayer_bootstrap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fsDir := t.TempDir()
 			tc.prepare(t, fsDir)
-			path, err := NewBootstrapLayer(fsDir).bootstrap()
+			path, err := NewBootstrapLayer(fsDir).bootstrapPath()
 			tc.expect(t, fsDir, path, err)
 		})
 	}
@@ -278,7 +289,7 @@ func TestBootstrapLayer_linkBootstrap(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fsDir := t.TempDir()
-			writeLayer(t, fsDir, []string{bootstrapFile})
+			assert.NoError(t, os.CopyFS(fsDir, mockLayerFS))
 			if tc.symlink {
 				src := filepath.Join(fsDir, "image", bootstrapFile)
 				assert.NoError(t, os.Remove(src))
@@ -287,7 +298,18 @@ func TestBootstrapLayer_linkBootstrap(t *testing.T) {
 
 			dst := filepath.Join(t.TempDir(), bootstrapFile)
 			if tc.crossDevice {
-				dst = filepath.Join(crossDeviceDir(t, fsDir), bootstrapFile)
+				shm, err := os.MkdirTemp("/dev/shm", "nydus-test-") //nolint:usetesting // another file system than t.TempDir
+				if err != nil {
+					t.Skipf("create a dir on /dev/shm: %v", err)
+				}
+				t.Cleanup(func() { os.RemoveAll(shm) })
+
+				var a, b unix.Stat_t
+				if unix.Stat(fsDir, &a) != nil || unix.Stat(shm, &b) != nil || a.Dev == b.Dev {
+					t.Skip("/dev/shm is on the same file system")
+				}
+
+				dst = filepath.Join(shm, bootstrapFile)
 			}
 
 			if tc.existed {
@@ -348,21 +370,13 @@ func TestBootstrapLayer_seedCache(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fsDir, cacheDir := t.TempDir(), t.TempDir()
-			writeLayer(t, fsDir, []string{"aaaa.blob.meta"})
+			assert.NoError(t, os.CopyFS(fsDir, fstest.MapFS{"image/aaaa.blob.meta": {Data: []byte("aaaa.blob.meta"), Mode: 0o644}}))
 			for name, content := range tc.cached {
 				assert.NoError(t, os.WriteFile(filepath.Join(cacheDir, name), []byte(content), 0o644))
 			}
 
 			tc.expect(t, cacheDir, NewBootstrapLayer(fsDir).seedCache(cacheDir, tc.blobs))
 		})
-	}
-}
-
-func writeLayer(t *testing.T, fsDir string, files []string) {
-	t.Helper()
-	for _, name := range files {
-		assert.NoError(t, os.MkdirAll(filepath.Join(fsDir, "image"), 0o755))
-		assert.NoError(t, os.WriteFile(filepath.Join(fsDir, "image", name), []byte(name), 0o644))
 	}
 }
 
@@ -443,7 +457,7 @@ func TestBootstrapLayer_copyFile(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fsDir := t.TempDir()
-			writeLayer(t, fsDir, []string{bootstrapFile})
+			assert.NoError(t, os.CopyFS(fsDir, mockLayerFS))
 			src, dst := filepath.Join(fsDir, "image", bootstrapFile), filepath.Join(t.TempDir(), bootstrapFile)
 			if tc.prepare != nil {
 				tc.prepare(t, src, dst)
@@ -452,20 +466,4 @@ func TestBootstrapLayer_copyFile(t *testing.T) {
 			tc.expect(t, dst, NewBootstrapLayer(fsDir).copyFile(src, dst))
 		})
 	}
-}
-
-func crossDeviceDir(t *testing.T, dir string) string {
-	t.Helper()
-	shm, err := os.MkdirTemp("/dev/shm", "nydus-test-") //nolint:usetesting // another file system than t.TempDir
-	if err != nil {
-		t.Skipf("create a dir on /dev/shm: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(shm) })
-
-	var a, b unix.Stat_t
-	if unix.Stat(dir, &a) != nil || unix.Stat(shm, &b) != nil || a.Dev == b.Dev {
-		t.Skip("/dev/shm is on the same file system")
-	}
-
-	return shm
 }

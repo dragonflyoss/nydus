@@ -16,26 +16,27 @@ import (
 )
 
 const (
-	payloadDir        = "/opt/nydus-snapshotter/payload"
-	payloadConfig     = payloadDir + "/config/config.yaml"
-	tokenDir          = "/opt/nydus-snapshotter/token"
-	installerConfig   = "\ninstaller:\n  rootfs_dir: /\n  payload_dir: " + payloadDir + "\n  token_dir: " + tokenDir + "\n  sync_interval: 1s\n"
-	nodeLabelConfig   = "  node_label:\n    enable: true\n"
-	snapshotterBinary = "/usr/local/bin/nydus-snapshotter"
-	nydusCurrent      = "/opt/nydus-snapshotter/bin/current"
-	hostConfig        = "/etc/nydus-snapshotter/config.yaml"
-	kubernetesDir     = "/run/nydus-snapshotter/kubernetes"
-	restartPending    = "/run/nydus-snapshotter/restart-pending"
-	serviceUnit       = "nydus-snapshotter.service"
-	socketUnit        = "nydus-snapshotter.socket"
-	metricsURL        = "http://127.0.0.1:4010/metrics"
-	nodeLabel         = "d7y.io/nydus-snapshotter"
-	containerdConfig  = "/etc/containerd/config.toml"
-	proxyPlugin       = "\n[proxy_plugins.nydus]\n  type = \"snapshot\"\n  address = \"/run/nydus-snapshotter/nydus-snapshotter.sock\"\n"
-	installed         = "installed, keeping the config and the credentials in sync"
-	bootTimeout       = time.Minute
-	installTimeout    = time.Minute
-	syncTimeout       = 30 * time.Second
+	installerRoot               = "/opt/nydus-installer"
+	tokenDir                    = installerRoot + "/var/run/secrets/kubernetes.io/serviceaccount"
+	installerConfig             = "\ninstaller:\n  sync_interval: 1s\n"
+	nodeLabelConfig             = "  node_label:\n    enable: true\n"
+	nydusSnapshotterBinary      = "/usr/local/bin/nydus-snapshotter"
+	nydusBinary                 = "/usr/local/bin/nydus"
+	hostUnitDir                 = "/etc/systemd/system"
+	nydusLink                   = "/opt/nydus-snapshotter/bin/current/nydus"
+	nydusBinaryVersionsDir      = "/opt/nydus-snapshotter/versions"
+	hostConfig                  = "/etc/nydus-snapshotter/config.yaml"
+	kubernetesDir               = "/run/nydus-snapshotter/kubernetes"
+	restartRequiredFile         = "/run/nydus-snapshotter/restart-required"
+	nydusSnapshotterServiceUnit = "nydus-snapshotter-v3.service"
+	metricsURL                  = "http://127.0.0.1:4010/metrics"
+	nodeLabel                   = "d7y.io/nydus-snapshotter"
+	containerdConfig            = "/etc/containerd/config.toml"
+	proxyPlugin                 = "\n[proxy_plugins.nydus]\n  type = \"snapshot\"\n  address = \"/run/nydus-snapshotter/nydus-snapshotter.sock\"\n"
+	installed                   = "installed, keeping the config and the credentials in sync"
+	bootTimeout                 = time.Minute
+	installTimeout              = time.Minute
+	syncTimeout                 = 30 * time.Second
 )
 
 type installNode struct {
@@ -67,7 +68,7 @@ func newInstallNode(t *testing.T) *installNode {
 	t.Cleanup(func() {
 		if t.Failed() {
 			out, _ := exec.Command(n.docker, "exec", n.name, "journalctl", "--no-pager", "--output", "short-precise",
-				"--unit", serviceUnit, "--unit", socketUnit, "--unit", "nydus-installer-*").CombinedOutput()
+				"--unit", nydusSnapshotterServiceUnit, "--unit", "nydus-installer-*").CombinedOutput()
 			t.Logf("journal of %s:\n%s", n.name, out)
 		}
 
@@ -80,12 +81,19 @@ func newInstallNode(t *testing.T) *installNode {
 		t.FailNow()
 	}
 
-	n.exec(t, "mkdir", "-p", payloadDir+"/bin", payloadDir+"/systemd", payloadDir+"/config", tokenDir)
-	n.write(t, payloadDir+"/bin/nydus-snapshotter", string(snapshotter), 0o755)
-	n.write(t, payloadDir+"/bin/nydus", nydusStub("3.0.0-e2e"), 0o755)
-	for _, unit := range []string{socketUnit, serviceUnit} {
-		n.write(t, payloadDir+"/systemd/"+unit, shipped(t, "systemd", unit), 0o644)
+	// The installer runs in a root of its own laid out as its image, with
+	// the node's root at /host as in the DaemonSet. The stub of nydus is a
+	// shell script, so the root borrows the node's shell and libraries.
+	n.exec(t, "mkdir", "-p", installerRoot+filepath.Dir(nydusSnapshotterBinary), installerRoot+hostUnitDir,
+		installerRoot+filepath.Dir(hostConfig), tokenDir, installerRoot+"/host",
+		installerRoot+"/usr/bin", installerRoot+"/usr/lib", installerRoot+"/usr/lib64")
+	for _, dir := range []string{"bin", "lib", "lib64"} {
+		n.exec(t, "ln", "-s", "usr/"+dir, installerRoot+"/"+dir)
 	}
+
+	n.write(t, installerRoot+nydusSnapshotterBinary, string(snapshotter), 0o755)
+	n.write(t, installerRoot+nydusBinary, nydusStub("3.0.0-e2e"), 0o755)
+	n.write(t, installerRoot+hostUnitDir+"/"+nydusSnapshotterServiceUnit, shipped(t, "systemd", nydusSnapshotterServiceUnit), 0o644)
 
 	n.writeShippedConfig(t)
 
@@ -139,7 +147,7 @@ func (n *installNode) write(t *testing.T, path, data string, mode os.FileMode) {
 func (n *installNode) writeConfig(t *testing.T, config string) {
 	t.Helper()
 	n.config = config + n.installer
-	n.write(t, payloadConfig, n.config, 0o644)
+	n.write(t, installerRoot+hostConfig, n.config, 0o644)
 }
 
 func (n *installNode) writeShippedConfig(t *testing.T) {
@@ -156,12 +164,18 @@ func (n *installNode) start(t *testing.T, environment ...string) string {
 	t.Helper()
 	n.installers++
 	unit := fmt.Sprintf("nydus-installer-%d.service", n.installers)
-	args := []string{"systemd-run", "--unit", unit, "--collect"}
+	args := []string{
+		"systemd-run", "--unit", unit, "--collect",
+		"--property", "RootDirectory=" + installerRoot,
+		"--property", "MountAPIVFS=yes",
+		"--property", "BindPaths=/:/host /run/systemd -/run/dbus",
+		"--property", "BindReadOnlyPaths=/usr/bin /usr/lib -/usr/lib64",
+	}
 	for _, variable := range environment {
 		args = append(args, "--setenv", variable)
 	}
 
-	n.exec(t, append(args, payloadDir+"/bin/nydus-snapshotter", "install", "--config", payloadConfig)...)
+	n.exec(t, append(args, nydusSnapshotterBinary, "install")...)
 
 	return unit
 }
@@ -195,16 +209,10 @@ func (n *installNode) property(t *testing.T, unit, name string) string {
 
 func (n *installNode) assertServing(t *testing.T) {
 	t.Helper()
-	for _, unit := range []string{socketUnit, serviceUnit} {
-		assert.Equal(t, "active", n.property(t, unit, "ActiveState"))
-		assert.Equal(t, "enabled", n.property(t, unit, "UnitFileState"))
-	}
+	assert.Equal(t, "active", n.property(t, nydusSnapshotterServiceUnit, "ActiveState"))
+	assert.Equal(t, "enabled", n.property(t, nydusSnapshotterServiceUnit, "UnitFileState"))
 
 	assert.Contains(t, n.exec(t, "curl", "--fail", "--silent", metricsURL), "nydus_snapshotter_running_daemons")
-}
-
-func (n *installNode) starts() int {
-	return strings.Count(n.journal(serviceUnit), "starting nydus-snapshotter")
 }
 
 func TestInstall(t *testing.T) {
@@ -213,72 +221,61 @@ func TestInstall(t *testing.T) {
 	installer := n.install(t)
 
 	n.assertServing(t)
-	assert.Equal(t, strings.Fields(n.exec(t, "sha256sum", payloadDir+"/bin/nydus-snapshotter"))[0], strings.Fields(n.exec(t, "sha256sum", snapshotterBinary))[0])
+	assert.Equal(t, strings.Fields(n.exec(t, "sha256sum", installerRoot+nydusSnapshotterBinary))[0], strings.Fields(n.exec(t, "sha256sum", nydusSnapshotterBinary))[0])
 	assert.Equal(t, n.config, n.exec(t, "cat", hostConfig)+"\n")
-	assert.Equal(t, "3.0.0-e2e", n.exec(t, "readlink", nydusCurrent))
-	assert.Contains(t, n.exec(t, nydusCurrent+"/nydus", "--version"), "3.0.0-e2e")
-	assert.Equal(t, "700", n.exec(t, "stat", "--format", "%a", filepath.Dir(restartPending)))
+	assert.Equal(t, nydusBinaryVersionsDir+"/3.0.0-e2e/nydus", n.exec(t, "readlink", nydusLink))
+	assert.Contains(t, n.exec(t, nydusLink, "--version"), "3.0.0-e2e")
+	assert.Equal(t, "700", n.exec(t, "stat", "--format", "%a", filepath.Dir(restartRequiredFile)))
 
-	service := n.property(t, serviceUnit, "InvocationID")
+	service := n.property(t, nydusSnapshotterServiceUnit, "InvocationID")
 	n.stop(t, installer)
 	n.stop(t, n.install(t))
-	assert.Equal(t, service, n.property(t, serviceUnit, "InvocationID"))
+	assert.Equal(t, service, n.property(t, nydusSnapshotterServiceUnit, "InvocationID"))
 
 	env.Run(t, n.docker, "restart", n.name)
 	n.waitBooted(t)
 	if !assert.Eventually(t, func() bool {
-		state, _ := n.tryExec("systemctl", "is-active", serviceUnit)
+		state, _ := n.tryExec("systemctl", "is-active", nydusSnapshotterServiceUnit)
 		return state == "active"
 	}, bootTimeout, 200*time.Millisecond) {
 		t.FailNow()
 	}
 
 	n.assertServing(t)
-	assert.NotEqual(t, service, n.property(t, serviceUnit, "InvocationID"))
+	assert.NotEqual(t, service, n.property(t, nydusSnapshotterServiceUnit, "InvocationID"))
 }
 
 func TestInstallUpgrade(t *testing.T) {
 	t.Parallel()
 	n := newInstallNode(t)
 	installer := n.install(t)
-	service, socket := n.property(t, serviceUnit, "InvocationID"), n.property(t, socketUnit, "InvocationID")
+	service := n.property(t, nydusSnapshotterServiceUnit, "InvocationID")
 
 	n.writeConfig(t, "log:\n  level: debug\n")
 	assert.Eventually(t, func() bool {
 		synced, _ := n.tryExec("cat", hostConfig)
 		return synced+"\n" == n.config
 	}, syncTimeout, 200*time.Millisecond)
-	assert.Equal(t, serviceUnit, n.exec(t, "cat", restartPending))
-	assert.Equal(t, service, n.property(t, serviceUnit, "InvocationID"))
+	n.exec(t, "test", "-e", restartRequiredFile)
+	assert.Equal(t, service, n.property(t, nydusSnapshotterServiceUnit, "InvocationID"))
 
 	n.stop(t, installer)
 	installer = n.install(t)
-	restarted := n.property(t, serviceUnit, "InvocationID")
-	assert.NotEqual(t, service, restarted)
-	assert.Equal(t, socket, n.property(t, socketUnit, "InvocationID"))
-	_, err := n.tryExec("test", "-e", restartPending)
+	assert.NotEqual(t, service, n.property(t, nydusSnapshotterServiceUnit, "InvocationID"))
+	_, err := n.tryExec("test", "-e", restartRequiredFile)
 	assert.Error(t, err)
 	n.assertServing(t)
 
 	n.stop(t, installer)
-	starts := n.starts()
-	n.write(t, payloadDir+"/systemd/"+socketUnit, shipped(t, "systemd", socketUnit)+"\n# changed\n", 0o644)
+	service = n.property(t, nydusSnapshotterServiceUnit, "InvocationID")
+	n.write(t, installerRoot+nydusBinary, nydusStub("3.0.1-e2e"), 0o755)
 	installer = n.install(t)
-	assert.NotEqual(t, socket, n.property(t, socketUnit, "InvocationID"))
-	assert.NotEqual(t, restarted, n.property(t, serviceUnit, "InvocationID"))
-	assert.Equal(t, starts+1, n.starts())
-	n.assertServing(t)
+	assert.Equal(t, nydusBinaryVersionsDir+"/3.0.1-e2e/nydus", n.exec(t, "readlink", nydusLink))
+	assert.Contains(t, n.exec(t, nydusBinaryVersionsDir+"/3.0.0-e2e/nydus", "--version"), "3.0.0-e2e")
+	assert.Equal(t, service, n.property(t, nydusSnapshotterServiceUnit, "InvocationID"))
 
 	n.stop(t, installer)
-	service = n.property(t, serviceUnit, "InvocationID")
-	n.write(t, payloadDir+"/bin/nydus", nydusStub("3.0.1-e2e"), 0o755)
-	installer = n.install(t)
-	assert.Equal(t, "3.0.1-e2e", n.exec(t, "readlink", nydusCurrent))
-	assert.Contains(t, n.exec(t, filepath.Dir(nydusCurrent)+"/3.0.0-e2e/nydus", "--version"), "3.0.0-e2e")
-	assert.Equal(t, service, n.property(t, serviceUnit, "InvocationID"))
-
-	n.stop(t, installer)
-	n.stop(t, serviceUnit)
+	n.stop(t, nydusSnapshotterServiceUnit)
 	n.install(t)
 	n.assertServing(t)
 }
@@ -298,7 +295,7 @@ func TestInstallKubeSecret(t *testing.T) {
 	kubeconfig := n.exec(t, "cat", kubernetesDir+"/kubeconfig")
 	assert.Contains(t, kubeconfig, "server: https://10.96.0.1:443")
 	assert.Contains(t, kubeconfig, "tokenFile: "+kubernetesDir+"/token")
-	assert.Equal(t, "active", n.property(t, serviceUnit, "ActiveState"))
+	assert.Equal(t, "active", n.property(t, nydusSnapshotterServiceUnit, "ActiveState"))
 
 	n.write(t, tokenDir+"/token", "rotated", 0o600)
 	assert.Eventually(t, func() bool {
@@ -317,7 +314,7 @@ func TestInstallKubeSecret(t *testing.T) {
 	assert.Contains(t, n.journal(installer), "invalid log.level")
 	assert.Equal(t, "rotated", n.exec(t, "cat", kubernetesDir+"/token"))
 	assert.Equal(t, installedConfig, n.exec(t, "cat", hostConfig))
-	assert.Equal(t, "active", n.property(t, serviceUnit, "ActiveState"))
+	assert.Equal(t, "active", n.property(t, nydusSnapshotterServiceUnit, "ActiveState"))
 }
 
 func TestInstallNodeLabel(t *testing.T) {
@@ -386,9 +383,9 @@ func TestInstallNodeLabel(t *testing.T) {
 
 	n.stop(t, installer)
 	assert.Never(t, unlabeled, 3*time.Second, 200*time.Millisecond)
-	assert.Equal(t, "active", n.property(t, serviceUnit, "ActiveState"))
+	assert.Equal(t, "active", n.property(t, nydusSnapshotterServiceUnit, "ActiveState"))
 
 	n.exec(t, "env", "KUBERNETES_SERVICE_HOST="+address, "KUBERNETES_SERVICE_PORT=6443",
-		payloadDir+"/bin/nydus-snapshotter", "uninstall", "--config", payloadConfig)
+		"chroot", installerRoot, nydusSnapshotterBinary, "uninstall")
 	assert.False(t, labeled())
 }

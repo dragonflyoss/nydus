@@ -44,7 +44,7 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("set log level: %w", err)
 		}
 
-		return runSnapshotter(cmd.Context(), cfg, configPath)
+		return runNydusSnapshotter(cmd.Context(), cfg, configPath)
 	},
 }
 
@@ -82,17 +82,16 @@ func init() {
 
 // initConfig reads the config file into cfg before a command runs. A file
 // that does not load ends the process here: cobra's initializers return no
-// error, and cobra's own initConfig ends it the same way, refer to
-// https://github.com/spf13/cobra/blob/v1.10.2/site/content/user_guide.md.
+// error.
 func initConfig() {
 	if err := cfg.Load(configPath); err != nil {
 		log.L.WithError(err).Fatal("nydus-snapshotter failed")
 	}
 }
 
-// runSnapshotter serves the snapshotter until ctx is done, reloading the
+// runNydusSnapshotter serves the snapshotter until ctx is done, reloading the
 // config file at configPath.
-func runSnapshotter(ctx context.Context, cfg *config.Config, configPath string) error {
+func runNydusSnapshotter(ctx context.Context, cfg *config.Config, configPath string) error {
 	log.G(ctx).WithField("version", version.String()).Info("starting nydus-snapshotter")
 
 	s, err := server.New(ctx, cfg, configPath)

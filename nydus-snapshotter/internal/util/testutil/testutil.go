@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package testutil holds the helpers tests of several packages share, as
-// containerd's pkg/testutil does, refer to
-// https://github.com/containerd/containerd/blob/main/pkg/testutil/helpers.go.
+// Package testutil holds the helpers tests of several packages share.
 package testutil
 
 import (
@@ -55,7 +53,6 @@ func NewConfig(t *testing.T) *config.Config {
 	cfg.RuntimeDir = filepath.Join(dir, "run")
 	cfg.GRPC.Addr = filepath.Join(cfg.RuntimeDir, "s.sock")
 	cfg.Metrics.Addr = "127.0.0.1:0"
-	cfg.Nydusd.LogDir = filepath.Join(dir, "log")
 	cfg.Cgroup.Slice = "nydustest" + strconv.Itoa(os.Getpid()) + strconv.Itoa(rand.IntN(1<<30)) + ".slice"
 	// A test that started no slice has none to stop.
 	t.Cleanup(func() { _ = exec.Command("systemctl", "stop", cfg.Cgroup.Slice).Run() })

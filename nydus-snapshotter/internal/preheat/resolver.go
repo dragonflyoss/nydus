@@ -30,10 +30,8 @@ type Resolver interface {
 	Resolve(ctx context.Context, namespace, ref string) (*fs.Image, error)
 }
 
-// resolver asks containerd for the layers of an image and the snapshotter
-// for the bootstrap layer among them, as containerd tells whether an image
-// is unpacked, refer to
-// https://github.com/containerd/containerd/blob/v2.2.10/client/image.go.
+// resolver asks containerd for the layers of an image and the snapshotter for
+// the bootstrap layer among them.
 //
 //	reference ─▶ image ─▶ diff IDs ─▶ chain IDs ─▶ bootstrap snapshot
 //	      containerd                             snapshotter

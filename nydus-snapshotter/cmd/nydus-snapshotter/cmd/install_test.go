@@ -7,10 +7,12 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/installer"
@@ -58,8 +60,22 @@ func TestInstallCmd(t *testing.T) {
 				assert.NoError(t, os.WriteFile(path, []byte(tc.config), 0o644))
 			}
 
-			_, err := executeCommand(t, append([]string{"install", "--config", path}, tc.args...)...)
-			tc.expect(t, err)
+			out := &bytes.Buffer{}
+			rootCmd.SetOut(out)
+			rootCmd.SetErr(out)
+			rootCmd.SetArgs(append([]string{"install", "--config", path}, tc.args...))
+			t.Cleanup(func() {
+				for _, cmd := range []*cobra.Command{rootCmd, installCmd, uninstallCmd} {
+					for _, name := range []string{"config", "help", "version"} {
+						if flag := cmd.Flags().Lookup(name); flag != nil {
+							assert.NoError(t, flag.Value.Set(flag.DefValue))
+							flag.Changed = false
+						}
+					}
+				}
+			})
+
+			tc.expect(t, rootCmd.ExecuteContext(t.Context()))
 		})
 	}
 }

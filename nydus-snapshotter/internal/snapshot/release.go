@@ -41,8 +41,8 @@ func (s *snapshotter) Run(ctx context.Context) {
 	}
 }
 
-// wakeRelease wakes the release worker without blocking.
-func (s *snapshotter) wakeRelease() {
+// wakeReleaseWorker wakes the release worker without blocking.
+func (s *snapshotter) wakeReleaseWorker() {
 	select {
 	case s.release <- struct{}{}:
 	default:
@@ -54,7 +54,7 @@ func (s *snapshotter) wakeRelease() {
 func (s *snapshotter) usedImages(ctx context.Context) (map[string]struct{}, error) {
 	infos := map[string]snapshots.Info{}
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-		return s.walkInfo(ctx, func(_ context.Context, info snapshots.Info) error {
+		return s.walkSnapshots(ctx, func(_ context.Context, info snapshots.Info) error {
 			infos[info.Name] = info
 			return nil
 		})

@@ -13,7 +13,7 @@ paths: [docs/snapshotter.md](../docs/snapshotter.md).
 
 ```shell
 make build      # bin/nydus-snapshotter
-make test       # go test -race ./...
+make test       # go test -race ./..., as root for the tests that mount or need a root filesystem of their own
 make fmt        # golangci-lint fmt
 make vet        # go vet ./...
 make lint       # golangci-lint v2
@@ -30,9 +30,9 @@ IMAGE_FLAGS="--platform linux/amd64,linux/arm64 --push"`.
 
 1. Install the [Helm chart](https://github.com/dragonflyoss/helm-charts/tree/main/charts/nydus-snapshotter),
    the only Kubernetes deployment, which runs the image as a DaemonSet. On every node
-   `nydus-snapshotter install` copies the binaries, units and config to the
-   host, enables `nydus-snapshotter.socket` and `nydus-snapshotter.service`,
-   restarts the service when its binary, units or `config.yaml` changed, and
+   `nydus-snapshotter install` copies the binaries, the unit and config to the
+   host, enables `nydus-snapshotter-v3.service`,
+   restarts the service when its binary, unit or `config.yaml` changed, and
    keeps `/run/nydus-snapshotter/kubernetes/{token,ca.crt,kubeconfig}` in
    sync for `auth.kube_secret`. `deploy/nydus-snapshotter/` holds the default
    `config.yaml`.
@@ -43,14 +43,14 @@ IMAGE_FLAGS="--platform linux/amd64,linux/arm64 --push"`.
    The installer never edits containerd's config. Point a node at the
    snapshotter only once it is installed there: the installer Pod itself needs
    a working snapshotter to start, so new nodes either join with overlayfs
-   first or carry the units in their image.
+   first or carry the unit in their image.
 
 The installer takes no flag but `--config`: its settings are the `installer`
 section of `config.yaml`, which it reads from `/etc/nydus-snapshotter/` in the
 Pod, where the DaemonSet mounts the ConfigMap. With
 `installer.node_label.enable` it labels the node `NODE_NAME` names
 `d7y.io/nydus-snapshotter=true` while the snapshotter serves and the node's
-containerd has loaded it, and removes it after three checks in a row fail;
+containerd has loaded it, and removes it on a check that fails;
 select the label with a `nodeSelector` or a RuntimeClass. It needs `get` and
 `patch` on `nodes`. An installer that stops keeps the label, so a rollout
 does not take it from the node; `nydus-snapshotter uninstall` removes it from
@@ -61,14 +61,14 @@ The installer copies ConfigMap changes to the host every sync interval
 without restarting the snapshotter, which reloads `cgroup` and
 `nydusd.config` itself; other keys apply when the installer Pods restart. An
 invalid `config.yaml` or `hosts.toml` is never copied to the host. Removing the DaemonSet leaves the snapshotter running, and so does `nydus-snapshotter uninstall`; removing it from a host is manual:
-`systemctl disable --now nydus-snapshotter.socket nydus-snapshotter.service`,
+`systemctl disable --now nydus-snapshotter-v3.service`,
 then `systemctl stop system-nydusd.slice` once no container runs on a nydus
 image, which also stops the daemons left, and removing the paths listed in the
 design doc.
 
 Without Kubernetes, copy the binaries, `deploy/systemd/` and
-`deploy/nydus-snapshotter/` to the paths in the design doc and enable both
-units.
+`deploy/nydus-snapshotter/` to the paths in the design doc and enable the
+unit.
 
 ## Preheat
 
@@ -88,5 +88,5 @@ and Python bindings live in
   the reason of a failure.
 
 `preheat.max_concurrent_images` in `config.yaml` bounds the images preheated
-at once, and `preheat.containerd_addr` names containerd's socket. See the
+at once, and `containerd.addr` names containerd's socket. See the
 [Preheat](../docs/snapshotter.md#preheat) section of the design doc.

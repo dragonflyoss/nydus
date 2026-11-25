@@ -8,8 +8,12 @@ package fs
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
@@ -17,11 +21,25 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	authmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth/mocks"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/kmutex"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd"
 	nydusdmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd/mocks"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 	systemdmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd/mocks"
 )
+
+func mockCounterFamilies(value float64) map[string]*dto.MetricFamily {
+	return map[string]*dto.MetricFamily{
+		"nydus_backend_read_total": {
+			Name:   proto.String("nydus_backend_read_total"),
+			Help:   proto.String("Backend reads."),
+			Type:   dto.MetricType_COUNTER.Enum(),
+			Metric: []*dto.Metric{{Counter: &dto.Counter{Value: proto.Float64(value)}}},
+		},
+	}
+}
 
 func TestFileSystem_Gather(t *testing.T) {
 	tests := []struct {
@@ -29,7 +47,7 @@ func TestFileSystem_Gather(t *testing.T) {
 		instances []*store.Instance
 		closed    bool
 		mock      func(m, other *nydusdmocks.MockClientMockRecorder)
-		expect    func(t *testing.T, families []*dto.MetricFamily, err error)
+		expect    func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error)
 	}{
 		{
 			name:      "label the metrics of every daemon",
@@ -38,7 +56,7 @@ func TestFileSystem_Gather(t *testing.T) {
 				m.Metrics(gomock.Any()).Return(mockCounterFamilies(3), nil).Times(1)
 				other.Metrics(gomock.Any()).Return(mockCounterFamilies(5), nil).Times(1)
 			},
-			expect: func(t *testing.T, families []*dto.MetricFamily, err error) {
+			expect: func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Len(families, 1)
@@ -47,7 +65,7 @@ func TestFileSystem_Gather(t *testing.T) {
 				assert.Equal(map[string]float64{
 					mockInstance.ChainID + " " + mockInstance.ImageRef:           3,
 					mockOtherInstance.ChainID + " " + mockOtherInstance.ImageRef: 5,
-				}, counterValues(families[0]))
+				}, values)
 			},
 		},
 		{
@@ -57,11 +75,11 @@ func TestFileSystem_Gather(t *testing.T) {
 				m.Metrics(gomock.Any()).Return(mockCounterFamilies(3), nil).Times(1)
 				other.Metrics(gomock.Any()).Return(nil, errors.New("foo")).Times(1)
 			},
-			expect: func(t *testing.T, families []*dto.MetricFamily, err error) {
+			expect: func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Len(families, 1)
-				assert.Equal(map[string]float64{mockInstance.ChainID + " " + mockInstance.ImageRef: 3}, counterValues(families[0]))
+				assert.Equal(map[string]float64{mockInstance.ChainID + " " + mockInstance.ImageRef: 3}, values)
 			},
 		},
 		{
@@ -77,11 +95,11 @@ func TestFileSystem_Gather(t *testing.T) {
 					},
 				}, nil).Times(1)
 			},
-			expect: func(t *testing.T, families []*dto.MetricFamily, err error) {
+			expect: func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Len(families, 1)
-				assert.Equal(map[string]float64{mockInstance.ChainID + " " + mockInstance.ImageRef: 3}, counterValues(families[0]))
+				assert.Equal(map[string]float64{mockInstance.ChainID + " " + mockInstance.ImageRef: 3}, values)
 			},
 		},
 		{
@@ -95,7 +113,7 @@ func TestFileSystem_Gather(t *testing.T) {
 
 				m.Metrics(gomock.Any()).Return(families, nil).Times(1)
 			},
-			expect: func(t *testing.T, families []*dto.MetricFamily, err error) {
+			expect: func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				names := make([]string, 0, len(families))
@@ -109,7 +127,7 @@ func TestFileSystem_Gather(t *testing.T) {
 		{
 			name: "no daemon",
 			mock: func(m, other *nydusdmocks.MockClientMockRecorder) {},
-			expect: func(t *testing.T, families []*dto.MetricFamily, err error) {
+			expect: func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Empty(families)
@@ -120,7 +138,7 @@ func TestFileSystem_Gather(t *testing.T) {
 			instances: []*store.Instance{mockInstance},
 			closed:    true,
 			mock:      func(m, other *nydusdmocks.MockClientMockRecorder) {},
-			expect: func(t *testing.T, families []*dto.MetricFamily, err error) {
+			expect: func(t *testing.T, families []*dto.MetricFamily, values map[string]float64, err error) {
 				assert := assert.New(t)
 				assert.Error(err)
 				assert.Nil(families)
@@ -136,14 +154,39 @@ func TestFileSystem_Gather(t *testing.T) {
 			other := nydusdmocks.NewMockClient(ctl)
 			tc.mock(client.EXPECT(), other.EXPECT())
 
-			f, _ := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), authmocks.NewMockKeychain(ctl), NewMockDriver(ctl), client)
-			f.newClient = func(socket string) nydusd.Client {
-				if socket == mockOtherInstance.APISocket {
-					return other
-				}
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
 
-				return client
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:  systemdmocks.NewMockSystemd(ctl),
+				store:    s,
+				keychain: authmocks.NewMockKeychain(ctl),
+				hosts:    registry.NewHosts(""),
+				driver:   NewMockDriver(ctl),
+				newClient: func(socket string) nydusd.Client {
+					if socket == mockOtherInstance.APISocket {
+						return other
+					}
+
+					return client
+				},
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
 			}
+			f.cfg.Store(cfg)
 
 			for _, instance := range tc.instances {
 				assert.NoError(t, f.store.PutInstance(instance))
@@ -154,32 +197,19 @@ func TestFileSystem_Gather(t *testing.T) {
 			}
 
 			families, err := f.Gather()
-			tc.expect(t, families, err)
+			values := map[string]float64{}
+			for _, family := range families {
+				for _, metric := range family.GetMetric() {
+					labels := make([]string, 0, len(metric.GetLabel()))
+					for _, label := range metric.GetLabel() {
+						labels = append(labels, label.GetValue())
+					}
+
+					values[strings.Join(labels, " ")] = metric.GetCounter().GetValue()
+				}
+			}
+
+			tc.expect(t, families, values, err)
 		})
 	}
-}
-
-func mockCounterFamilies(value float64) map[string]*dto.MetricFamily {
-	return map[string]*dto.MetricFamily{
-		"nydus_backend_read_total": {
-			Name:   proto.String("nydus_backend_read_total"),
-			Help:   proto.String("Backend reads."),
-			Type:   dto.MetricType_COUNTER.Enum(),
-			Metric: []*dto.Metric{{Counter: &dto.Counter{Value: proto.Float64(value)}}},
-		},
-	}
-}
-
-func counterValues(family *dto.MetricFamily) map[string]float64 {
-	values := make(map[string]float64, len(family.GetMetric()))
-	for _, metric := range family.GetMetric() {
-		labels := make([]string, 0, len(metric.GetLabel()))
-		for _, label := range metric.GetLabel() {
-			labels = append(labels, label.GetValue())
-		}
-
-		values[strings.Join(labels, " ")] = metric.GetCounter().GetValue()
-	}
-
-	return values
 }

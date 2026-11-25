@@ -21,14 +21,16 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/stretchr/testify/assert"
-
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 var (
 	mockUnknownUnit = "nydus-test-unknown.service"
 
 	mockInvalidUnit = "nydus test.service"
+
+	mockUnitsSlice = "nydustest" + strconv.Itoa(os.Getpid()) + "units.slice"
+
+	mockUnitFile = "[Service]\nType=exec\nExecStartPre=/bin/sh -c 'echo >> /run/%N.starts; sleep 0.5'\nExecStart=sleep 300\n"
 )
 
 func TestActiveState_Running(t *testing.T) {
@@ -212,7 +214,15 @@ func TestSystemd_StartTransientUnit(t *testing.T) {
 			name: "unit file holding the name",
 			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				unit.Name = newSocketActivated(t).service
+				unit.Name = "nydus-test-file-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service"
+				path := filepath.Join("/run/systemd/system", unit.Name)
+				assert.NoError(os.WriteFile(path, []byte(mockUnitFile), 0o644))
+				assert.NoError(exec.Command("systemctl", "daemon-reload").Run())
+				defer func() {
+					assert.NoError(os.Remove(path))
+					assert.NoError(exec.Command("systemctl", "daemon-reload").Run())
+				}()
+
 				assert.ErrorContains(s.StartTransientUnit(t.Context(), unit), "start unit "+unit.Name)
 				state, err := s.ActiveState(t.Context(), unit.Name)
 				assert.NoError(err)
@@ -223,8 +233,31 @@ func TestSystemd_StartTransientUnit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
-			tc.expect(t, s, newTestUnit(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
+			tc.expect(t, s, unit)
 		})
 	}
 }
@@ -263,12 +296,36 @@ func TestSystemd_StopUnit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestSystemd(t), newTestUnit(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
+			tc.expect(t, s, unit)
 		})
 	}
 }
 
-func TestSystemd_confirmStopped(t *testing.T) {
+func TestSystemd_confirmUnitStopped(t *testing.T) {
 	tests := []struct {
 		name   string
 		expect func(t *testing.T, s *systemd, unit *Unit)
@@ -278,21 +335,21 @@ func TestSystemd_confirmStopped(t *testing.T) {
 			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
 				assert.NoError(s.StartTransientUnit(t.Context(), unit))
-				assert.ErrorContains(s.confirmStopped(t.Context(), unit.Name, &jobError{result: "canceled"}), "left it active")
+				assert.ErrorContains(s.confirmUnitStopped(t.Context(), unit.Name, &jobError{result: "canceled"}), "left it active")
 			},
 		},
 		{
 			name: "unit a failed stop job stopped",
 			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.NoError(s.confirmStopped(t.Context(), unit.Name, &jobError{result: "failed"}))
+				assert.NoError(s.confirmUnitStopped(t.Context(), unit.Name, &jobError{result: "failed"}))
 			},
 		},
 		{
 			name: "unit whose state cannot be read",
 			expect: func(t *testing.T, s *systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.ErrorContains(s.confirmStopped(t.Context(), mockInvalidUnit, &jobError{result: "failed"}), "get unit "+mockInvalidUnit+" state")
+				assert.ErrorContains(s.confirmUnitStopped(t.Context(), mockInvalidUnit, &jobError{result: "failed"}), "get unit "+mockInvalidUnit+" state")
 			},
 		},
 		{
@@ -302,14 +359,38 @@ func TestSystemd_confirmStopped(t *testing.T) {
 				assert.NoError(s.Ping(t.Context()))
 				ctx, cancel := context.WithCancel(t.Context())
 				cancel()
-				assert.ErrorContains(s.confirmStopped(ctx, unit.Name, &jobError{result: "failed"}), "reset failed unit "+unit.Name)
+				assert.ErrorContains(s.confirmUnitStopped(ctx, unit.Name, &jobError{result: "failed"}), "reset failed unit "+unit.Name)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestSystemd(t).(*systemd), newTestUnit(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New().(*systemd)
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
+			tc.expect(t, s, unit)
 		})
 	}
 }
@@ -317,53 +398,25 @@ func TestSystemd_confirmStopped(t *testing.T) {
 func TestSystemd_StartUnit(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, s Systemd, units *socketActivated)
+		expect func(t *testing.T, s Systemd, unit, startsFile string)
 	}{
 		{
 			name: "start a unit and leave it alone once it runs",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, unit, startsFile string) {
 				assert := assert.New(t)
-				assert.NoError(s.StartUnit(t.Context(), units.socket))
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				state, err := s.ActiveState(t.Context(), units.service)
+				assert.NoError(s.StartUnit(t.Context(), unit))
+				assert.NoError(s.StartUnit(t.Context(), unit))
+				state, err := s.ActiveState(t.Context(), unit)
 				assert.NoError(err)
 				assert.Equal(ActiveStateActive, state)
-				assert.Equal(1, units.starts(t))
-			},
-		},
-		{
-			name: "wait for the restart a restarted socket gives its running service",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
-				assert := assert.New(t)
-				assert.NoError(s.StartUnit(t.Context(), units.socket))
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				assert.NoError(s.RestartUnit(t.Context(), units.socket))
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				state, err := s.ActiveState(t.Context(), units.service)
+				data, err := os.ReadFile(startsFile)
 				assert.NoError(err)
-				assert.Equal(ActiveStateActive, state)
-				assert.Equal(2, units.starts(t))
-			},
-		},
-		{
-			name: "leave a service alone that its restarted socket is starting again",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
-				assert := assert.New(t)
-				assert.NoError(s.StartUnit(t.Context(), units.socket))
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				assert.NoError(s.RestartUnit(t.Context(), units.socket))
-				assert.Eventually(func() bool { return units.starts(t) == 2 }, 5*time.Second, 10*time.Millisecond)
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				state, err := s.ActiveState(t.Context(), units.service)
-				assert.NoError(err)
-				assert.Equal(ActiveStateActive, state)
-				assert.Equal(2, units.starts(t))
+				assert.Equal(1, strings.Count(string(data), "\n"))
 			},
 		},
 		{
 			name: "unknown unit",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, unit, startsFile string) {
 				assert := assert.New(t)
 				assert.ErrorContains(s.StartUnit(t.Context(), mockUnknownUnit), "start unit "+mockUnknownUnit)
 			},
@@ -372,8 +425,29 @@ func TestSystemd_StartUnit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
-			tc.expect(t, s, newSocketActivated(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			unit := "nydus-test-file-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service"
+			path := filepath.Join("/run/systemd/system", unit)
+			startsFile := "/run/" + strings.TrimSuffix(unit, ".service") + ".starts"
+			assert.NoError(t, os.WriteFile(path, []byte(mockUnitFile), 0o644))
+			assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run())
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit))
+				assert.NoError(t, os.Remove(path))
+				assert.NoError(t, os.RemoveAll(startsFile))
+				assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run())
+			}()
+
+			tc.expect(t, s, unit, startsFile)
 		})
 	}
 }
@@ -381,20 +455,22 @@ func TestSystemd_StartUnit(t *testing.T) {
 func TestSystemd_RestartUnit(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, s Systemd, units *socketActivated)
+		expect func(t *testing.T, s Systemd, unit, startsFile string)
 	}{
 		{
 			name: "restart a running unit",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, unit, startsFile string) {
 				assert := assert.New(t)
-				assert.NoError(s.StartUnit(t.Context(), units.service))
-				assert.NoError(s.RestartUnit(t.Context(), units.service))
-				assert.Equal(2, units.starts(t))
+				assert.NoError(s.StartUnit(t.Context(), unit))
+				assert.NoError(s.RestartUnit(t.Context(), unit))
+				data, err := os.ReadFile(startsFile)
+				assert.NoError(err)
+				assert.Equal(2, strings.Count(string(data), "\n"))
 			},
 		},
 		{
 			name: "unknown unit",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, unit, startsFile string) {
 				assert := assert.New(t)
 				assert.ErrorContains(s.RestartUnit(t.Context(), mockUnknownUnit), "restart unit "+mockUnknownUnit)
 			},
@@ -403,8 +479,29 @@ func TestSystemd_RestartUnit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
-			tc.expect(t, s, newSocketActivated(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			unit := "nydus-test-file-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service"
+			path := filepath.Join("/run/systemd/system", unit)
+			startsFile := "/run/" + strings.TrimSuffix(unit, ".service") + ".starts"
+			assert.NoError(t, os.WriteFile(path, []byte(mockUnitFile), 0o644))
+			assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run())
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit))
+				assert.NoError(t, os.Remove(path))
+				assert.NoError(t, os.RemoveAll(startsFile))
+				assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run())
+			}()
+
+			tc.expect(t, s, unit, startsFile)
 		})
 	}
 }
@@ -437,7 +534,17 @@ func TestSystemd_ActiveState(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			state, err := newTestSystemd(t).ActiveState(t.Context(), tc.unit)
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			state, err := s.ActiveState(t.Context(), tc.unit)
 			tc.expect(t, state, err)
 		})
 	}
@@ -496,7 +603,30 @@ func TestSystemd_ListUnits(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, unit := newTestSystemd(t), newTestUnit(t)
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
 			assert.NoError(t, s.StartTransientUnit(t.Context(), unit))
 
 			ctx, cancel := context.WithCancel(t.Context())
@@ -544,9 +674,19 @@ func TestSystemd_StartSlice(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
 			slice := "nydustest" + strconv.Itoa(os.Getpid()) + ".slice"
-			t.Cleanup(func() { assert.NoError(t, s.StopUnit(context.Background(), slice)) })
+			defer func() { assert.NoError(t, s.StopUnit(context.Background(), slice)) }()
+
 			tc.expect(t, s, slice)
 		})
 	}
@@ -579,8 +719,31 @@ func TestSystemd_SetResources(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
-			tc.expect(t, s, newTestUnit(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
+			tc.expect(t, s, unit)
 		})
 	}
 }
@@ -621,8 +784,31 @@ func TestSystemd_MemoryCurrent(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
-			tc.expect(t, s, newTestUnit(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
+			tc.expect(t, s, unit)
 		})
 	}
 }
@@ -630,18 +816,18 @@ func TestSystemd_MemoryCurrent(t *testing.T) {
 func TestSystemd_EnableUnitFiles(t *testing.T) {
 	tests := []struct {
 		name   string
-		expect func(t *testing.T, s Systemd, units *socketActivated)
+		expect func(t *testing.T, s Systemd, unit string)
 	}{
 		{
 			name: "unit file without install config",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, unit string) {
 				assert := assert.New(t)
-				assert.NoError(s.EnableUnitFiles(t.Context(), []string{units.socket, units.service}))
+				assert.NoError(s.EnableUnitFiles(t.Context(), []string{unit}))
 			},
 		},
 		{
 			name: "missing unit file",
-			expect: func(t *testing.T, s Systemd, units *socketActivated) {
+			expect: func(t *testing.T, s Systemd, unit string) {
 				assert := assert.New(t)
 				assert.ErrorContains(s.EnableUnitFiles(t.Context(), []string{mockUnknownUnit}), "enable unit files ["+mockUnknownUnit+"]")
 			},
@@ -650,8 +836,29 @@ func TestSystemd_EnableUnitFiles(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestSystemd(t)
-			tc.expect(t, s, newSocketActivated(t))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			unit := "nydus-test-file-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service"
+			path := filepath.Join("/run/systemd/system", unit)
+			startsFile := "/run/" + strings.TrimSuffix(unit, ".service") + ".starts"
+			assert.NoError(t, os.WriteFile(path, []byte(mockUnitFile), 0o644))
+			assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run())
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit))
+				assert.NoError(t, os.Remove(path))
+				assert.NoError(t, os.RemoveAll(startsFile))
+				assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run())
+			}()
+
+			tc.expect(t, s, unit)
 		})
 	}
 }
@@ -687,28 +894,37 @@ func TestSystemd_Ping(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tc.expect(t, newTestSystemd(t).(*systemd))
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New().(*systemd)
+			defer s.Close()
+			tc.expect(t, s)
 		})
 	}
 }
 
 func TestSystemd_runJob(t *testing.T) {
 	tests := []struct {
-		name       string
-		jobTimeout time.Duration
-		expect     func(t *testing.T, s Systemd, unit *Unit)
+		name   string
+		expect func(t *testing.T, s Systemd, unit *Unit)
 	}{
 		{
-			name:       "job slower than the job timeout",
-			jobTimeout: 50 * time.Millisecond,
+			name: "job slower than the deadline of the request",
 			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
-				assert.ErrorIs(s.StartTransientUnit(t.Context(), unit), context.DeadlineExceeded)
+				ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+				defer cancel()
+				assert.ErrorIs(s.StartTransientUnit(ctx, unit), context.DeadlineExceeded)
 			},
 		},
 		{
-			name:       "request canceled while the job runs",
-			jobTimeout: defaultJobTimeout,
+			name: "request canceled while the job runs",
 			expect: func(t *testing.T, s Systemd, unit *Unit) {
 				assert := assert.New(t)
 				ctx, cancel := context.WithCancel(t.Context())
@@ -720,91 +936,33 @@ func TestSystemd_runJob(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			testutil.RequireSystemd(t)
-			s := New().(*systemd)
-			s.jobTimeout = tc.jobTimeout
-			t.Cleanup(s.Close)
-			unit := newTestUnit(t)
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			s := New()
+			defer s.Close()
+			sleep, err := exec.LookPath("sleep")
+			assert.NoError(t, err)
+			unit := &Unit{
+				Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
+				Description: "nydus-snapshotter unit test",
+				Slice:       mockUnitsSlice,
+				ExecStart:   []string{sleep, "300"},
+				TimeoutStop: 10 * time.Second,
+			}
+			defer func() {
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
+				assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
+			}()
+
 			unit.Notify = true
 			unit.TimeoutStart = 5 * time.Second
 			tc.expect(t, s, unit)
 		})
 	}
-}
-
-func newTestSystemd(t *testing.T) Systemd {
-	t.Helper()
-	testutil.RequireSystemd(t)
-	s := New()
-	t.Cleanup(s.Close)
-	return s
-}
-
-type socketActivated struct {
-	socket, service string
-	startsFile      string
-}
-
-func (u *socketActivated) starts(t *testing.T) int {
-	t.Helper()
-	data, err := os.ReadFile(u.startsFile)
-	assert.NoError(t, err)
-	return strings.Count(string(data), "\n")
-}
-
-func newSocketActivated(t *testing.T) *socketActivated {
-	t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	assert.NoError(t, err)
-	name := "nydus-test-activated-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30))
-	units := &socketActivated{socket: name + ".socket", service: name + ".service", startsFile: "/run/" + name + ".starts"}
-	files := map[string]string{
-		units.socket: "[Socket]\nListenStream=/run/" + name + ".sock\nRemoveOnStop=yes\n",
-		units.service: "[Unit]\nRequires=" + units.socket + "\nAfter=" + units.socket + "\n\n[Service]\nType=exec\n" +
-			"ExecStartPre=/bin/sh -c 'echo >> " + units.startsFile + "; sleep 0.5'\nExecStart=" + sleep + " 300\n",
-	}
-
-	reload := func() { assert.NoError(t, exec.Command("systemctl", "daemon-reload").Run()) }
-	t.Cleanup(func() {
-		s := New()
-		defer s.Close()
-		assert.NoError(t, s.StopUnit(context.Background(), units.service))
-		assert.NoError(t, s.StopUnit(context.Background(), units.socket))
-		for file := range files {
-			assert.NoError(t, os.Remove(filepath.Join("/run/systemd/system", file)))
-		}
-
-		assert.NoError(t, os.RemoveAll(units.startsFile))
-		reload()
-	})
-
-	for file, data := range files {
-		assert.NoError(t, os.WriteFile(filepath.Join("/run/systemd/system", file), []byte(data), 0o644))
-	}
-
-	reload()
-	return units
-}
-
-func newTestUnit(t *testing.T) *Unit {
-	t.Helper()
-	sleep, err := exec.LookPath("sleep")
-	assert.NoError(t, err)
-
-	unit := &Unit{
-		Name:        "nydus-test-" + strconv.Itoa(os.Getpid()) + "-" + strconv.Itoa(rand.IntN(1<<30)) + ".service",
-		Description: "nydus-snapshotter unit test",
-		Slice:       "nydustest" + strconv.Itoa(os.Getpid()) + "units.slice",
-		ExecStart:   []string{sleep, "300"},
-		TimeoutStop: 10 * time.Second,
-	}
-
-	t.Cleanup(func() {
-		s := New()
-		defer s.Close()
-		assert.NoError(t, s.StopUnit(context.Background(), unit.Name))
-		assert.NoError(t, s.StopUnit(context.Background(), unit.Slice))
-	})
-
-	return unit
 }

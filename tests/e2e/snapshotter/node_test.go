@@ -25,7 +25,6 @@ import (
 	dockerconfig "github.com/containerd/containerd/v2/core/remotes/docker/config"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/snapshotters"
-	"github.com/containerd/errdefs"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/opencontainers/image-spec/identity"
@@ -50,38 +49,33 @@ const (
 var containerdVersion = regexp.MustCompile(`\sv(\d+)\.\d+\.\d+`)
 
 type node struct {
-	client         *containerd.Client
-	ctx            context.Context
-	namespace      string
-	address        string
-	runcBin        string
-	snapshotterBin string
-	snapshotter    *mount.Daemon
-	config         string
-	dir            string
-	root           string
-	runDir         string
-	containerdDir  string
-	slice          string
-	dockerConfig   string
-	metricsAddress string
-	user           string
-	password       string
-	pause          string
-	service        string
-	kubeconfig     string
-	selector       string
-	memoryHigh     string
+	client              *containerd.Client
+	ctx                 context.Context
+	namespace           string
+	address             string
+	runcBin             string
+	nydusSnapshotterBin string
+	snapshotter         *mount.Daemon
+	config              string
+	dir                 string
+	root                string
+	runDir              string
+	containerdDir       string
+	slice               string
+	dockerConfig        string
+	metricsAddress      string
+	user                string
+	password            string
+	pause               string
+	kubeconfig          string
+	selector            string
+	memoryHigh          string
 }
 
 type nodeOption func(*node)
 
 func withCRI(pause string) nodeOption {
 	return func(n *node) { n.pause = pause }
-}
-
-func withSocketActivation() nodeOption {
-	return func(n *node) { n.service = n.namespace }
 }
 
 func withKubeSecret(kubeconfig, selector string) nodeOption {
@@ -93,13 +87,13 @@ func newNode(t *testing.T, opts ...nodeOption) *node {
 	containerdBin, runcBin := requireHost(t)
 	id := fmt.Sprintf("%08x", rand.Uint32())
 	n := &node{
-		namespace:      "nydus-e2e-" + id,
-		runcBin:        runcBin,
-		snapshotterBin: env.Snapshotter(t),
-		dir:            t.TempDir(),
-		runDir:         "/run/nydus-e2e-" + id,
-		containerdDir:  "/run/nydus-e2e-containerd-" + id,
-		slice:          "system-nyduse2e" + id + ".slice",
+		namespace:           "nydus-e2e-" + id,
+		runcBin:             runcBin,
+		nydusSnapshotterBin: env.Snapshotter(t),
+		dir:                 t.TempDir(),
+		runDir:              "/run/nydus-e2e-" + id,
+		containerdDir:       "/run/nydus-e2e-containerd-" + id,
+		slice:               "system-nyduse2e" + id + ".slice",
 	}
 	for _, opt := range opts {
 		opt(n)
@@ -195,12 +189,9 @@ func (n *node) writeConfig(t *testing.T) {
 		"metrics":     map[string]any{"addr": n.metricsAddress},
 		"registry":    map[string]any{"config_path": n.certsDir()},
 		"auth":        auth,
-		"nydusd": map[string]any{
-			"binary":  nydus,
-			"log_dir": n.daemonLogDir(),
-		},
-		"cgroup":  cgroup,
-		"preheat": map[string]any{"containerd_addr": n.containerdAddress()},
+		"containerd":  map[string]any{"addr": n.containerdAddress()},
+		"nydusd":      map[string]any{"binary": nydus},
+		"cgroup":      cgroup,
 	})
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -295,18 +286,9 @@ func (n *node) withHosts() containerd.RemoteOpt {
 	}))
 }
 
-func (n *node) daemonLogDir() string {
-	return filepath.Join(n.dir, "nydusd-logs")
-}
-
 func (n *node) startSnapshotter(t *testing.T, name string) {
 	t.Helper()
-	if n.service != "" {
-		n.startUnits(t)
-		return
-	}
-
-	n.snapshotter = mount.StartDaemon(t, n.dir, name, n.snapshotterBin, "--config", n.config)
+	n.snapshotter = mount.StartDaemon(t, n.dir, name, n.nydusSnapshotterBin, "--config", n.config)
 	n.snapshotter.WaitFor(t, startTimeout, "snapshotter socket", func() bool {
 		conn, err := net.Dial("unix", n.snapshotterAddress())
 		if err == nil {
@@ -315,40 +297,6 @@ func (n *node) startSnapshotter(t *testing.T, name string) {
 
 		return err == nil
 	})
-}
-
-func (n *node) startUnits(t *testing.T) {
-	t.Helper()
-	bin, err := filepath.Abs(n.snapshotterBin)
-	if !assert.NoError(t, err) {
-		t.FailNow()
-	}
-
-	replacer := strings.NewReplacer(
-		"nydus-snapshotter.socket", n.service+".socket",
-		"/usr/local/bin/nydus-snapshotter", bin,
-		"/etc/nydus-snapshotter/config.yaml", n.config,
-		"/run/nydus-snapshotter/nydus-snapshotter.sock", n.snapshotterAddress(),
-	)
-	for _, suffix := range []string{".socket", ".service"} {
-		shipped, err := os.ReadFile(deployPath(t, "systemd", "nydus-snapshotter"+suffix))
-		if !assert.NoError(t, err) {
-			t.FailNow()
-		}
-
-		unit := replacer.Replace(string(shipped))
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" && suffix == ".service" {
-			unit += "\n[Service]\nEnvironment=GOCOVERDIR=" + dir + "\n"
-		}
-
-		if !assert.NoError(t, os.WriteFile(filepath.Join(unitDir, n.service+suffix), []byte(unit), 0o644)) {
-			t.FailNow()
-		}
-	}
-
-	env.Run(t, "systemctl", "daemon-reload")
-	env.Run(t, "systemctl", "start", n.service+".socket")
-	assert.Equal(t, "inactive", unitProperty(n.service+".service", "ActiveState"))
 }
 
 func (n *node) startContainerd(t *testing.T, bin string) string {
@@ -434,28 +382,7 @@ disabled_plugins = [%s]
 func (n *node) teardown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if n.service != "" {
-		service, socket := n.service+".service", n.service+".socket"
-		if t.Failed() {
-			out, _ := exec.CommandContext(ctx, "journalctl", "--no-pager", "-o", "short-precise", "--unit", service).CombinedOutput()
-			t.Logf("journal of %s:\n%s", service, out)
-		}
-
-		_ = exec.CommandContext(ctx, "systemctl", "stop", service, socket).Run()
-		for _, unit := range []string{service, socket} {
-			_ = os.Remove(filepath.Join(unitDir, unit))
-		}
-
-		_ = exec.CommandContext(ctx, "systemctl", "daemon-reload").Run()
-	}
-
 	if t.Failed() {
-		logs, _ := filepath.Glob(filepath.Join(n.daemonLogDir(), "*", "*"))
-		for _, path := range logs {
-			data, _ := os.ReadFile(path)
-			t.Logf("%s:\n%s", path, data)
-		}
-
 		out, _ := exec.CommandContext(ctx, "journalctl", "--no-pager", "-o", "short-precise", "_SYSTEMD_SLICE="+n.slice).CombinedOutput()
 		t.Logf("journal of %s:\n%s", n.slice, out)
 	}
@@ -506,17 +433,6 @@ func (n *node) pull(t *testing.T, ref string, opts ...containerd.RemoteOpt) cont
 	}
 
 	return img
-}
-
-func (n *node) retryUnavailable(t *testing.T, try func() error) {
-	t.Helper()
-	var err error
-	if !assert.Eventually(t, func() bool {
-		err = try()
-		return !errdefs.IsUnavailable(err)
-	}, startTimeout, 200*time.Millisecond) || !assert.NoError(t, err) {
-		t.FailNow()
-	}
 }
 
 func (n *node) tryPull(ref string, opts ...containerd.RemoteOpt) (containerd.Image, error) {

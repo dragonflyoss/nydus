@@ -9,7 +9,6 @@ package registry
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/containerd/errdefs"
@@ -20,7 +19,7 @@ func TestHosts_Resolve(t *testing.T) {
 	tests := []struct {
 		name   string
 		host   string
-		roots  []string
+		root   string
 		files  map[string]string
 		expect func(t *testing.T, root string, endpoint *Endpoint, err error)
 	}{
@@ -256,36 +255,9 @@ server = "https://docker.io"
 			},
 		},
 		{
-			name:  "host dir of a later config path",
-			host:  "registry.example.com",
-			roots: []string{"first", "second"},
-			files: map[string]string{
-				"second/registry.example.com/hosts.toml": `server = "https://mirror.example.com"`,
-			},
-			expect: func(t *testing.T, root string, endpoint *Endpoint, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal("https://mirror.example.com", endpoint.Addr)
-			},
-		},
-		{
-			name:  "host dir of the first config path wins",
-			host:  "registry.example.com",
-			roots: []string{"first", "second"},
-			files: map[string]string{
-				"first/registry.example.com/hosts.toml":  `server = "https://first.example.com"`,
-				"second/registry.example.com/hosts.toml": `server = "https://second.example.com"`,
-			},
-			expect: func(t *testing.T, root string, endpoint *Endpoint, err error) {
-				assert := assert.New(t)
-				assert.NoError(err)
-				assert.Equal("https://first.example.com", endpoint.Addr)
-			},
-		},
-		{
-			name:  "no config path",
-			host:  "registry.example.com",
-			roots: []string{},
+			name: "no config path",
+			host: "registry.example.com",
+			root: "none",
 			expect: func(t *testing.T, root string, endpoint *Endpoint, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -424,7 +396,7 @@ server = "https://docker.io"
 		{
 			name:  "config path that is a file",
 			host:  "registry.example.com",
-			roots: []string{"file"},
+			root:  "file",
 			files: map[string]string{"file": ""},
 			expect: func(t *testing.T, root string, endpoint *Endpoint, err error) {
 				assert := assert.New(t)
@@ -454,13 +426,12 @@ server = "https://docker.io"
 			}
 
 			configPath := root
-			if tc.roots != nil {
-				paths := make([]string, 0, len(tc.roots))
-				for _, name := range tc.roots {
-					paths = append(paths, filepath.Join(root, name))
-				}
-
-				configPath = strings.Join(paths, string(filepath.ListSeparator))
+			switch tc.root {
+			case "none":
+				configPath = ""
+			case "":
+			default:
+				configPath = filepath.Join(root, tc.root)
 			}
 
 			endpoint, err := NewHosts(configPath).Resolve(tc.host)

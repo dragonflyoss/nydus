@@ -112,9 +112,9 @@ func (r *renderOptions) render() ([]byte, error) {
 	return data, nil
 }
 
-// renderConfig renders the daemon's config, with the keychain's credential,
-// and writes it into the daemon's runtime dir.
-func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, prefetchScope string) error {
+// renderDaemonConfig renders the daemon's config, with the keychain's
+// credential, and writes it into the daemon's runtime dir.
+func (f *fileSystem) renderDaemonConfig(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, prefetchScope string) error {
 	endpoint, err := f.hosts.Resolve(ref.Host)
 	if err != nil {
 		return err
@@ -125,16 +125,16 @@ func (f *fileSystem) renderConfig(ctx context.Context, cfg *config.Config, d *Da
 		return fmt.Errorf("resolve credential of %s: %w", ref.Name, err)
 	}
 
-	return f.writeConfig(cfg, ref, endpoint, d.RuntimeDir, d.ConfigPath, &renderOptions{
+	return f.writeNydusConfig(cfg, ref, endpoint, d.RuntimeDir, d.ConfigPath, &renderOptions{
 		auth:          credential,
 		prefetchScope: cmp.Or(prefetchScope, cfg.Nydusd.Config.Prefetch.Scope),
 	})
 }
 
-// writeConfig fills in what every nydus process reading the image shares,
+// writeNydusConfig fills in what every nydus process reading the image shares,
 // renders the config and writes it to path in dir, on tmpfs because the
 // config holds the credential.
-func (f *fileSystem) writeConfig(cfg *config.Config, ref *registry.Reference, endpoint *registry.Endpoint, dir, path string, opts *renderOptions) error {
+func (f *fileSystem) writeNydusConfig(cfg *config.Config, ref *registry.Reference, endpoint *registry.Endpoint, dir, path string, opts *renderOptions) error {
 	caCert, err := f.caBundle(endpoint.CACerts, dir)
 	if err != nil {
 		return err

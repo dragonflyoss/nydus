@@ -27,7 +27,6 @@ func TestNewDriver(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(err)
 				assert.Equal(config.DriverFUSE, driver.Name())
-				assert.Equal([]string{"NYDUS_FUSE_CONSOLE=false"}, driver.Environment())
 			},
 		},
 		{

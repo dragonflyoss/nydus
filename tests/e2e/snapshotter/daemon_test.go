@@ -14,7 +14,6 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/registry"
 	"github.com/stretchr/testify/assert"
@@ -224,40 +223,5 @@ func TestSnapshotterRestart(t *testing.T) {
 	assertFiles(t, first, img)
 	second := n.start(t, pulled)
 	assertFiles(t, second, img)
-	assert.Equal(t, invocation, n.assertRunning(t, unit))
-}
-
-func TestSocketActivation(t *testing.T) {
-	t.Parallel()
-	n := newNode(t, withSocketActivation())
-	service, socket := n.service+".service", n.service+".socket"
-	img := newImage(t, registry.Start(t), "snapshotter/socket-activation")
-	var pulled containerd.Image
-	n.retryUnavailable(t, func() (err error) {
-		pulled, err = n.tryPull(img.nydus, containerd.WithImageHandlerWrapper(snapshotters.AppendInfoHandlerWrapper(img.nydus)))
-		return err
-	})
-	unit := n.unit(t, pulled)
-	first := n.start(t, pulled)
-	assertFiles(t, first, img)
-	invocation := n.assertRunning(t, unit)
-	activated := show(t, service, "ActiveState", "InvocationID")
-	assert.Equal(t, "active", activated["ActiveState"])
-	listening := show(t, socket, "ActiveState", "InvocationID")
-	assert.Equal(t, "active", listening["ActiveState"])
-
-	env.Run(t, "systemctl", "stop", service)
-	assert.Equal(t, listening, show(t, socket, "ActiveState", "InvocationID"))
-	assertFiles(t, first, img)
-	var second *container
-	n.retryUnavailable(t, func() (err error) {
-		second, err = n.tryStart(pulled)
-		return err
-	})
-	assertFiles(t, second, img)
-	reactivated := show(t, service, "ActiveState", "InvocationID")
-	assert.Equal(t, "active", reactivated["ActiveState"])
-	assert.NotEqual(t, activated["InvocationID"], reactivated["InvocationID"])
-	assert.Equal(t, listening, show(t, socket, "ActiveState", "InvocationID"))
 	assert.Equal(t, invocation, n.assertRunning(t, unit))
 }

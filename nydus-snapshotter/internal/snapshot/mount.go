@@ -115,8 +115,7 @@ func (s *snapshotter) checkUnlabelledNydus(layers []layer) error {
 	return nil
 }
 
-// overlayMounts returns the mounts of a snapshot over lower dirs, top first,
-// as containerd's overlay snapshotter does.
+// overlayMounts returns the mounts of a snapshot over lower dirs, top first.
 func (s *snapshotter) overlayMounts(snap storage.Snapshot, lowers []string) []mount.Mount {
 	// overlayfs needs a lower dir; without one, bind the snapshot's own dir.
 	if len(lowers) == 0 {

@@ -115,6 +115,39 @@ pub fn init_tracing(
     Ok(guards)
 }
 
+/// Initializes the tracing system for a service run by systemd, which logs to
+/// the systemd journal alone, with the level of an event as its priority and
+/// `name` as its syslog identifier. The journal keeps and rotates the logs of
+/// a service, refer to
+/// https://www.freedesktop.org/software/systemd/man/latest/daemon.html.
+///
+/// It returns no guard, the journal layer writes an event when it is logged.
+pub fn init_journald_tracing(name: &str, log_level: Level) -> io::Result<Vec<WorkerGuard>> {
+    // Setup journald layer, the one step that can fail.
+    let journald_logging_layer = tracing_journald::layer()
+        .map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!("failed to connect to the systemd journal: {err}"),
+            )
+        })?
+        .with_syslog_identifier(name.to_string());
+
+    // Setup env filter for log level.
+    let env_filter = EnvFilter::from_default_env().add_directive(log_level.into());
+    let subscriber = Registry::default()
+        .with(env_filter)
+        .with(journald_logging_layer);
+    // try_init: a process only installs one global subscriber; tolerate an
+    // existing one so repeated init calls (e.g. tests sharing a binary) work.
+    let _ = subscriber.try_init();
+
+    std::panic::set_hook(Box::new(tracing_panic::panic_hook));
+    info!("tracing initialized journald, level: {}", log_level);
+
+    Ok(vec![])
+}
+
 /// Initializes the tracing system for command line tools, which logs to
 /// stderr and does not log to files. Diagnostics stay off stdout so command
 /// payloads and reports (tar streams, tables) remain clean.
@@ -189,5 +222,15 @@ mod tests {
             .unwrap();
 
         assert!(err.to_string().contains("failed to create log directory"));
+    }
+
+    #[test]
+    fn init_journald_tracing_returns_no_guards_or_fails_without_a_journal() {
+        match init_journald_tracing("test-service", Level::INFO) {
+            Ok(guards) => assert!(guards.is_empty()),
+            Err(err) => assert!(err
+                .to_string()
+                .contains("failed to connect to the systemd journal")),
+        }
     }
 }

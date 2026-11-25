@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,8 +20,11 @@ import (
 
 	authmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth/mocks"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/kmutex"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd"
 	nydusdmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/nydusd/mocks"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/registry"
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 	systemdmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd/mocks"
 )
 
@@ -186,7 +190,7 @@ func TestRenderOptions_render(t *testing.T) {
 	}
 }
 
-func TestFileSystem_renderConfig(t *testing.T) {
+func TestFileSystem_renderDaemonConfig(t *testing.T) {
 	tests := []struct {
 		name          string
 		cas           []string
@@ -294,8 +298,35 @@ func TestFileSystem_renderConfig(t *testing.T) {
 			driver := NewMockDriver(ctl)
 			driver.EXPECT().Name().Return(config.DriverFUSE).AnyTimes()
 
-			f, image := newTestFileSystem(t, systemdmocks.NewMockSystemd(ctl), keychain, driver, nydusdmocks.NewMockClient(ctl))
-			cfg := f.cfg.Load()
+			root := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(root, "lib")
+			cfg.RuntimeDir = filepath.Join(root, "run")
+			cfg.Registry.ConfigPath = ""
+			cfg.Nydusd.Binary = filepath.Join(root, "nydus")
+			cfg.Nydusd.MountTimeout = config.Duration(2 * time.Second)
+			cfg.Cgroup = config.CgroupConfig{Slice: config.DefaultCgroupSlice}
+			assert.NoError(t, os.CopyFS(root, mockRootFS))
+			assert.NoError(t, os.MkdirAll(cfg.CacheDir(), 0o700))
+
+			s, err := store.New(filepath.Join(root, "nydusd.db"), store.DefaultOpenTimeout)
+			assert.NoError(t, err)
+			t.Cleanup(func() { s.Close() })
+
+			f := &fileSystem{
+				systemd:   systemdmocks.NewMockSystemd(ctl),
+				store:     s,
+				keychain:  keychain,
+				hosts:     registry.NewHosts(""),
+				driver:    driver,
+				newClient: func(string) nydusd.Client { return nydusdmocks.NewMockClient(ctl) },
+				locker:    kmutex.New(),
+				startLock: &sync.Mutex{},
+				preheats:  newPreheatQueue(cfg.Preheat.MaxConcurrentImages),
+			}
+			f.cfg.Store(cfg)
+			image := &Image{ChainID: mockChainID, Ref: mockImageRef, BootstrapDir: filepath.Join(root, "bootstrap", "fs"), PrefetchScope: "all"}
+
 			cfg.Registry.ConfigPath = t.TempDir()
 			hostDir := filepath.Join(cfg.Registry.ConfigPath, "registry.example.com")
 			assert.NoError(t, os.MkdirAll(hostDir, 0o755))
@@ -314,7 +345,7 @@ func TestFileSystem_renderConfig(t *testing.T) {
 				tc.prepare(t, cfg, hostDir, d)
 			}
 
-			err = f.renderConfig(t.Context(), cfg, d, ref, tc.prefetchScope)
+			err = f.renderDaemonConfig(t.Context(), cfg, d, ref, tc.prefetchScope)
 			rendered := map[string]any{}
 			if err == nil {
 				data, readErr := os.ReadFile(d.ConfigPath)

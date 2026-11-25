@@ -53,20 +53,6 @@ func (mr *MockDriverMockRecorder) Args(d any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Args", reflect.TypeOf((*MockDriver)(nil).Args), d)
 }
 
-// Environment mocks base method.
-func (m *MockDriver) Environment() []string {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Environment")
-	ret0, _ := ret[0].([]string)
-	return ret0
-}
-
-// Environment indicates an expected call of Environment.
-func (mr *MockDriverMockRecorder) Environment() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Environment", reflect.TypeOf((*MockDriver)(nil).Environment))
-}
-
 // Mounted mocks base method.
 func (m *MockDriver) Mounted(d *Daemon) (bool, error) {
 	m.ctrl.T.Helper()

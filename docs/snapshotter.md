@@ -41,8 +41,7 @@ implementation today:
       reload/restart over D-Bus, keep the service account token in sync
 
  host systemd
-   ├─ nydus-snapshotter.socket   ─┐ gRPC socket held by systemd
-   ├─ nydus-snapshotter.service  ◄┘ Before=containerd.service
+   ├─ nydus-snapshotter-v3.service  Before=containerd.service
    │    snapshot   overlay-style snapshotter on core/snapshots/storage
    │    fs         v3 file system: per-image instance, lock, render, start, wait,
    │               credential push
@@ -72,7 +71,7 @@ upgrades it.
 /sys/fs/cgroup
 ├── system.slice
 │   ├── containerd.service
-│   ├── nydus-snapshotter.service             snapshotter; no memory or CPU limit, OOMScoreAdjust=-999
+│   ├── nydus-snapshotter-v3.service          snapshotter; no memory or CPU limit, OOMScoreAdjust=-999
 │   └── system-nydusd.slice                   total for every nydusd: MemoryMax, MemoryHigh, CPUQuotaPerSecUSec
 │       ├── nydusd-<chainID>.service          each: MemoryHigh, CPUQuotaPerSecUSec,
 │       └── nydusd-<chainID>.service                OOMScoreAdjust=-999, LimitNOFILE
@@ -81,10 +80,10 @@ upgrades it.
 
 Daemons are transient units forked by PID 1. They are never children of the
 snapshotter, and their units carry no `PartOf=`, `BindsTo=` or `Requires=` on
-`nydus-snapshotter.service`. So a snapshotter crash, OOM kill, restart or
+`nydus-snapshotter-v3.service`. So a snapshotter crash, OOM kill, restart or
 upgrade leaves every daemon and mount running, and a daemon never shares the
 snapshotter's cgroup budget. The snapshotter never forks a daemon itself; a
-forked daemon would land in `nydus-snapshotter.service` and die with it.
+forked daemon would land in `nydus-snapshotter-v3.service` and die with it.
 
 The daemons run in one slice, `system-nydusd.slice`, which holds their total
 budget. It is named as systemd names the slice of a service's instances
@@ -296,7 +295,7 @@ namespace stands on, skips daemons both marked and running without a lock or a
 D-Bus call, and for every other daemon of `system-nydusd.slice` walks the
 metastore again under the per-chainID lock, as containerd's GC marks before it
 sweeps. A daemon still unused gets `StopUnit` (wait for the job; `NoSuchUnit` is
-success), `Driver.Unmount`, and its record, instance directory and log directory
+success), `Driver.Unmount`, and its record and instance directory
 deleted. Eight daemons are handled at a time, as kubelet kills the containers
 of a pod together; one that fails to stop is logged and tried again by the
 next pass, and does not hold up the others. Mount and teardown hold the same
@@ -310,10 +309,9 @@ container by one GC interval.
 ### Snapshotter start and stop
 
 1. Open both bbolt files with a timeout.
-2. Take the gRPC listener from systemd socket activation
-   (`activation.Listeners`, as soci-snapshotter does); without activation, dial
-   the path first and remove it only when nothing answers, then listen. Message
-   size limits match containerd's proxy client.
+2. Listen on `grpc.addr`, a socket the snapshotter binds itself, as
+   stargz-snapshotter does: dial the path first and remove it only when nothing
+   answers, then listen. Message size limits match containerd's proxy client.
 3. In the background, reconcile: records whose unit is gone are deleted, and the
    teardown worker runs once.
 4. Serve the snapshots API and, on the same socket, the
@@ -586,14 +584,13 @@ CPUQuotaPerSecUSec <cgroup.daemon.cpu_quota>
 StandardOutput     journal
 SyslogIdentifier   nydusd
 LogExtraFields     NYDUS_CHAIN_ID=sha256:<chainID>
-ExecStart          /opt/nydus-snapshotter/bin/<ver>/nydus fuse
+ExecStart          /opt/nydus-snapshotter/versions/<ver>/nydus fuse
                      --bootstrap  /var/lib/nydus-snapshotter/nydusd/<chainID>/image.boot
                      --config     /run/nydus-snapshotter/nydusd/<chainID>/config.yaml
                      --mountpoint /var/lib/nydus-snapshotter/nydusd/<chainID>/mnt
                      --apiserver  unix:///run/nydus-snapshotter/nydusd/<chainID>.sock
-                     --log-dir    /var/log/nydus-snapshotter/nydusd/<chainID>
-                     --log-level  <nydusd.log_level>
-                     --log-max-files <nydusd.log_max_files>
+                     --log-level  <nydusd.log.level>
+                     --log-journald
                      --fsname     nydus-<chainID[:12]>
 ```
 
@@ -647,6 +644,11 @@ metrics:
   # Address of /metrics, empty to disable.
   addr: 127.0.0.1:4010
 
+containerd:
+  # Socket of containerd. A preheat asks it for the layers of an image, and the
+  # installer whether it loaded the snapshotter.
+  addr: /run/containerd/containerd.sock
+
 registry:
   # containerd certs.d directory of <host>/hosts.toml and docker-style certificates.
   config_path: /etc/nydus-snapshotter/certs.d
@@ -661,14 +663,58 @@ auth:
     kubeconfig: /run/nydus-snapshotter/kubernetes/kubeconfig
     label_selector: ''
 
+cgroup:
+  # Slice the daemons run in, which holds their total budget below.
+  slice: system-nydusd.slice
+  # Total of every daemon.
+  memory_max: 8GiB
+  memory_high: 6GiB
+  cpu_quota: 400%
+  daemon:
+    memory_high: 1GiB
+    cpu_quota: 100%
+
+gc:
+  interval: 15m
+  policy:
+    # An unused blob's cache is evicted this long after a daemon last used it.
+    blob_ttl: 720h
+    # Capacity the disk thresholds apply to, 0 for the whole filesystem.
+    disk_threshold: '0'
+    disk_high_threshold_percent: 80
+    disk_low_threshold_percent: 60
+
+# A preheat downloads every blob of an image containerd has pulled, started
+# over the gRPC socket by PreheatImage.
+preheat:
+  # Images preheated at once, the rest wait. Each one downloads
+  # nydusd.config.prefetch.concurrent_blob_count blobs at once.
+  max_concurrent_images: 1
+
+# Read only by the installer, nydus-snapshotter install, once when it starts;
+# the snapshotter ignores it.
+installer:
+  # Where the Pod mounts its service account token and CA.
+  service_account_path: /var/run/secrets/kubernetes.io/serviceaccount
+  # How often the token and the config are copied to the host and the node
+  # label is checked.
+  sync_interval: 1m
+  registries:
+    # Install the certs.d of the ConfigMap to registry.config_path on the
+    # host. Without it the host keeps its own.
+    enable: false
+  node_label:
+    # Label the node NODE_NAME names d7y.io/nydus-snapshotter=true while the
+    # snapshotter serves and containerd has loaded it.
+    enable: false
+
 nydusd:
   driver: fuse
   binary: /opt/nydus-snapshotter/bin/current/nydus
-  log_dir: /var/log/nydus-snapshotter/nydusd
-  # Log level of a daemon, one of trace, debug, info, warn or error.
-  log_level: info
-  # Log files a daemon keeps.
-  log_max_files: 6
+  log:
+    # Log level of a daemon, one of trace, debug, info, warn or error. A daemon
+    # logs to the journal, as the snapshotter does: journalctl -u <its unit>.
+    level: info
   mount_timeout: 10s
   # systemd kills a daemon that sent no keep-alive for this long, 0 to disable.
   watchdog_timeout: 3m
@@ -725,56 +771,6 @@ nydusd:
       retry_interval: 6h
       # One of none, ondemand, all or auto.
       scope: auto
-
-cgroup:
-  # Slice the daemons run in, which holds their total budget below.
-  slice: system-nydusd.slice
-  # Total of every daemon.
-  memory_max: 8GiB
-  memory_high: 6GiB
-  cpu_quota: 400%
-  daemon:
-    memory_high: 1GiB
-    cpu_quota: 100%
-
-gc:
-  interval: 15m
-  policy:
-    # An unused blob's cache is evicted this long after a daemon last used it.
-    blob_ttl: 720h
-    # Capacity the disk thresholds apply to, 0 for the whole filesystem.
-    disk_threshold: '0'
-    disk_high_threshold_percent: 80
-    disk_low_threshold_percent: 60
-
-# A preheat downloads every blob of an image containerd has pulled, started
-# over the gRPC socket by PreheatImage.
-preheat:
-  # Images preheated at once, the rest wait. Each one downloads
-  # nydusd.config.prefetch.concurrent_blob_count blobs at once.
-  max_concurrent_images: 1
-  # Socket of containerd, asked for the layers of the image a preheat names.
-  containerd_addr: /run/containerd/containerd.sock
-
-# Read only by the installer, nydus-snapshotter install, once when it starts;
-# the snapshotter ignores it.
-installer:
-  # Where the Pod mounts the root filesystem of the host, the payload of the
-  # image (bin/ and systemd/), its service account token and the certs.d of
-  # the ConfigMap. They follow the volumeMounts of the DaemonSet.
-  rootfs_dir: /host
-  payload_dir: /opt/nydus-snapshotter/payload
-  token_dir: /var/run/secrets/kubernetes.io/serviceaccount
-  registry_config_path: /etc/nydus-snapshotter/certs.d
-  # How often the token and the config are copied to the host and the node
-  # label is checked.
-  sync_interval: 1m
-  node_label:
-    # Label the node NODE_NAME names d7y.io/nydus-snapshotter=true while the
-    # snapshotter serves and containerd has loaded it.
-    enable: false
-    # Socket of the host's containerd, asked whether it loaded the snapshotter.
-    containerd_addr: /run/containerd/containerd.sock
 ```
 
 The `installer` section holds every setting of `nydus-snapshotter install`,
@@ -785,8 +781,8 @@ flags. The installer reads the section once, when it starts, so a change
 takes a rollout of the DaemonSet. The snapshotter ignores it, also on a
 reload.
 
-`registry.config_path` is a containerd certs.d directory, or a list of them as
-CRI's `config_path` is, read with containerd's lookup and its
+`registry.config_path` is a containerd certs.d directory, read with
+containerd's lookup and its
 [hosts.toml](https://github.com/containerd/containerd/blob/main/docs/hosts.md)
 format, so it can share the files containerd uses. A daemon reads from one
 registry, the `server`: `[host]` mirrors are ignored, a `server` of
@@ -843,11 +839,11 @@ snapshotter (`/etc/nydus`, `/run/containerd-nydus`, `/var/lib/containerd-nydus`)
 | Path | Contents | Writer → reader |
 | --- | --- | --- |
 | `/usr/local/bin/nydus-snapshotter` | Snapshotter binary | Installer → systemd |
-| `/etc/systemd/system/nydus-snapshotter.{service,socket}` | Snapshotter units | Installer → systemd |
+| `/etc/systemd/system/nydus-snapshotter-v3.service` | Snapshotter unit | Installer → systemd |
 | `/etc/nydus-snapshotter/config.yaml` | Snapshotter config | Installer (from ConfigMap) → snapshotter |
-| `/etc/nydus-snapshotter/certs.d/<host>/hosts.toml` | Registry TLS and scheme | Installer → snapshotter |
+| `<registry.config_path>/<host>/hosts.toml`, by default under `/etc/nydus-snapshotter/certs.d` | Registry TLS and scheme | Installer → snapshotter |
 | `/run/nydus-snapshotter/kubernetes/{kubeconfig,token,ca.crt}` | API access for kube_secret | Installer → snapshotter |
-| `/run/nydus-snapshotter/nydus-snapshotter.sock` | gRPC socket | systemd / snapshotter → containerd |
+| `/run/nydus-snapshotter/nydus-snapshotter.sock` | gRPC socket | snapshotter → containerd |
 | `/run/nydus-snapshotter/nydusd/<chainID>.sock` | Daemon API | nydusd → snapshotter |
 | `/run/nydus-snapshotter/nydusd/<chainID>/{config.yaml,ca.pem}` | Rendered daemon config (holds the credential) | snapshotter → nydusd |
 | `/run/nydus-snapshotter/preheat/<chainID>/config.yaml` | Rendered preheat config (holds the credential), removed when the process exits | snapshotter → nydus preheat |
@@ -857,10 +853,8 @@ snapshotter (`/etc/nydus`, `/run/containerd-nydus`, `/var/lib/containerd-nydus`)
 | `/var/lib/nydus-snapshotter/snapshots/<id>/{fs,work}` | Overlay upper and work dirs; bootstrap `fs/image/` | snapshotter, containerd |
 | `/var/lib/nydus-snapshotter/nydusd/<chainID>/{image.boot,mnt/}` | Linked bootstrap, FUSE mountpoint | snapshotter, nydusd |
 | `/var/lib/nydus-snapshotter/cache/` | Shared blob cache | nydusd |
-| `/var/log/nydus-snapshotter/nydusd/<chainID>/` | Daemon file logs, kept a day after a failed start; stderr goes to the journal | nydusd |
-| `/var/log/nydus-snapshotter/nydusd/preheat/` | File logs of every preheat process | nydus preheat |
-| `/opt/nydus-snapshotter/bin/<version>/nydus`, `/opt/nydus-snapshotter/bin/current` | Daemon binaries; a switch keeps the current and previous versions | Installer → systemd |
-| `/run/nydus-snapshotter/restart-pending` | Units due a restart, until they restart | Installer |
+| `/opt/nydus-snapshotter/versions/<version>/nydus`, linked from `nydusd.binary` | Daemon binaries; a switch keeps the current and previous versions | Installer → systemd |
+| `/run/nydus-snapshotter/restart-required` | Marks the service due a restart, until it restarts | Installer |
 
 `<chainID>` is the hex digest of the bootstrap layer's chain ID.
 
@@ -883,10 +877,17 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
 
 ## Deployment
 
-- **Host units**, installed by the DaemonSet (or baked into the node image):
-  - `nydus-snapshotter.socket` (`ListenStream=` the gRPC path, `SocketMode=0600`)
-    and `nydus-snapshotter.service` (`Before=containerd.service`,
-    `OOMScoreAdjust=-999`, default `KillMode=control-group`).
+- **Host unit**, installed by the DaemonSet (or baked into the node image):
+  - `nydus-snapshotter-v3.service` (`Before=containerd.service`,
+    `OOMScoreAdjust=-999`, default `KillMode=control-group`). The service
+    binds its gRPC socket itself, mode `0600`, as stargz-snapshotter and
+    containerd do. Its name carries the major version so it runs beside a
+    v2 snapshotter, whose deploy script (`misc/snapshotter/snapshotter.sh`)
+    installs, stops and removes `nydus-snapshotter.service` by name: a v3
+    unit of that name would replace a running v2 and be removed with it.
+    containerd names a shim generation the same way
+    (`containerd-shim-runc-v2`), and a Go module path ends in its major
+    version.
 - **Helm chart `nydus-snapshotter`** in
   [dragonflyoss/helm-charts](https://github.com/dragonflyoss/helm-charts/tree/main/charts/nydus-snapshotter),
   the only Kubernetes deployment. Its DaemonSet runs in `kube-system`,
@@ -900,33 +901,39 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
     the DaemonSet mounts the ConfigMap, as the charts of
     node-feature-discovery and Dragonfly's dfinit mount a ConfigMap at their
     binary's default config path. The image carries the default config there.
-    The `certs.d` it installs is the directory
-    `installer.registry_config_path` names, where the same mount puts the
-    ConfigMap's, as Istio's CNI installer is told its source and target
-    directories and derives neither.
+    With `installer.registries.enable` it also installs the `certs.d`
+    the same mount puts beside the config; without it, the default, the host
+    keeps its own. The paths of its Pod are fixed, as Istio's CNI installer
+    fixes its own: the host root at `/host`, and every file of the image at
+    the path it is installed to on the host (`/usr/local/bin`,
+    `/etc/systemd/system`, `/etc/nydus-snapshotter`); only `nydus` goes from
+    `/usr/local/bin` to its version directory. What the snapshotter finds by
+    its config, the installer puts where the config says: `nydus` behind
+    `nydusd.binary`, the kubeconfig at `auth.kube_secret.kubeconfig`, and it
+    checks the snapshotter at `grpc.addr`, and certs.d goes to
+    `registry.config_path`.
     Its own settings are the `installer` section of that file. A file that
     cannot be loaded ends the installer with the error before it writes
     anything to the host, the service account token included.
   - The installer checks that the host's systemd answers before it writes
     anything to the host, as kubeadm runs its preflight checks first;
     validates `config.yaml` and every
-    `hosts.toml` by the rules a daemon start applies, rejects a config whose
-    `grpc.addr`, `nydusd.binary`, kubeconfig or certs.d directory is not the
-    path it sets up, copies binaries, units and config from its image and
+    `hosts.toml` by the rules a daemon start applies,
+    copies binaries, the unit and config from its image and
     ConfigMap to the host, then `EnableUnitFiles` over D-Bus. A file is
     compared by digest and copied as a stream to `<file>.tmp` beside it, synced
     and renamed, as the Calico and Cilium CNI installers do, so no binary is
     held in memory and a copy that died is overwritten by the next. Only a
     change the snapshotter reads at start restarts it: its binary, its unit
-    files or `config.yaml`; otherwise both units are started, which a running
-    unit ignores, as a package's `postinst` does. A socket change restarts the
-    socket, which restarts the running service with it (`Requires=`); the
-    installer then only starts the service, which waits for that restart
-    instead of causing another. A start or restart is given five minutes,
-    over the 90s systemd allows a stop and a start each by default. A new
-    `nydus` lands in its own version directory behind the `current` link, read
-    per daemon start. The units due a restart are recorded on tmpfs before any
-    file is written, so a run that dies midway is finished by the next. Host
+    file or `config.yaml`; otherwise the service is started, which a running
+    unit ignores, as a package's `postinst` does. A start or restart is given
+    five minutes, over the 90s systemd allows a stop and a start each by
+    default. A new `nydus` lands in its own version directory,
+    `/opt/nydus-snapshotter/versions/<version>/`, and `nydusd.binary` is
+    linked to it, as Teleport's updater links the binaries of a version into
+    a path; a daemon start resolves the link. A restart that is due is recorded
+    on tmpfs before any file is written, so a run that dies midway is
+    finished by the next. Host
     paths resolve within `/host`, so an absolute symlink on the host is
     followed there (`continuity/fs.RootPath`).
   - Stays running to keep `/run/nydus-snapshotter/kubernetes/token` in sync with its
@@ -950,7 +957,7 @@ Side effects (D-Bus, mount waits) never run inside a bbolt write transaction.
     ServiceAccount of the post-delete hook, which exists only while the hook
     runs.
   - A node whose containerd already uses `nydus` as its snapshotter needs the
-    units baked into its image: the installer Pod's own sandbox goes through the
+    unit baked into its image: the installer Pod's own sandbox goes through the
     snapshotter.
 - **A `version = 2` config**, of containerd 1.6 or of a 2.x still reading one:
 
@@ -999,10 +1006,10 @@ selects it, as a RuntimeClass of kata-deploy selects
 
 ```text
 snapshotter SERVING ──┐
-                      ├─▶ both ───────────────────▶ d7y.io/nydus-snapshotter=true
-containerd loaded it ─┘   else, 3 checks in a row ─▶ label removed
-installer stops ─────────────────────────────────▶ label kept
-helm uninstall ──────────────────────────────────▶ label removed by a hook
+                      ├─▶ both ─▶ d7y.io/nydus-snapshotter=true
+containerd loaded it ─┘   else ─▶ label removed
+installer stops ────────────────▶ label kept
+helm uninstall ─────────────────▶ label removed by a hook
 ```
 
 ```yaml
@@ -1019,7 +1026,7 @@ nodeSelector:
   plugin. containerd reads its config only when it starts, and the file a
   node uses may come from `imports` or from a distribution's own path, so the
   installer does not read or watch a config file. It asks the running
-  containerd (`installer.node_label.containerd_addr`) for its loaded
+  containerd (`containerd.addr`) for its loaded
   snapshotter plugins over the introspection API, as `ctr plugins ls`, nerdctl
   and BuildKit do, and looks for the proxy plugin whose exported `address` is
   the snapshotter's socket, compared as host paths, whatever its name.
@@ -1034,14 +1041,14 @@ nodeSelector:
   reaching etcd. At 5000 nodes that is about 83 reads a second, next to the
   500 Lease renewals a second their kubelets write, and API Priority and
   Fairness keeps the requests of a ServiceAccount apart from the kubelets'.
-- **The label does not flap**: a Pod scheduled by its `nodeSelector` keeps
-  running when the label goes away, but the DaemonSet controller deletes the
-  Pods of a DaemonSet that selects the label from a node that lost it. So
-  the label is set on the first check that passes and removed only after
-  three checks in a row fail, the default `failureThreshold` of a probe,
-  which a restart of containerd does not reach. And an installer that stops
-  keeps the label: a rollout hands the node to the next installer Pod, which
-  takes the label over.
+- **The label follows each check**: it is set on a check that passes and
+  removed on one that fails, and the next sync puts it right again. A Pod
+  scheduled by its `nodeSelector` keeps running when the label goes away,
+  but the DaemonSet controller deletes the Pods of a DaemonSet that selects
+  the label from a node that lost it, so a check that fails while the
+  snapshotter or containerd restarts costs those Pods a restart. An
+  installer that stops keeps the label: a rollout hands the node to the
+  next installer Pod, which takes the label over.
 - **`helm uninstall` removes it with a hook**: the installers keep the label
   when they stop, and helm deletes their ClusterRole before that anyway. The
   chart therefore runs `nydus-snapshotter uninstall` in a post-delete hook Job,
@@ -1157,14 +1164,14 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 │   ├── auth/                       Keychain (keychain.go), keyring, kube_secret and docker config providers
 │   ├── registry/                   image reference, hosts.toml
 │   ├── cache/                      blob cache GC
-│   ├── installer/                  host install: installer.go, payload.go, kubeconfig.go, version.go, label.go
+│   ├── installer/                  host install: installer.go, file.go, kubeconfig.go, version.go, label.go
 │   ├── uninstaller/                the post-delete hook: removes the node label from every node
-│   ├── server/                     wiring, gRPC serving, socket activation, workers
+│   ├── server/                     wiring, gRPC serving, workers
 │   ├── version/                    -ldflags build information
 │   ├── kmutex/                     keyed mutex (from containerd internal/kmutex)
 │   ├── metrics/                    Prometheus collectors, /metrics server
 │   └── util/                       kubeutil/ (API server client of a Pod, for installer and uninstaller), testutil/ (helpers tests share)
-├── deploy/                         systemd units, default config, containerd snippets
+├── deploy/                         systemd unit, default config, containerd snippets
 ├── Dockerfile                      installer image: nydus-snapshotter and nydus
 ├── Makefile                        build, test, lint, generate
 ├── .golangci.yml
@@ -1228,7 +1235,7 @@ keeps the first definition read, so one daemon never costs the scrape.
   `x.go`; systemd and the daemon API faked behind interfaces. Statement
   coverage is 94% from unit tests alone; what is left is failures that need
   a fault no test can make (a `fsync` or `close` that fails, systemd gone
-  mid-call) and socket activation, which the e2e suite runs. Failure
+  mid-call). Failure
   branches are reached with real faults, not mocks of the standard library:
   a file in place of a directory, a symlink loop under the host root, a
   directory under a file's name, a tmpfs that is full or has no free inode,
@@ -1256,15 +1263,14 @@ keeps the first definition read, so one daemon never costs the scrape.
   gRPC health check, and a changed `cgroup.daemon.memory_high` reaching a
   running daemon without a restart, a `hosts.toml` that sends a registry
   host to another server, and a container in a user namespace that owns its
-  root file system. Five cases go beyond the client: a pod pulled and run over CRI with the shipped
-  containerd snippet, as containerd's own integration tests drive it; the
-  shipped socket and service units, where a stopped service is started again
-  by the next request; one daemon shared by two containerd namespaces, kept
+  root file system. Four cases go beyond the client: a pod pulled and run over CRI with the shipped
+  containerd snippet, as containerd's own integration tests drive it; one
+  daemon shared by two containerd namespaces, kept
   when the first removes its image; and a registry credential rotated through
   a Kubernetes secret, read with an account that may only list and watch
   secrets and pushed into the running daemon; and the installer on a Kind
   node image booted as a systemd host, where it installs and starts the
-  shipped units, changes nothing on a rerun, survives a reboot, switches the
+  shipped unit, changes nothing on a rerun, survives a reboot, switches the
   nydus version and restarts the service on an upgrade, and keeps the
   kubeconfig and the service account token in sync. A preheat runs against a
   private registry the snapshotter has no credential for: a wrong password
@@ -1281,7 +1287,7 @@ keeps the first definition read, so one daemon never costs the scrape.
   `docs/snapshotters/remote-snapshotter.md`, `RELEASES.md`.
 - stargz-snapshotter: `snapshot/snapshot.go` (FileSystem port, async removal),
   `cmd/containerd-stargz-grpc/main.go`, systemd unit.
-- soci-snapshotter: socket activation, systemd unit, CRI config handling.
+- soci-snapshotter: systemd unit, CRI config handling.
 - accelerated-container-image (overlaybd): host unit, restore on start.
 - runc / opencontainers cgroups: `cgroups/systemd` (D-Bus, transient units,
   retries, slice naming).
@@ -1295,9 +1301,8 @@ keeps the first definition read, so one daemon never costs the scrape.
   and a ClusterRole that are hooks too); nerdctl `pkg/infoutil`, `ctr plugins`
   and BuildKit's containerd worker (asking the running containerd for its
   plugins through the introspection API); client-go `tools/pager`; kubelet's
-  `kubeAPIQPS` and `kubeAPIBurst` defaults and the `failureThreshold` of a
-  probe; the DaemonSet controller, which deletes its Pods from a node that
-  no longer matches the `nodeSelector`.
+  `kubeAPIQPS` and `kubeAPIBurst` defaults; the DaemonSet controller, which
+  deletes its Pods from a node that no longer matches the `nodeSelector`.
 - Installer config: kubelet `cmd/kubelet/app/options` (`KubeletFlags` keeps
   only what nodes cannot share, the rest is `KubeletConfiguration`, which
   holds `containerRuntimeEndpoint`), Cilium (agent and operator read one

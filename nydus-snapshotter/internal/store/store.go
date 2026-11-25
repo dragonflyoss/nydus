@@ -7,7 +7,7 @@
 //go:generate mockgen -destination mocks/store_mock.go -source store.go -package mocks
 
 // Package store persists daemon instances and blob access times in bbolt,
-// with a versioned bucket layout like containerd's metadata store.
+// with a versioned bucket layout.
 package store
 
 import (
@@ -23,8 +23,7 @@ import (
 const (
 	// dbVersion counts the compatible additions to the v1 layout. An
 	// incompatible change moves to a v2 bucket, so a rolled-back binary reads
-	// a newer dbVersion as is, as containerd's metadata store does, refer to
-	// https://github.com/containerd/containerd/blob/main/core/metadata/db.go.
+	// a newer dbVersion as is.
 	dbVersion = 1
 
 	// DefaultOpenTimeout bounds waiting for another process's file lock.

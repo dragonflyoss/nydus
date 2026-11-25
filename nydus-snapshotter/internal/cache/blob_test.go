@@ -26,7 +26,11 @@ func TestBlob_add(t *testing.T) {
 	}{
 		{
 			name: "count a file's blocks",
-			info: mockStat,
+			info: func(t *testing.T, path string) os.FileInfo {
+				info, err := os.Stat(path)
+				assert.NoError(t, err)
+				return info
+			},
 			expect: func(t *testing.T, b *blob) {
 				assert := assert.New(t)
 				assert.NotZero(b.size)
@@ -35,7 +39,11 @@ func TestBlob_add(t *testing.T) {
 		{
 			name: "count nothing for a file linked elsewhere",
 			link: true,
-			info: mockStat,
+			info: func(t *testing.T, path string) os.FileInfo {
+				info, err := os.Stat(path)
+				assert.NoError(t, err)
+				return info
+			},
 			expect: func(t *testing.T, b *blob) {
 				assert := assert.New(t)
 				assert.Zero(b.size)
@@ -140,11 +148,4 @@ func TestCacheFile_blobID(t *testing.T) {
 			tc.expect(t, id, ok)
 		})
 	}
-}
-
-func mockStat(t *testing.T, path string) os.FileInfo {
-	t.Helper()
-	info, err := os.Stat(path)
-	assert.NoError(t, err)
-	return info
 }

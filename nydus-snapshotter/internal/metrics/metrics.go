@@ -5,7 +5,7 @@
  */
 
 // Package metrics holds the snapshotter's Prometheus collectors and serves
-// them, refer to https://prometheus.io/docs/practices/naming/.
+// them.
 package metrics
 
 import (
@@ -57,8 +57,7 @@ var (
 	})
 
 	// DaemonStartsTotal counts attempted daemon starts, the denominator of
-	// DaemonStartFailuresTotal, refer to
-	// https://prometheus.io/docs/practices/instrumentation/#failures.
+	// DaemonStartFailuresTotal.
 	DaemonStartsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: "daemon",
@@ -133,8 +132,7 @@ var (
 
 // newCounterVec returns a registered counter vector of one label whose known
 // values start at 0, so a series that has not counted yet reads 0 and not
-// absent, refer to
-// https://prometheus.io/docs/practices/instrumentation/#avoid-missing-metrics.
+// absent.
 func newCounterVec(opts prometheus.CounterOpts, label string, values ...string) *prometheus.CounterVec {
 	counter := promauto.NewCounterVec(opts, []string{label})
 	for _, value := range values {

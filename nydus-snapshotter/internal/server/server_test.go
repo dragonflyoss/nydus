@@ -9,9 +9,12 @@ package server
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -29,7 +32,6 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
 	fsmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs/mocks"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
-	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/testutil"
 )
 
 func TestNew(t *testing.T) {
@@ -169,7 +171,23 @@ func TestNew(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testutil.NewConfig(t)
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			dir := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(dir, "lib")
+			cfg.RuntimeDir = filepath.Join(dir, "run")
+			cfg.GRPC.Addr = filepath.Join(cfg.RuntimeDir, "s.sock")
+			cfg.Metrics.Addr = "127.0.0.1:0"
+			cfg.Cgroup.Slice = "nydustest" + strconv.Itoa(os.Getpid()) + strconv.Itoa(rand.IntN(1<<30)) + ".slice"
+			t.Cleanup(func() { _ = exec.Command("systemctl", "stop", cfg.Cgroup.Slice).Run() })
+
 			tc.prepare(t, cfg)
 			s, err := New(t.Context(), cfg, filepath.Join(cfg.RootDir, "config.yaml"))
 			tc.expect(t, cfg, s, err)
@@ -255,7 +273,7 @@ func TestServer_listen(t *testing.T) {
 			tc.prepare(t, cfg.GRPC.Addr)
 
 			s := &Server{cfg: cfg}
-			listener, err := s.listen(t.Context())
+			listener, err := s.listen()
 			tc.expect(t, cfg.GRPC.Addr, listener, err)
 		})
 	}
@@ -314,7 +332,7 @@ func TestServer_reportServing(t *testing.T) {
 	}
 }
 
-func TestServer_reload(t *testing.T) {
+func TestServer_reloadConfig(t *testing.T) {
 	tests := []struct {
 		name   string
 		next   func(cfg config.Config) *config.Config
@@ -377,7 +395,7 @@ func TestServer_reload(t *testing.T) {
 			tc.mock(fileSystem.EXPECT())
 
 			s := &Server{cfg: config.New(), fileSystem: fileSystem}
-			s.reload(t.Context(), tc.next(*config.New()))
+			s.reloadConfig(t.Context(), tc.next(*config.New()))
 			tc.expect(t, s.cfg)
 		})
 	}

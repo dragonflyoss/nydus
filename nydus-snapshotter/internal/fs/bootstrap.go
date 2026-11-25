@@ -37,8 +37,7 @@ const (
 // BootstrapLayer is an unpacked nydus bootstrap layer: image/image.boot and
 // image/<blob>.blob.meta for every blob the image references. Its content is
 // untrusted layer content: paths resolve within the layer and only regular
-// files are used, as containerd resolves image paths, refer to
-// https://github.com/containerd/containerd/blob/main/internal/cri/opts/container.go.
+// files are used.
 type BootstrapLayer struct {
 	// fsDir is the snapshot's fs dir the layer is unpacked into.
 	fsDir string
@@ -82,9 +81,9 @@ func (b *BootstrapLayer) Blobs() ([]string, error) {
 	return blobs, nil
 }
 
-// describe fills the image's part of a daemon's record: the reference, its
+// describeImage fills the image's part of a daemon's record: the reference, its
 // registry host, the blobs the layer names, and now as the creation time.
-func (b *BootstrapLayer) describe(instance *store.Instance, ref *registry.Reference) error {
+func (b *BootstrapLayer) describeImage(instance *store.Instance, ref *registry.Reference) error {
 	blobs, err := b.Blobs()
 	if err != nil {
 		return err
@@ -105,11 +104,11 @@ func (b *BootstrapLayer) linkBootstrap(dst string) error {
 		return fmt.Errorf("remove %s: %w", dst, err)
 	}
 
-	return b.link(bootstrapFile, dst)
+	return b.linkFile(bootstrapFile, dst)
 }
 
-// bootstrap returns the path of the bootstrap within the layer.
-func (b *BootstrapLayer) bootstrap() (string, error) {
+// bootstrapPath returns the path of the bootstrapPath within the layer.
+func (b *BootstrapLayer) bootstrapPath() (string, error) {
 	dir, err := b.imageDir()
 	if err != nil {
 		return "", err
@@ -134,7 +133,7 @@ func (b *BootstrapLayer) bootstrap() (string, error) {
 func (b *BootstrapLayer) seedCache(cacheDir string, blobs []string) error {
 	for _, blob := range blobs {
 		name := blob + cache.BlobMetaSuffix
-		if err := b.link(name, filepath.Join(cacheDir, name)); err != nil {
+		if err := b.linkFile(name, filepath.Join(cacheDir, name)); err != nil {
 			return err
 		}
 	}
@@ -152,9 +151,9 @@ func (b *BootstrapLayer) imageDir() (string, error) {
 	return dir, nil
 }
 
-// link hard links a regular layer file to dst, keeping an existing dst, and
+// linkFile hard links a regular layer file to dst, keeping an existing dst, and
 // copies across mounts (EXDEV), refer to nydusify/internal/nydusfs/extract.go.
-func (b *BootstrapLayer) link(name, dst string) error {
+func (b *BootstrapLayer) linkFile(name, dst string) error {
 	dir, err := b.imageDir()
 	if err != nil {
 		return err

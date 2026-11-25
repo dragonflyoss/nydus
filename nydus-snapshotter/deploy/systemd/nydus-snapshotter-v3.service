@@ -4,10 +4,7 @@
 [Unit]
 Description=nydus snapshotter for containerd
 Documentation=https://github.com/dragonflyoss/nydus/blob/main/docs/snapshotter.md
-# The gRPC listener comes from the socket unit; restarting the socket restarts
-# the service too.
-Requires=nydus-snapshotter.socket
-After=network.target nydus-snapshotter.socket
+After=network.target
 # containerd resolves its snapshotters at start.
 Before=containerd.service
 

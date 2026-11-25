@@ -4,7 +4,7 @@ use nydus::mount::{umount2, unmount};
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
 use nydus::signal;
 use nydus_config::Config;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,6 +102,13 @@ pub struct NbdCommand {
         help = "Specify whether to print log"
     )]
     console: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_NBD_LOG_JOURNALD",
+        help = "Specify whether to log to the systemd journal instead of the log directory and the console"
+    )]
+    log_journald: bool,
 }
 
 /// Determine the default number of worker threads for the NBD socket.
@@ -119,13 +126,17 @@ impl NbdCommand {
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
-        let _guards = init_tracing(
-            NAME,
-            self.log_dir.clone(),
-            self.log_level,
-            self.log_max_files,
-            self.console,
-        )?;
+        let _guards = if self.log_journald {
+            init_journald_tracing(NAME, self.log_level)?
+        } else {
+            init_tracing(
+                NAME,
+                self.log_dir.clone(),
+                self.log_level,
+                self.log_max_files,
+                self.console,
+            )?
+        };
 
         // Load the storage config and run the NBD service until shutdown.
         Config::load(&self.config)

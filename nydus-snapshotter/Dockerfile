@@ -16,11 +16,12 @@
 #   docker buildx build -f nydus-snapshotter/Dockerfile \
 #     --build-context binaries=<dir holding nydus and nydus-snapshotter> -t <image> .
 #
-# The image holds what the installer copies onto the host: the payload, and
-# the config at the path the installer and the snapshotter both default to.
+# The image holds what the installer copies onto the host, each file at the
+# path it has there.
 #
-#   /opt/nydus-snapshotter/payload/bin/{nydus-snapshotter,nydus}
-#   /opt/nydus-snapshotter/payload/systemd/nydus-snapshotter.{service,socket}
+#   /usr/local/bin/{nydus-snapshotter,nydus}  nydus goes to its version directory on the host,
+#                                             which nydusd.binary is linked to
+#   /etc/systemd/system/nydus-snapshotter-v3.service
 #   /etc/nydus-snapshotter/  default config.yaml, shadowed by the ConfigMap
 
 # nydus runs on the host, so it is a static musl build with the release
@@ -81,8 +82,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     make build VERSION=${VERSION} GIT_COMMIT=${GIT_COMMIT} BUILD_TIME=${BUILD_TIME}
 
 # The binaries the image ships. --build-context binaries=<dir> replaces this
-# stage, refer to
-# https://docs.docker.com/reference/cli/docker/buildx/build/#build-context.
+# stage.
 FROM scratch AS binaries
 
 COPY --from=nydus /nydus /nydus
@@ -95,9 +95,9 @@ FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde
 RUN apt-get update && apt-get install -y --no-install-recommends file \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=binaries /nydus /nydus-snapshotter /opt/nydus-snapshotter/payload/bin/
+COPY --from=binaries /nydus /nydus-snapshotter /usr/local/bin/
 
-RUN set -e; for bin in /opt/nydus-snapshotter/payload/bin/*; do \
+RUN set -e; for bin in /usr/local/bin/nydus /usr/local/bin/nydus-snapshotter; do \
         file "${bin}" | grep -Eq 'statically linked|static-pie linked'; \
         "${bin}" --version; \
     done
@@ -105,8 +105,8 @@ RUN set -e; for bin in /opt/nydus-snapshotter/payload/bin/*; do \
 # Nothing else runs in the Pod.
 FROM gcr.io/distroless/static-debian12:latest@sha256:d75cdd72874d4790092fcb1b058493ecf6bb5bf2b2b897045b00ff01d91843f2
 
-COPY --from=verify /opt/nydus-snapshotter/payload/bin/ /opt/nydus-snapshotter/payload/bin/
-COPY nydus-snapshotter/deploy/systemd/ /opt/nydus-snapshotter/payload/systemd/
+COPY --from=verify /usr/local/bin/nydus /usr/local/bin/nydus-snapshotter /usr/local/bin/
+COPY nydus-snapshotter/deploy/systemd/ /etc/systemd/system/
 COPY nydus-snapshotter/deploy/nydus-snapshotter/ /etc/nydus-snapshotter/
 
-ENTRYPOINT ["/opt/nydus-snapshotter/payload/bin/nydus-snapshotter", "install"]
+ENTRYPOINT ["/usr/local/bin/nydus-snapshotter", "install"]

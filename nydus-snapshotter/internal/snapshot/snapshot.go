@@ -34,7 +34,7 @@ import (
 
 const (
 	// snapshotsDirName is the directory of snapshot directories under the
-	// root, as containerd's overlay snapshotter lays them out.
+	// root.
 	snapshotsDirName = "snapshots"
 
 	// metadataOpenTimeout bounds waiting for another process's lock on the
@@ -267,7 +267,7 @@ func (s *snapshotter) Remove(ctx context.Context, key string) error {
 		return err
 	}
 
-	s.wakeRelease()
+	s.wakeReleaseWorker()
 	return nil
 }
 
@@ -295,7 +295,7 @@ func (s *snapshotter) Cleanup(ctx context.Context) error {
 		}
 	}
 
-	s.wakeRelease()
+	s.wakeReleaseWorker()
 	return nil
 }
 
@@ -305,8 +305,7 @@ func (s *snapshotter) Close() error {
 }
 
 // prepareRemoteLayer commits an empty snapshot for a nydus data layer and
-// reports it as existing, so containerd adopts it and skips the download,
-// refer to https://github.com/containerd/stargz-snapshotter/blob/main/snapshot/snapshot.go.
+// reports it as existing, so containerd adopts it and skips the download.
 func (s *snapshotter) prepareRemoteLayer(ctx context.Context, key, parent, target string, opts []snapshots.Opt) error {
 	if _, _, err := s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts); err != nil {
 		return err
@@ -352,9 +351,7 @@ func (s *snapshotter) createMounts(ctx context.Context, kind snapshots.Kind, key
 	return mounts, nil
 }
 
-// createSnapshot creates the directory and the record of a snapshot, as
-// containerd's overlay snapshotter does, refer to
-// https://github.com/containerd/containerd/blob/v2.2.10/plugins/snapshots/overlay/overlay.go.
+// createSnapshot creates the directory and the record of a snapshot.
 func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, key, parent string, opts []snapshots.Opt) (snap storage.Snapshot, info snapshots.Info, err error) {
 	// Uid/gid mappings are honoured on every key but an unpack key, whose
 	// labels containerd 1.6 copies from image annotations; remoteLabels on
@@ -463,9 +460,9 @@ func (s *snapshotter) cleanupDirectories(ctx context.Context) ([]string, error) 
 	return cleanup, nil
 }
 
-// walkInfo walks the snapshots. A fresh metastore has no snapshots bucket
+// walkSnapshots walks the snapshots. A fresh metastore has no snapshots bucket
 // yet, which holds no snapshot. It runs in a metadata transaction.
-func (s *snapshotter) walkInfo(ctx context.Context, fn snapshots.WalkFunc) error {
+func (s *snapshotter) walkSnapshots(ctx context.Context, fn snapshots.WalkFunc) error {
 	if err := storage.WalkInfo(ctx, fn); err != nil && !errdefs.IsNotFound(err) {
 		return err
 	}
@@ -473,11 +470,9 @@ func (s *snapshotter) walkInfo(ctx context.Context, fn snapshots.WalkFunc) error
 	return nil
 }
 
-// chownUpper gives a new snapshot's fs directory the owner its mount needs,
-// as containerd's overlay snapshotter does: the root pair of the uid/gid
-// mapping labels of a user namespace, otherwise the owner of the parent's
-// directory, refer to
-// https://github.com/containerd/containerd/blob/v2.2.10/plugins/snapshots/overlay/overlay.go.
+// chownUpper gives a new snapshot's fs directory the owner its mount needs:
+// the root pair of the uid/gid mapping labels of a user namespace, otherwise
+// the owner of the parent's directory.
 func (s *snapshotter) chownUpper(fsDir string, snap storage.Snapshot, info snapshots.Info) error {
 	uid, gid, ok, err := labels(info.Labels).rootPair()
 	if err != nil {

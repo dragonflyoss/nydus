@@ -12,7 +12,7 @@ use nydus_config::{
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,6 +132,13 @@ pub struct FuseCommand {
         help = "Specify whether to print log"
     )]
     console: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_LOG_JOURNALD",
+        help = "Specify whether to log to the systemd journal instead of the log directory and the console"
+    )]
+    log_journald: bool,
 }
 
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
@@ -164,13 +171,17 @@ impl FuseCommand {
             .transpose()?;
 
         // Initialize tracing.
-        let _guards = init_tracing(
-            NAME,
-            self.log_dir.clone(),
-            self.log_level,
-            self.log_max_files,
-            self.console,
-        )?;
+        let _guards = if self.log_journald {
+            init_journald_tracing(NAME, self.log_level)?
+        } else {
+            init_tracing(
+                NAME,
+                self.log_dir.clone(),
+                self.log_level,
+                self.log_max_files,
+                self.console,
+            )?
+        };
 
         self.serve(shutdown, api_socket)
             .inspect_err(|err| error!("nydus fuse failed: {}", err.report()))

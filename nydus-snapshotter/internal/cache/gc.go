@@ -5,8 +5,7 @@
  */
 
 // Package cache garbage collects the blob cache shared by nydus daemons, by
-// TTL and disk watermarks like Dragonfly's dfdaemon, refer to
-// https://github.com/dragonflyoss/client/blob/main/dragonfly-client/src/gc/mod.rs.
+// TTL and disk watermarks.
 package cache
 
 import (
@@ -58,9 +57,9 @@ type GC interface {
 	// Run runs a round every interval until ctx is done.
 	Run(ctx context.Context)
 
-	// StartLock returns the lock a starting daemon holds, so no round evicts
-	// a blob the daemon is about to use.
-	StartLock() sync.Locker
+	// DaemonStartLock returns the lock a starting daemon holds, so no round
+	// evicts a blob the daemon is about to use.
+	DaemonStartLock() sync.Locker
 }
 
 // diskUsage is the size and usage of a filesystem in bytes.
@@ -123,9 +122,9 @@ func New(cfg *config.Config, s store.Store, running, committed BlobsFunc) GC {
 	}
 }
 
-// StartLock returns the lock a starting daemon holds, so no round evicts a
-// blob the daemon is about to use.
-func (g *gc) StartLock() sync.Locker {
+// DaemonStartLock returns the lock a starting daemon holds, so no round
+// evicts a blob the daemon is about to use.
+func (g *gc) DaemonStartLock() sync.Locker {
 	return g.mu.RLocker()
 }
 
@@ -140,7 +139,7 @@ func (g *gc) Run(ctx context.Context) {
 		case <-timer.C:
 		}
 
-		// Bound a round by the interval, as dragonfly's GC bounds a task.
+		// Bound a round by the interval.
 		next := time.Duration(g.cfg.Interval)
 		roundCtx, cancel := context.WithTimeout(ctx, next)
 		if err := g.collect(roundCtx); errors.Is(err, errBusy) {
@@ -174,8 +173,7 @@ func (g *gc) collect(ctx context.Context) error {
 		evicted = append(evicted, ids...)
 	}
 
-	// Forget the evicted blobs in one transaction, as containerd's metadata
-	// GC removes what it collects in one update.
+	// Forget the evicted blobs in one transaction.
 	if len(evicted) > 0 {
 		if err := g.store.DeleteBlobs(evicted); err != nil {
 			log.G(ctx).WithError(err).Warn("forget evicted blobs")
@@ -338,9 +336,8 @@ func (g *gc) evict(ctx context.Context, b *blob, reason string) bool {
 }
 
 // usage returns the usage the watermarks apply to. With disk_threshold, it
-// is the cache's own bytes against the threshold, a logical quota as
-// dragonfly-client's content_linux.rs computes. Without, it is the usage of
-// the cache's filesystem.
+// is the cache's own bytes against the threshold, a logical quota. Without,
+// it is the usage of the cache's filesystem.
 func (g *gc) usage(cached uint64) (diskUsage, error) {
 	if g.cfg.Policy.DiskThreshold > 0 {
 		return diskUsage{total: uint64(g.cfg.Policy.DiskThreshold), used: cached}, nil
@@ -377,7 +374,7 @@ func (g *gc) scan(ctx context.Context) ([]*blob, error) {
 		}
 
 		if strings.HasPrefix(entry.Name(), TempMetaPrefix) {
-			g.removeStale(ctx, path, now.Sub(info.ModTime()))
+			g.removeStaleTempFile(ctx, path, now.Sub(info.ModTime()))
 			continue
 		}
 
@@ -412,9 +409,9 @@ func (g *gc) scan(ctx context.Context) ([]*blob, error) {
 	return result, nil
 }
 
-// removeStale removes a temporary file of the given age once no write can
-// still be using it.
-func (g *gc) removeStale(ctx context.Context, path string, age time.Duration) {
+// removeStaleTempFile removes a temporary file of the given age once no write
+// can still be using it.
+func (g *gc) removeStaleTempFile(ctx context.Context, path string, age time.Duration) {
 	if age <= recentWindow {
 		return
 	}

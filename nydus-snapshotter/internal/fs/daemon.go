@@ -53,14 +53,8 @@ type Daemon struct {
 	// ConfigPath is the daemon's rendered config file.
 	ConfigPath string
 
-	// LogDir is the daemon's log directory.
-	LogDir string
-
 	// LogLevel is the daemon's log level.
 	LogLevel string
-
-	// LogMaxFiles is the number of log files the daemon keeps.
-	LogMaxFiles int
 
 	// id identifies the daemon.
 	id daemonID
@@ -81,18 +75,16 @@ func (f *fileSystem) daemon(cfg *config.Config, id daemonID) *Daemon {
 		InstanceDir: instanceDir,
 		RuntimeDir:  runtimeDir,
 		ConfigPath:  filepath.Join(runtimeDir, "config.yaml"),
-		LogDir:      filepath.Join(cfg.Nydusd.LogDir, string(id)),
-		LogLevel:    cfg.Nydusd.LogLevel,
-		LogMaxFiles: cfg.Nydusd.LogMaxFiles,
+		LogLevel:    cfg.Nydusd.Log.Level,
 		id:          id,
 	}
 }
 
-// reuse returns the mountpoint of a running daemon once it answers. One that
-// does not answer may still serve containers, so it is reported unavailable
-// and never stopped here; Release stops it once unused.
-func (f *fileSystem) reuse(ctx context.Context, d *Daemon, image *Image) (string, error) {
-	if err := f.ready(ctx, d); err != nil {
+// reuseDaemon returns the mountpoint of a running daemon once it answers. One
+// that does not answer may still serve containers, so it is reported
+// unavailable and never stopped here; Release stops it once unused.
+func (f *fileSystem) reuseDaemon(ctx context.Context, d *Daemon, image *Image) (string, error) {
+	if err := f.checkDaemonReady(ctx, d); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("check daemon %s: %w", d.Instance.Unit, ctxErr)
 		}
@@ -102,26 +94,26 @@ func (f *fileSystem) reuse(ctx context.Context, d *Daemon, image *Image) (string
 		return "", fmt.Errorf("daemon %s is not ready: %v: %w", d.Instance.Unit, err, errdefs.ErrUnavailable) //nolint:errorlint // the cause is named, only the class is wrapped
 	}
 
-	if err := f.recordRunning(ctx, d.Instance, image); err != nil {
+	if err := f.recordRunningDaemon(ctx, d.Instance, image); err != nil {
 		return "", err
 	}
 
 	return d.Instance.Mountpoint, nil
 }
 
-// start prepares the daemon's files, renders its config and starts its
-// unit, whose start job ends once the daemon reports ready.
-func (f *fileSystem) start(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, image *Image) error {
+// startDaemon prepares the daemon's files, renders its config and starts its
+// unit, whose startDaemon job ends once the daemon reports ready.
+func (f *fileSystem) startDaemon(ctx context.Context, cfg *config.Config, d *Daemon, ref *registry.Reference, image *Image) error {
 	// Hold off cache GC until the record protects the blobs; a running
 	// daemon's blobs are protected by its record alone.
 	f.startLock.Lock()
-	err := f.prepare(cfg, d, ref, image)
+	err := f.prepareDaemon(cfg, d, ref, image)
 	f.startLock.Unlock()
 	if err != nil {
 		return err
 	}
 
-	if err := f.renderConfig(ctx, cfg, d, ref, image.PrefetchScope); err != nil {
+	if err := f.renderDaemonConfig(ctx, cfg, d, ref, image.PrefetchScope); err != nil {
 		return err
 	}
 
@@ -133,16 +125,16 @@ func (f *fileSystem) start(ctx context.Context, cfg *config.Config, d *Daemon, r
 	// The unit is Type=notify: its start job ends once the daemon sent
 	// READY=1, or fails when the daemon exits or the start timeout passes.
 	if err := f.systemd.StartTransientUnit(ctx, unit); err != nil {
-		return fmt.Errorf("%w, see journalctl -u %s and %s", err, d.Instance.Unit, d.LogDir)
+		return fmt.Errorf("%w, see journalctl -u %s", err, d.Instance.Unit)
 	}
 
 	// Check once what ready stands for, so a daemon that reported it without
 	// its mount or its API fails here and not under a container.
-	if err := f.ready(ctx, d); err != nil {
+	if err := f.checkDaemonReady(ctx, d); err != nil {
 		return fmt.Errorf("daemon %s reported ready but is not: %w", d.Instance.Unit, err)
 	}
 
-	if err := f.identify(ctx, d.Instance); err != nil {
+	if err := f.identifyDaemon(ctx, d.Instance); err != nil {
 		return err
 	}
 
@@ -157,9 +149,9 @@ func (f *fileSystem) start(ctx context.Context, cfg *config.Config, d *Daemon, r
 	return nil
 }
 
-// prepare cleans up what a dead daemon left behind, links the bootstrap,
+// prepareDaemon cleans up what a dead daemon left behind, links the bootstrap,
 // seeds the cache and records the instance.
-func (f *fileSystem) prepare(cfg *config.Config, d *Daemon, ref *registry.Reference, image *Image) error {
+func (f *fileSystem) prepareDaemon(cfg *config.Config, d *Daemon, ref *registry.Reference, image *Image) error {
 	if err := f.driver.Unmount(d); err != nil {
 		return err
 	}
@@ -168,7 +160,7 @@ func (f *fileSystem) prepare(cfg *config.Config, d *Daemon, ref *registry.Refere
 		return fmt.Errorf("remove stale api socket: %w", err)
 	}
 
-	for _, dir := range []string{d.InstanceDir, d.Instance.Mountpoint, d.RuntimeDir, d.LogDir} {
+	for _, dir := range []string{d.InstanceDir, d.Instance.Mountpoint, d.RuntimeDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
@@ -181,7 +173,7 @@ func (f *fileSystem) prepare(cfg *config.Config, d *Daemon, ref *registry.Refere
 		return err
 	}
 
-	if err := layer.describe(d.Instance, ref); err != nil {
+	if err := layer.describeImage(d.Instance, ref); err != nil {
 		return err
 	}
 
@@ -200,8 +192,8 @@ func (f *fileSystem) prepare(cfg *config.Config, d *Daemon, ref *registry.Refere
 
 // daemonUnit returns the transient unit running a daemon.
 func (f *fileSystem) daemonUnit(cfg *config.Config, d *Daemon, ref *registry.Reference) (*systemd.Unit, error) {
-	// Resolve the version current points at, so the unit names the binary it
-	// runs and an upgrade switching the link meanwhile cannot change it.
+	// Resolve the version the binary links to, so the unit names the binary
+	// it runs and an upgrade switching the link meanwhile cannot change it.
 	binary, err := filepath.EvalSymlinks(cfg.Nydusd.Binary)
 	if err != nil {
 		return nil, fmt.Errorf("resolve nydus binary: %w", err)
@@ -212,7 +204,6 @@ func (f *fileSystem) daemonUnit(cfg *config.Config, d *Daemon, ref *registry.Ref
 		Description:      "nydus daemon of " + ref.Name,
 		Slice:            cfg.Cgroup.Slice,
 		ExecStart:        append([]string{binary}, f.driver.Args(d)...),
-		Environment:      f.driver.Environment(),
 		Before:           []string{"containerd.service", "kubelet.service"},
 		Notify:           true,
 		TimeoutStart:     time.Duration(cfg.Nydusd.MountTimeout),
@@ -226,8 +217,9 @@ func (f *fileSystem) daemonUnit(cfg *config.Config, d *Daemon, ref *registry.Ref
 	}, nil
 }
 
-// ready returns nil when the daemon's mount is in place and its API answers.
-func (f *fileSystem) ready(ctx context.Context, d *Daemon) error {
+// checkDaemonReady returns nil when the daemon's mount is in place and its
+// API answers.
+func (f *fileSystem) checkDaemonReady(ctx context.Context, d *Daemon) error {
 	mounted, err := f.driver.Mounted(d)
 	if err != nil {
 		return err
@@ -240,9 +232,9 @@ func (f *fileSystem) ready(ctx context.Context, d *Daemon) error {
 	return f.newClient(d.Instance.APISocket).Ready(ctx)
 }
 
-// settledState returns the unit's active state once it is neither activating
-// nor deactivating.
-func (f *fileSystem) settledState(ctx context.Context, cfg *config.Config, unit string) (systemd.ActiveState, error) {
+// settledUnitState returns the unit's active state once it is neither
+// activating nor deactivating.
+func (f *fileSystem) settledUnitState(ctx context.Context, cfg *config.Config, unit string) (systemd.ActiveState, error) {
 	var state systemd.ActiveState
 	err := wait.PollUntilContextTimeout(ctx, pollInterval, time.Duration(cfg.Nydusd.MountTimeout), true, func(ctx context.Context) (bool, error) {
 		var err error
@@ -253,13 +245,11 @@ func (f *fileSystem) settledState(ctx context.Context, cfg *config.Config, unit 
 	return state, err
 }
 
-// identify asks a daemon for its version and capabilities and fills them
-// into its record, as kubelet asks a CRI runtime for its version when it
-// connects, refer to
-// https://github.com/kubernetes/cri-api/blob/master/pkg/apis/runtime/v1/api.proto.
-// Optional calls are gated on the capabilities where they are made; only a
-// daemon that does not serve this API version is refused.
-func (f *fileSystem) identify(ctx context.Context, instance *store.Instance) error {
+// identifyDaemon asks a daemon for its version and capabilities and fills
+// them into its record. Optional calls are gated on the capabilities where
+// they are made; only a daemon that does not serve this API version is
+// refused.
+func (f *fileSystem) identifyDaemon(ctx context.Context, instance *store.Instance) error {
 	info, err := f.newClient(instance.APISocket).Info(ctx)
 	if errdefs.IsNotImplemented(err) {
 		// Only the class reaches containerd: the daemon is not one this
@@ -276,9 +266,9 @@ func (f *fileSystem) identify(ctx context.Context, instance *store.Instance) err
 	return nil
 }
 
-// recordRunning records a running daemon found without its record, as after
-// nydusd.db was lost, or with a record that predates its version.
-func (f *fileSystem) recordRunning(ctx context.Context, instance *store.Instance, image *Image) error {
+// recordRunningDaemon records a running daemon found without its record, as
+// after nydusd.db was lost, or with a record that predates its version.
+func (f *fileSystem) recordRunningDaemon(ctx context.Context, instance *store.Instance, image *Image) error {
 	recorded, err := f.store.GetInstance(instance.ChainID)
 	if err == nil && recorded.Version != "" {
 		return nil
@@ -293,41 +283,33 @@ func (f *fileSystem) recordRunning(ctx context.Context, instance *store.Instance
 		return err
 	}
 
-	if err := NewBootstrapLayer(image.BootstrapDir).describe(instance, ref); err != nil {
+	if err := NewBootstrapLayer(image.BootstrapDir).describeImage(instance, ref); err != nil {
 		return err
 	}
 
-	if err := f.identify(ctx, instance); err != nil {
+	if err := f.identifyDaemon(ctx, instance); err != nil {
 		return err
 	}
 
 	return f.store.PutInstance(instance)
 }
 
-// abortStart cleans up after a failed start, so no half started daemon or
+// abortDaemonStart cleans up after a failed start, so no half started daemon or
 // record is left behind.
-func (f *fileSystem) abortStart(ctx context.Context, cfg *config.Config, d *Daemon) {
+func (f *fileSystem) abortDaemonStart(ctx context.Context, cfg *config.Config, d *Daemon) {
 	// The request may be done by now, so the stop runs on a deadline of its
 	// own.
-	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.mountBound(cfg))
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.mountTimeout(cfg))
 	defer cancel()
-	if err := f.stop(stopCtx, d); err != nil {
+	if err := f.stopDaemon(stopCtx, d); err != nil {
 		log.G(ctx).WithError(err).WithField("unit", d.Instance.Unit).Error("stop daemon after failed start")
-	}
-
-	// Keep the logs failedLogRetention from this failure: a retried start
-	// appends to them, which leaves their directory's time alone.
-	now := time.Now()
-	if err := os.Chtimes(d.LogDir, now, now); err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.G(ctx).WithError(err).WithField("path", d.LogDir).Warn("touch the logs of a failed start")
 	}
 }
 
-// stop stops a daemon, detaches what its mount left behind and removes its
-// files and record. The daemon unmounts on SIGTERM itself. Its logs stay so
-// that a failed start can be read. Release removes them with an unused
-// daemon, and those of a failed start once they are failedLogRetention old.
-func (f *fileSystem) stop(ctx context.Context, d *Daemon) error {
+// stopDaemon stops a daemon, detaches what its mount left behind and removes
+// its files and record. The daemon unmounts on SIGTERM itself. Its logs stay
+// in the journal.
+func (f *fileSystem) stopDaemon(ctx context.Context, d *Daemon) error {
 	if err := f.systemd.StopUnit(ctx, d.Instance.Unit); err != nil {
 		return err
 	}
