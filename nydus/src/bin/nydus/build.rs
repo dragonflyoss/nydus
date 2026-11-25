@@ -11,6 +11,7 @@ use nydus_telemetry::logging::init_command_tracing;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use tabled::{settings::Style, Table, Tabled};
@@ -419,7 +420,13 @@ impl BuildCommand {
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
         self.validate()?;
         let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
-        let writer = BufWriter::new(blob_output.create()?);
+        // An aligned layer is laid out for block-level dedup of the volume,
+        // which also needs the blob file itself on the volume's grid.
+        let step = match self.erofs_data_alignment.as_u64() {
+            0 => 0,
+            alignment => alignment.max(MIN_PREALLOC_STEP),
+        };
+        let writer = BufWriter::new(PreallocWriter::new(blob_output.create()?, step));
         let image = match self.source_type {
             SourceType::Dir => build_image(options, writer),
             SourceType::Tar => build_image_from_tar_layer(options, &self.source, writer),
@@ -582,6 +589,74 @@ impl BlobOutput {
 
                 Ok(full_blob_path)
             }
+        }
+    }
+}
+
+/// The smallest step the allocation of an aligned blob file grows by; a
+/// smaller alignment would cost an allocation per write.
+const MIN_PREALLOC_STEP: u64 = 2 << 20;
+
+/// Writes the blob file, allocating its space ahead of the writes one step
+/// at a time: a layer is streamed with its size unknown, and space allocated
+/// write by write lands wherever the volume is free at the moment. ext4
+/// serves a power of two request from a free buddy of that size, which
+/// starts on a multiple of it, so every step lands on that grid of the
+/// volume. Small steps still find such a buddy on a fragmented volume.
+struct PreallocWriter {
+    file: File,
+    written: u64,
+    allocated: u64,
+    /// Zero writes without allocating ahead.
+    step: u64,
+}
+
+impl PreallocWriter {
+    fn new(file: File, step: u64) -> Self {
+        Self {
+            file,
+            written: 0,
+            allocated: 0,
+            step,
+        }
+    }
+}
+
+impl Write for PreallocWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        while self.step != 0 && self.written + buf.len() as u64 > self.allocated {
+            // KEEP_SIZE leaves the file size at what has been written.
+            let ret = unsafe {
+                libc::fallocate(
+                    self.file.as_raw_fd(),
+                    libc::FALLOC_FL_KEEP_SIZE,
+                    self.allocated as libc::off_t,
+                    self.step as libc::off_t,
+                )
+            };
+            if ret != 0 {
+                // A FIFO, a file system without fallocate, or a full volume:
+                // the writes below still allocate what they need.
+                self.step = 0;
+                break;
+            }
+            self.allocated += self.step;
+        }
+        let n = self.file.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl Drop for PreallocWriter {
+    fn drop(&mut self) {
+        if self.allocated > self.written {
+            // Frees the unused tail; a failure only leaves it allocated.
+            let _ = self.file.set_len(self.written);
         }
     }
 }
@@ -1378,5 +1453,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(hex::encode(slot.blob_id().unwrap()), full_blob_digest);
+    }
+
+    #[test]
+    fn prealloc_writer_allocates_ahead_and_frees_the_tail() {
+        const STEP: u64 = 32 << 20;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let allocated = || fs::metadata(&path).unwrap().blocks() * 512;
+        let expected = vec![0xa5u8; (1 << 20) + 100];
+
+        let mut writer = PreallocWriter::new(File::create(&path).unwrap(), STEP);
+        writer.write_all(&expected).unwrap();
+        assert!(allocated() >= STEP);
+        drop(writer);
+
+        assert!(allocated() < STEP);
+        assert_eq!(fs::read(&path).unwrap(), expected);
     }
 }
