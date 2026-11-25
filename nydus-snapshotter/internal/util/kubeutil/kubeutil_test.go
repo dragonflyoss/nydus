@@ -11,7 +11,22 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+)
+
+var (
+	mockNodeName = "node-1"
+
+	mockLabelKey = "example.com/label"
+
+	mockNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes"}}}
+
+	mockLabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", mockLabelKey: "false"}}}
 )
 
 func TestAPIServer(t *testing.T) {
@@ -114,6 +129,100 @@ func TestNewClient(t *testing.T) {
 			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
 			client, err := NewClient(tc.dir)
 			tc.expect(t, client, err)
+		})
+	}
+}
+
+func TestAddNodeLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		nodes  []runtime.Object
+		expect func(t *testing.T, client *fake.Clientset, err error)
+	}{
+		{
+			name:  "add the label to a node without it",
+			nodes: []runtime.Object{mockNode},
+			expect: func(t *testing.T, client *fake.Clientset, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				node, err := client.CoreV1().Nodes().Get(t.Context(), mockNodeName, metav1.GetOptions{})
+				assert.NoError(err)
+				assert.Equal(map[string]string{"kept": "yes", mockLabelKey: "true"}, node.Labels)
+			},
+		},
+		{
+			name:  "replace another value of the label",
+			nodes: []runtime.Object{mockLabeledNode},
+			expect: func(t *testing.T, client *fake.Clientset, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				node, err := client.CoreV1().Nodes().Get(t.Context(), mockNodeName, metav1.GetOptions{})
+				assert.NoError(err)
+				assert.Equal(map[string]string{"kept": "yes", mockLabelKey: "true"}, node.Labels)
+			},
+		},
+		{
+			name: "node that is missing",
+			expect: func(t *testing.T, client *fake.Clientset, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "patch node "+mockNodeName)
+				assert.True(apierrors.IsNotFound(err))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fake.NewClientset(tc.nodes...)
+
+			tc.expect(t, client, AddNodeLabel(t.Context(), client, mockNodeName, mockLabelKey, "true"))
+		})
+	}
+}
+
+func TestRemoveNodeLabel(t *testing.T) {
+	tests := []struct {
+		name   string
+		nodes  []runtime.Object
+		expect func(t *testing.T, client *fake.Clientset, err error)
+	}{
+		{
+			name:  "remove the label from a node that carries it",
+			nodes: []runtime.Object{mockLabeledNode},
+			expect: func(t *testing.T, client *fake.Clientset, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				node, err := client.CoreV1().Nodes().Get(t.Context(), mockNodeName, metav1.GetOptions{})
+				assert.NoError(err)
+				assert.Equal(map[string]string{"kept": "yes"}, node.Labels)
+			},
+		},
+		{
+			name:  "accept a node without the label",
+			nodes: []runtime.Object{mockNode},
+			expect: func(t *testing.T, client *fake.Clientset, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				node, err := client.CoreV1().Nodes().Get(t.Context(), mockNodeName, metav1.GetOptions{})
+				assert.NoError(err)
+				assert.Equal(map[string]string{"kept": "yes"}, node.Labels)
+			},
+		},
+		{
+			name: "node that is missing",
+			expect: func(t *testing.T, client *fake.Clientset, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "patch node "+mockNodeName)
+				assert.True(apierrors.IsNotFound(err))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fake.NewClientset(tc.nodes...)
+
+			tc.expect(t, client, RemoveNodeLabel(t.Context(), client, mockNodeName, mockLabelKey))
 		})
 	}
 }

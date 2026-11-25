@@ -17,8 +17,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+
+	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/util/kubeutil"
 )
 
 const (
@@ -28,12 +29,6 @@ const (
 
 	// nodeLabelValue is the value of NodeLabel.
 	nodeLabelValue = "true"
-
-	// labelPatch sets NodeLabel.
-	labelPatch = `{"metadata":{"labels":{"` + NodeLabel + `":"` + nodeLabelValue + `"}}}`
-
-	// unlabelPatch removes NodeLabel, which a node without it accepts.
-	unlabelPatch = `{"metadata":{"labels":{"` + NodeLabel + `":null}}}`
 
 	// snapshotterPluginType is the type containerd gives its snapshotters,
 	// proxy plugins included.
@@ -88,7 +83,7 @@ func (i *Installer) addNodeLabel(ctx context.Context) error {
 		return nil
 	}
 
-	if err := i.patchNode(ctx, i.nodeName, labelPatch); err != nil {
+	if err := kubeutil.AddNodeLabel(ctx, i.kubeClient, i.nodeName, NodeLabel, nodeLabelValue); err != nil {
 		return err
 	}
 
@@ -108,7 +103,7 @@ func (i *Installer) removeNodeLabel(ctx context.Context) error {
 		return nil
 	}
 
-	if err := i.patchNode(ctx, i.nodeName, unlabelPatch); err != nil {
+	if err := kubeutil.RemoveNodeLabel(ctx, i.kubeClient, i.nodeName, NodeLabel); err != nil {
 		return err
 	}
 
@@ -127,15 +122,6 @@ func (i *Installer) nodeLabel(ctx context.Context) (string, bool, error) {
 
 	value, labeled := node.Labels[NodeLabel]
 	return value, labeled, nil
-}
-
-// patchNode applies a merge patch to a node.
-func (i *Installer) patchNode(ctx context.Context, name, patch string) error {
-	if _, err := i.kubeClient.CoreV1().Nodes().Patch(ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
-		return fmt.Errorf("patch node %s: %w", name, err)
-	}
-
-	return nil
 }
 
 // waitForNydusSnapshotter waits for the snapshotter to serve, so the node is

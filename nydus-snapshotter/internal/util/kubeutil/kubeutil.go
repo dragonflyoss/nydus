@@ -9,12 +9,17 @@
 package kubeutil
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -59,4 +64,27 @@ func NewClient(serviceAccountPath string) (kubernetes.Interface, error) {
 		Burst:           burst,
 		Timeout:         requestTimeout,
 	})
+}
+
+// AddNodeLabel sets a label of a node with a JSON merge patch.
+func AddNodeLabel(ctx context.Context, client kubernetes.Interface, name, key, value string) error {
+	// A map of strings always marshals.
+	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"labels": map[string]any{key: value}}})
+	if _, err := client.CoreV1().Nodes().Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("patch node %s: %w", name, err)
+	}
+
+	return nil
+}
+
+// RemoveNodeLabel removes a label of a node with a JSON merge patch, which a
+// node without the label accepts.
+func RemoveNodeLabel(ctx context.Context, client kubernetes.Interface, name, key string) error {
+	// A map of a string and nil always marshals.
+	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"labels": map[string]any{key: nil}}})
+	if _, err := client.CoreV1().Nodes().Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("patch node %s: %w", name, err)
+	}
+
+	return nil
 }

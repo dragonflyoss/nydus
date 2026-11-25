@@ -28,31 +28,19 @@ import (
 )
 
 var (
-	mockVersion = "3.0.0-test"
-
-	mockNydusTarget = nydusBinaryVersionsDir + "/" + mockVersion + "/nydus"
-
-	mockNydusScript = "#!/bin/sh\necho 'nydus %s (1a2b3c4d5, 2026-01-02)'\n"
-
-	mockHostsPath = config.DefaultRegistryConfigPath + "/registry.example.com/hosts.toml"
-
-	mockHostsTOML = "server = \"https://registry.example.com\"\n"
-
-	mockMirrorHostsTOML = "server = \"https://mirror.example.com\"\n"
-
-	mockToken = "token"
-
-	mockHostTokenPath = "/run/nydus-snapshotter/kubernetes/token"
-
-	mockCA = "ca"
-
+	mockVersion          = "3.0.0-test"
+	mockNydusTarget      = nydusBinaryVersionsDir + "/" + mockVersion + "/nydus"
+	mockNydusScript      = "#!/bin/sh\necho 'nydus %s (1a2b3c4d5, 2026-01-02)'\n"
+	mockHostsPath        = config.DefaultRegistryConfigPath + "/registry.example.com/hosts.toml"
+	mockHostsTOML        = "server = \"https://registry.example.com\"\n"
+	mockMirrorHostsTOML  = "server = \"https://mirror.example.com\"\n"
+	mockToken            = "token"
+	mockHostTokenPath    = "/run/nydus-snapshotter/kubernetes/token"
+	mockCA               = "ca"
 	mockKubeSecretConfig = "auth:\n  kube_secret:\n    enable: true\n"
-
-	mockInvalidConfig = "log:\n  level: loud\n"
-
-	mockUnitPath = filepath.Join(unitDir, nydusSnapshotterServiceUnit)
-
-	mockResetPaths = []string{hostRootMount, nydusBinary, nydusSnapshotterBinary, mockUnitPath, filepath.Dir(config.DefaultPath)}
+	mockInvalidConfig    = "log:\n  level: loud\n"
+	mockUnitPath         = filepath.Join(unitDir, nydusSnapshotterServiceUnit)
+	mockResetPaths       = []string{hostRootMount, nydusBinary, nydusSnapshotterBinary, mockUnitPath, filepath.Dir(config.DefaultPath)}
 
 	mockImage = fstest.MapFS{
 		"usr/local/bin/nydus":                                           {Data: []byte(fmt.Sprintf(mockNydusScript, mockVersion)), Mode: 0o755},

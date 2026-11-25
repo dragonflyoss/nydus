@@ -8,6 +8,7 @@ package uninstaller
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,30 +24,63 @@ import (
 )
 
 var (
-	mockLabels = map[string]string{"kept": "yes"}
-
-	mockNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"kept": "yes"}}}
-
-	mockLabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"kept": "yes", installer.NodeLabel: "true"}}}
-
+	mockLabels           = map[string]string{"kept": "yes"}
+	mockNode             = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"kept": "yes"}}}
+	mockLabeledNode      = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{"kept": "yes", installer.NodeLabel: "true"}}}
 	mockOtherLabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-2", Labels: map[string]string{"kept": "yes", installer.NodeLabel: "true"}}}
-
-	mockUnlabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-3", Labels: map[string]string{"kept": "yes"}}}
-
-	mockNodeNotFound = apierrors.NewNotFound(corev1.Resource("nodes"), "node-1")
+	mockUnlabeledNode    = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-3", Labels: map[string]string{"kept": "yes"}}}
+	mockNodeNotFound     = apierrors.NewNotFound(corev1.Resource("nodes"), "node-1")
 )
+
+func TestNew(t *testing.T) {
+	tests := []struct {
+		name   string
+		host   string
+		expect func(t *testing.T, u *Uninstaller, err error)
+	}{
+		{
+			name: "uninstaller of the pod's api server",
+			host: "10.96.0.1",
+			expect: func(t *testing.T, u *Uninstaller, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.NotNil(u.kubeClient)
+			},
+		},
+		{
+			name: "pod without an api server",
+			expect: func(t *testing.T, u *Uninstaller, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
+				assert.Nil(u)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("KUBERNETES_SERVICE_HOST", tc.host)
+			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+			cfg := config.New()
+			cfg.Installer.ServiceAccountPath = filepath.Join("testdata", "serviceaccount")
+
+			u, err := New(cfg)
+			tc.expect(t, u, err)
+		})
+	}
+}
 
 func TestUninstaller_Run(t *testing.T) {
 	tests := []struct {
 		name   string
 		nodes  []runtime.Object
-		mock   func(u *Uninstaller, client *fake.Clientset)
+		mock   func(client *fake.Clientset)
 		expect func(t *testing.T, client *fake.Clientset, verbs []string, err error)
 	}{
 		{
 			name:  "remove the label from every node that carries it",
 			nodes: []runtime.Object{mockLabeledNode, mockOtherLabeledNode, mockUnlabeledNode},
-			mock:  func(u *Uninstaller, client *fake.Clientset) {},
+			mock:  func(client *fake.Clientset) {},
 			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -64,7 +98,7 @@ func TestUninstaller_Run(t *testing.T) {
 		{
 			name:  "leave a cluster without the label alone",
 			nodes: []runtime.Object{mockNode, mockUnlabeledNode},
-			mock:  func(u *Uninstaller, client *fake.Clientset) {},
+			mock:  func(client *fake.Clientset) {},
 			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
@@ -74,7 +108,7 @@ func TestUninstaller_Run(t *testing.T) {
 		{
 			name:  "go on to the next node when a patch fails",
 			nodes: []runtime.Object{mockLabeledNode, mockOtherLabeledNode},
-			mock: func(u *Uninstaller, client *fake.Clientset) {
+			mock: func(client *fake.Clientset) {
 				failed := false
 				client.PrependReactor("patch", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
 					if failed {
@@ -98,7 +132,7 @@ func TestUninstaller_Run(t *testing.T) {
 		{
 			name:  "skip a node deleted since it was listed",
 			nodes: []runtime.Object{mockLabeledNode, mockOtherLabeledNode},
-			mock: func(u *Uninstaller, client *fake.Clientset) {
+			mock: func(client *fake.Clientset) {
 				failed := false
 				client.PrependReactor("patch", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
 					if failed {
@@ -118,7 +152,7 @@ func TestUninstaller_Run(t *testing.T) {
 		{
 			name:  "nodes that cannot be listed",
 			nodes: []runtime.Object{mockLabeledNode},
-			mock: func(u *Uninstaller, client *fake.Clientset) {
+			mock: func(client *fake.Clientset) {
 				client.PrependReactor("list", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
 					return true, nil, errors.New("foo")
 				})
@@ -129,28 +163,14 @@ func TestUninstaller_Run(t *testing.T) {
 				assert.Equal([]string{"list"}, verbs)
 			},
 		},
-		{
-			name:  "pod without an api server",
-			nodes: []runtime.Object{mockLabeledNode},
-			mock: func(u *Uninstaller, client *fake.Clientset) {
-				u.kubeClient = nil
-			},
-			expect: func(t *testing.T, client *fake.Clientset, verbs []string, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT must be set")
-				assert.Empty(verbs)
-			},
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("KUBERNETES_SERVICE_HOST", "")
 			client := fake.NewClientset(tc.nodes...)
-			u := New(config.New())
-			u.kubeClient = client
-			tc.mock(u, client)
+			tc.mock(client)
 
+			u := &Uninstaller{kubeClient: client}
 			err := u.Run(t.Context())
 			var verbs []string
 			for _, action := range client.Actions() {

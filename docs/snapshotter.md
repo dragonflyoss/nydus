@@ -1170,7 +1170,7 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 │   ├── version/                    -ldflags build information
 │   ├── kmutex/                     keyed mutex (from containerd internal/kmutex)
 │   ├── metrics/                    Prometheus collectors, /metrics server
-│   └── util/                       kubeutil/ (API server client of a Pod, for installer and uninstaller), testutil/ (helpers tests share)
+│   └── util/                       kubeutil/ (API server client of a Pod and node label patches, for installer and uninstaller), testutil/ (helpers tests share)
 ├── deploy/                         systemd unit, default config, containerd snippets
 ├── Dockerfile                      installer image: nydus-snapshotter and nydus
 ├── Makefile                        build, test, lint, generate

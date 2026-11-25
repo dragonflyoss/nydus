@@ -35,35 +35,21 @@ import (
 )
 
 var (
-	mockNodeName = "node-1"
-
-	mockNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes"}}}
-
-	mockLabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", NodeLabel: nodeLabelValue}}}
-
-	mockMislabeledNode = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", NodeLabel: "false"}}}
-
-	mockNydusSnapshotterPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": config.DefaultGRPCAddr}}
-
-	mockFailedPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": config.DefaultGRPCAddr}, InitErr: status.New(codes.Unknown, "foo").Proto()}
-
-	mockOtherPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "stargz", Exports: map[string]string{"address": "/run/containerd-stargz-grpc/containerd-stargz-grpc.sock"}}
-
-	mockBuiltinPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "overlayfs", Exports: map[string]string{"root": "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"}}
-
-	mockAliasedPlugin = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": "/var/run//nydus-snapshotter/nydus-snapshotter.sock"}}
-
-	mockPluginsResponse = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockOtherPlugin, mockNydusSnapshotterPlugin}}
-
-	mockNoPluginsResponse = &introspectionapi.PluginsResponse{}
-
-	mockOtherPluginsResponse = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockOtherPlugin}}
-
+	mockNodeName                        = "node-1"
+	mockNode                            = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes"}}}
+	mockLabeledNode                     = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", NodeLabel: nodeLabelValue}}}
+	mockMislabeledNode                  = &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: mockNodeName, Labels: map[string]string{"kept": "yes", NodeLabel: "false"}}}
+	mockNydusSnapshotterPlugin          = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": config.DefaultGRPCAddr}}
+	mockFailedPlugin                    = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": config.DefaultGRPCAddr}, InitErr: status.New(codes.Unknown, "foo").Proto()}
+	mockOtherPlugin                     = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "stargz", Exports: map[string]string{"address": "/run/containerd-stargz-grpc/containerd-stargz-grpc.sock"}}
+	mockBuiltinPlugin                   = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "overlayfs", Exports: map[string]string{"root": "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"}}
+	mockAliasedPlugin                   = &introspectionapi.Plugin{Type: snapshotterPluginType, ID: "nydus", Exports: map[string]string{"address": "/var/run//nydus-snapshotter/nydus-snapshotter.sock"}}
+	mockPluginsResponse                 = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockOtherPlugin, mockNydusSnapshotterPlugin}}
+	mockNoPluginsResponse               = &introspectionapi.PluginsResponse{}
+	mockOtherPluginsResponse            = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockOtherPlugin}}
 	mockNydusSnapshotterPluginsResponse = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockNydusSnapshotterPlugin}}
-
-	mockFailedPluginsResponse = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockFailedPlugin}}
-
-	mockAliasedPluginsResponse = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockBuiltinPlugin, mockAliasedPlugin}}
+	mockFailedPluginsResponse           = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockFailedPlugin}}
+	mockAliasedPluginsResponse          = &introspectionapi.PluginsResponse{Plugins: []*introspectionapi.Plugin{mockBuiltinPlugin, mockAliasedPlugin}}
 )
 
 type mockContainerd struct {

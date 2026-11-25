@@ -33,5 +33,10 @@ var uninstallCmd = &cobra.Command{
 // runUninstall removes the label the installers keep on their nodes from
 // every node, with the service account of the Pod.
 func runUninstall(ctx context.Context, cfg *config.Config) error {
-	return uninstaller.New(cfg).Run(ctx)
+	uninstaller, err := uninstaller.New(cfg)
+	if err != nil {
+		return err
+	}
+
+	return uninstaller.Run(ctx)
 }
