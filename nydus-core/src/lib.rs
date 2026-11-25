@@ -115,6 +115,8 @@ impl NydusCore {
     /// instead of retrying throttled prefetches forever.
     ///
     /// A registry backend runs its requests on `runtime`, or on a default one.
+    /// It needs `runtime` to be multi-thread with I/O and timers enabled, and
+    /// rejects a current-thread one.
     /// Every read, cache fill and prefetch of the core records into
     /// [`Metrics`] of its own, see [`metrics`], and every on-demand chunk
     /// group access into an [`OndemandRecorder`] of its own.

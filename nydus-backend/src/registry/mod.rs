@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::{TryFutureExt, TryStreamExt};
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::{Handle, Runtime, RuntimeFlavor};
 use tracing::debug;
 
 use nydus_config::{Config, RedactedString, RegistryConfig};
@@ -99,7 +99,14 @@ impl Registry {
         metrics: Arc<Metrics>,
         runtime: Option<Handle>,
     ) -> io::Result<Self> {
+        // Reject a current-thread runtime: `Handle::block_on` drives neither its I/O nor its timers.
         let runtime = match runtime {
+            Some(handle) if handle.runtime_flavor() == RuntimeFlavor::CurrentThread => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "registry backend requires a multi-thread tokio runtime",
+                ));
+            }
             Some(handle) => RuntimeOrHandle::Handle(handle),
             None => RuntimeOrHandle::Runtime(Runtime::new()?),
         };
@@ -480,6 +487,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+    use tokio::runtime::Builder;
     use url::Url;
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
@@ -837,6 +845,29 @@ mod tests {
             );
             assert_eq!(data, payload[17..33]);
         }
+    }
+
+    #[test]
+    fn new_rejects_the_handle_of_a_current_thread_runtime() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let config: Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:1\n    repository: library/ubuntu\n",
+        )
+        .unwrap();
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+
+        let err = Registry::new(
+            &config,
+            registry_config,
+            Arc::new(Metrics::new()),
+            Some(runtime.handle().clone()),
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

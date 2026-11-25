@@ -122,6 +122,9 @@ pub trait Backend: Send + Sync {
 /// Implements the blob backend construction.
 impl dyn Backend {
     /// Creates the blob backend the `backend` section of `config` describes.
+    ///
+    /// A registry backend needs `runtime` to be multi-thread with I/O and
+    /// timers enabled, and rejects a current-thread one.
     #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
     pub fn new(
         config: &Config,

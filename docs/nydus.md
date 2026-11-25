@@ -229,8 +229,10 @@ their sockets:
 builds a default runtime of its own with tokio's default thread counts. The
 `nydus` binary builds one runtime in `main` and hands its handle to the
 command; an embedder passes the handle of its own runtime to
-`NydusCore::new`, so its cores share one runtime. A local backend uses no
-runtime.
+`NydusCore::new`, so its cores share one runtime. That runtime must be
+multi-thread with I/O and timers enabled: a current-thread runtime drives
+its sockets and timers only inside `Runtime::block_on`, so the registry
+backend rejects its handle. A local backend uses no runtime.
 
 ### `nydus-core` API
 
