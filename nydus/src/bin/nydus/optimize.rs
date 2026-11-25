@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, Runtime};
 use tracing::{info, Level};
 
 /// The artifact optimize builds.
@@ -105,7 +105,7 @@ pub struct OptimizeCommand {
 impl OptimizeCommand {
     /// Executes the optimize sub command, running the optimize pipeline from
     /// [`nydus::optimize`] and writing out its artifacts.
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         // Initializes the tracing subscriber for logging, using the specified log level and
         // console output preference.
         let _guards = init_command_tracing(self.log_level, self.console);
@@ -115,7 +115,8 @@ impl OptimizeCommand {
 
         // Prepares the access patterns, blob backend, cache directory and
         // cache options from the raw CLI flags.
-        let (patterns, backend, storage) = self.prepare(runtime)?;
+        let runtime = Runtime::new().context("failed to build tokio runtime")?;
+        let (patterns, backend, storage) = self.prepare(runtime.handle().clone())?;
 
         // Runs the pipeline of the requested artifact, persisting its
         // artifacts and printing the summary.

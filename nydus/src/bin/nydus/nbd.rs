@@ -9,7 +9,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, Runtime};
 use tracing::{debug, error, info, warn, Level};
 
 use super::*;
@@ -114,9 +114,12 @@ fn default_nbd_threads() -> NonZeroUsize {
 impl NbdCommand {
     /// Executes the nbd sub command, exporting the nydus image as a block
     /// device through the NBD protocol until a termination signal arrives.
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
+
+        // Build the tokio runtime after registering the signals.
+        let runtime = Runtime::new().context("failed to build tokio runtime")?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -130,7 +133,7 @@ impl NbdCommand {
 
         // Load the storage config and run the NBD service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime))
+            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
             .inspect_err(|err| error!("nydus nbd failed: {}", err.report()))
     }
 

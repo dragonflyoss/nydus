@@ -16,7 +16,9 @@ mod redirect;
 mod response;
 mod transport;
 
+use std::future::Future;
 use std::io::{self, BufRead};
+use std::panic;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,6 +61,21 @@ impl RuntimeOrHandle {
             Self::Handle(handle) => handle,
         }
     }
+
+    /// Spawns `future` onto the runtime and blocks until it completes, an
+    /// error once the runtime is shut down, its panic resumed on the caller.
+    fn spawn_block<F, T>(&self, future: F) -> io::Result<T>
+    where
+        F: Future<Output = io::Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let handle = self.handle();
+        match handle.block_on(handle.spawn(future)) {
+            Ok(result) => result,
+            Err(err) if err.is_panic() => panic::resume_unwind(err.into_panic()),
+            Err(err) => Err(err.into()),
+        }
+    }
 }
 
 /// The blob backend over an OCI registry, running the reads of [`Client`] on
@@ -99,7 +116,7 @@ impl Registry {
         metrics: Arc<Metrics>,
         runtime: Option<Handle>,
     ) -> io::Result<Self> {
-        // Reject a current-thread runtime: `Handle::block_on` drives neither its I/O nor its timers.
+        // Reject a current-thread runtime: it runs tasks, I/O and timers only in `Runtime::block_on`.
         let runtime = match runtime {
             Some(handle) if handle.runtime_flavor() == RuntimeFlavor::CurrentThread => {
                 return Err(io::Error::new(
@@ -236,7 +253,7 @@ impl Backend for Registry {
     fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime.handle().block_on(async move {
+        self.runtime.spawn_block(async move {
             let response = client
                 .get(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
                 .await?;
@@ -285,7 +302,7 @@ impl Backend for Registry {
     ) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime.handle().block_on(async move {
+        self.runtime.spawn_block(async move {
             let response = client
                 .prefetch(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
                 .await?;
@@ -337,8 +354,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let response = self
             .runtime
-            .handle()
-            .block_on(async move { client.get(&blob_id, &range).await })
+            .spawn_block(async move { client.get(&blob_id, &range).await })
             .inspect_err(|_| {
                 self.metrics.backend.collect_read_failure_metrics(
                     ReadKind::Ondemand,
@@ -359,8 +375,7 @@ impl Backend for Registry {
                 .collect_read_failure_metrics(ReadKind::Ondemand, source);
             return self
                 .runtime
-                .handle()
-                .block_on(async move { Err(response.into_io_error().await) });
+                .spawn_block(async move { Err(response.into_io_error().await) });
         }
 
         let source = self.client.transport.source();
@@ -420,8 +435,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let response = self
             .runtime
-            .handle()
-            .block_on(async move { client.prefetch(&blob_id, &range).await })
+            .spawn_block(async move { client.prefetch(&blob_id, &range).await })
             .inspect_err(|_| {
                 self.metrics.backend.collect_read_failure_metrics(
                     ReadKind::Prefetch,
@@ -868,6 +882,66 @@ mod tests {
         .unwrap();
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn reads_fail_once_the_runtime_of_the_caller_is_shut_down() {
+        let origin = OriginStub::serve(&["503 Service Unavailable"], b"abcd".to_vec());
+        let config: Config = serde_yaml::from_str(&format!(
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 1h\n",
+            origin.addr
+        ))
+        .unwrap();
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let runtime = Runtime::new().unwrap();
+        let registry = Arc::new(
+            Registry::new(
+                &config,
+                registry_config,
+                Arc::new(Metrics::new()),
+                Some(runtime.handle().clone()),
+            )
+            .unwrap(),
+        );
+
+        let prefetch = thread::spawn({
+            let registry = registry.clone();
+            move || registry.prefetch(&TEST_BLOB_ID, 0, 4).map(drop)
+        });
+        let now = Instant::now();
+        while origin.hits() < 1 && now.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(100));
+        drop(runtime);
+
+        assert!(prefetch.join().unwrap().is_err());
+        assert!(registry.get_blob_metadata(&TEST_BLOB_ID).is_err());
+        assert!(registry.prefetch_blob_metadata(&TEST_BLOB_ID).is_err());
+        assert!(registry.get(&TEST_BLOB_ID, 0, 4).is_err());
+        assert!(registry.prefetch(&TEST_BLOB_ID, 0, 4).is_err());
+        assert_eq!(origin.hits(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "transport called more times than scripted")]
+    fn panic_of_a_read_is_resumed_on_the_caller() {
+        let config: Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:1\n    repository: library/ubuntu\n",
+        )
+        .unwrap();
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let mut registry =
+            Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
+        Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+            fetcher: Box::new(ScriptedTransport::new(vec![])),
+        };
+
+        let _ = registry.get(&TEST_BLOB_ID, 0, 4);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use clap::Parser;
-use nydus::error::{Error, Result};
+use nydus::error::{Context, Error, Result};
 use nydus_config::{
     default_runtime_dir, BackendConfig, Config, LocalConfig, PrefetchConfig, PrefetchScope,
     StorageConfig,
@@ -8,7 +8,7 @@ use nydus_core::{IncrementalWriterOptions, NydusCore, RepackResult};
 use nydus_format::blob::BlobMetadataCompressor;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use tokio::runtime::Handle;
+use tokio::runtime::Runtime;
 
 #[derive(Debug, Clone, Parser)]
 pub struct RepackCommand {
@@ -33,10 +33,12 @@ pub struct RepackCommand {
 }
 
 impl RepackCommand {
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
+        let runtime;
         let core = if let Some(path) = &self.config {
             let config = nydus_config::Config::load(path)?;
-            nydus_core::NydusCore::new(&self.bootstrap, config, Some(runtime))?
+            runtime = Runtime::new().context("failed to build tokio runtime")?;
+            nydus_core::NydusCore::new(&self.bootstrap, config, Some(runtime.handle().clone()))?
         } else {
             local_core(&self.bootstrap, &self.blob_dir, &self.output_dir)?
         };

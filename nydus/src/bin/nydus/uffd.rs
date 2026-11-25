@@ -7,7 +7,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, Runtime};
 use tracing::{error, Level};
 
 use super::*;
@@ -82,9 +82,12 @@ pub struct UffdCommand {
 impl UffdCommand {
     /// Executes the uffd sub command, serving the nydus image through
     /// userfaultfd until a termination signal arrives.
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
+
+        // Build the tokio runtime after registering the signals.
+        let runtime = Runtime::new().context("failed to build tokio runtime")?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -98,7 +101,7 @@ impl UffdCommand {
 
         // Load the storage config and run the userfaultfd service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime))
+            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
             .inspect_err(|err| error!("nydus uffd failed: {}", err.report()))
     }
 

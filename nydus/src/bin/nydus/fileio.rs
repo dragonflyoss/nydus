@@ -8,7 +8,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, Runtime};
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -120,8 +120,9 @@ fn default_fileio_threads() -> NonZeroUsize {
 impl FileioCommand {
     /// Export the flattened image over FUSE and, when a mountpoint is given,
     /// mount it as file-backed EROFS until a termination signal arrives.
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         let signals = signal::register_termination_signals()?;
+        let runtime = Runtime::new().context("failed to build tokio runtime")?;
 
         // The returned guards must stay alive for the daemon's lifetime or
         // file logging stops.
@@ -134,7 +135,7 @@ impl FileioCommand {
         )?;
 
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime))
+            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
             .inspect_err(|err| error!("nydus fileio failed: {}", err.report()))
     }
 

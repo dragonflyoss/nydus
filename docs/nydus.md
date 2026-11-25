@@ -220,16 +220,17 @@ their sockets:
 
 | Pool | Size | Lifetime and work |
 | ---- | ---- | ----------------- |
-| Async workers | Tokio's default, one per CPU | Those of the runtime whose handle the registry backend is given, else of a default runtime created with the backend and retained for its lifetime. The synchronous frontend caller polls its own request future; the workers drive HTTP sockets, timers, connection-pool futures and the task that streams a range to its reader. |
+| Async workers | Tokio's default, one per CPU | Those of the runtime whose handle the registry backend is given, else of a default runtime created with the backend and retained for its lifetime. Each request future is spawned onto the runtime; the workers drive it, HTTP sockets, timers, connection-pool futures and the task that streams a range to its reader while the synchronous frontend caller waits for the result. Once the runtime is shut down, a read fails with an error. |
 | Blocking workers | Tokio's default | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`) and released when idle. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
 `nydus_backend::Backend::new(config, metrics, runtime)` takes the
 `tokio::runtime::Handle` a registry backend runs its requests on and the
 `Metrics` every read records into. Without a handle the registry backend
-builds a default runtime of its own with tokio's default thread counts. The
-`nydus` binary builds one runtime in `main` and hands its handle to the
-command; an embedder passes the handle of its own runtime to
-`NydusCore::new`, so its cores share one runtime. That runtime must be
+builds a default runtime of its own with tokio's default thread counts. A
+`nydus` command that reads from a backend builds one runtime, a daemon only
+after it registered its termination signals, and passes the handle down; an
+embedder passes the handle of its own runtime to `NydusCore::new`, so its
+cores share one runtime. That runtime must be
 multi-thread with I/O and timers enabled: a current-thread runtime drives
 its sockets and timers only inside `Runtime::block_on`, so the registry
 backend rejects its handle. A local backend uses no runtime.

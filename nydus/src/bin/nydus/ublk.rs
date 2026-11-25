@@ -1,5 +1,5 @@
 use clap::Parser;
-use nydus::error::Result;
+use nydus::error::{Context, Result};
 use nydus::signal;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
@@ -9,7 +9,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, Runtime};
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -123,9 +123,12 @@ impl UblkCommand {
     /// Note: the daemon must not share a mount namespace with whoever mounts the
     /// device. Otherwise the unmount triggered while the daemon exits flushes I/O
     /// to a device that is no longer being served, and both sides deadlock.
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
+
+        // Build the tokio runtime after registering the signals.
+        let runtime = Runtime::new().context("failed to build tokio runtime")?;
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
@@ -139,7 +142,7 @@ impl UblkCommand {
 
         // Load the storage config and run the ublk service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime))
+            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
             .inspect_err(|err| error!("nydus ublk failed: {}", err.report()))
     }
 

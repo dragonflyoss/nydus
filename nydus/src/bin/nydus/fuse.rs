@@ -16,7 +16,7 @@ use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::runtime::Handle;
+use tokio::runtime::{Handle, Runtime};
 use tracing::{error, info, warn, Level};
 
 use super::{default_log_dir, default_parallelism, NAME};
@@ -144,14 +144,15 @@ fn default_threads() -> usize {
 impl FuseCommand {
     /// Executes the fuse sub command, mounting the nydus image through FUSE
     /// and serving it until a termination signal arrives.
-    pub fn execute(&self, runtime: Handle) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         let signals = signal::register_termination_signals()?;
+        let runtime = Runtime::new().context("failed to build tokio runtime")?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let stop = shutdown.clone();
         let signal_thread = signal::spawn_signal_thread("fuse", signals, move || {
             stop.store(true, Ordering::Relaxed);
         })?;
-        let result = self.run(shutdown, runtime);
+        let result = self.run(shutdown, runtime.handle().clone());
         signal_thread.shutdown()?;
         result
     }
