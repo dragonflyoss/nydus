@@ -1,6 +1,7 @@
 name: E2E Test With Image Conversion
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 4 * * 1'
 
@@ -18,7 +19,7 @@ jobs:
     timeout-minutes: 150
     steps:
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Free disk space
         uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6

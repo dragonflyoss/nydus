@@ -2,9 +2,9 @@
 
 use crate::erofs::{
     EROFS_BLKSZBITS, EROFS_FEATURE_INCOMPAT_BIG_PCLUSTER, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
-    EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_FEATURE_INCOMPAT_FRAGMENTS,
-    EROFS_FEATURE_INCOMPAT_ZERO_PADDING, EROFS_SB_BASE_SIZE, EROFS_SB_EXTSLOT_SIZE,
-    EROFS_SUPER_MAGIC_V1,
+    EROFS_FEATURE_INCOMPAT_COMPR_CFGS, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+    EROFS_FEATURE_INCOMPAT_FRAGMENTS, EROFS_FEATURE_INCOMPAT_ZERO_PADDING, EROFS_SB_BASE_SIZE,
+    EROFS_SB_EXTSLOT_SIZE, EROFS_SUPER_MAGIC_V1,
 };
 use crate::error::{Error, Result};
 use crate::utils::bytes::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
@@ -313,10 +313,12 @@ impl ErofsSuperblock {
         read_u16(&self.devt_slotoff)
     }
 
-    /// Available compression algorithm bitmap (bit 0 = LZ4); non-zero only
-    /// for z_erofs images declaring COMPR_CFGS.
-    pub fn available_compr_algs(&self) -> u16 {
-        read_u16(&self.compr_or_distance)
+    /// The available compression algorithm bitmap (bit 0 = LZ4), or `None`
+    /// without COMPR_CFGS, where the field is the legacy LZ4 match distance.
+    pub fn available_compr_algs(&self) -> Option<u16> {
+        self.incompat()
+            .contains(EROFS_FEATURE_INCOMPAT_COMPR_CFGS)
+            .then(|| read_u16(&self.compr_or_distance))
     }
 
     /// The packed inode holding fragment data, or `None` without FRAGMENTS.
@@ -408,12 +410,13 @@ mod tests {
         assert_eq!(superblock.meta_blkaddr(), 1);
         assert_eq!(superblock.extra_devices(), 2);
         assert_eq!(superblock.devt_slotoff(), 9);
-        assert_eq!(superblock.available_compr_algs(), 0);
+        assert_eq!(superblock.available_compr_algs(), None);
         assert_eq!(superblock.packed_nid(), None);
 
         superblock.sb_extslots = 2;
         superblock.set_available_compr_algs(0b1001);
         superblock.set_packed_nid(77);
+        assert_eq!(superblock.available_compr_algs(), None);
         write_u32(
             &mut superblock.feature_incompat,
             EROFS_FEATURE_INCOMPAT_COMPR_CFGS | EROFS_FEATURE_INCOMPAT_FRAGMENTS,
@@ -422,7 +425,7 @@ mod tests {
             superblock.size(),
             EROFS_SB_BASE_SIZE + 2 * EROFS_SB_EXTSLOT_SIZE
         );
-        assert_eq!(superblock.available_compr_algs(), 0b1001);
+        assert_eq!(superblock.available_compr_algs(), Some(0b1001));
         assert_eq!(superblock.packed_nid(), Some(77));
     }
 

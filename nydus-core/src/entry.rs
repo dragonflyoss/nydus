@@ -166,6 +166,19 @@ impl Node {
         metadata_from_inode(&self.reader, self.ino, &inode)
     }
 
+    /// Return this chunk-based file's logical chunk size in bytes.
+    /// Uses the existing reader without reopening the bootstrap or fetching blobs.
+    pub fn chunk_size(&self) -> Result<u64> {
+        let inode = self.inode()?;
+        if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
+            return Err(Error::Unsupported(format!(
+                "inode {} is not chunk-based",
+                self.ino
+            )));
+        }
+        Ok(self.reader.chunk_size(&inode))
+    }
+
     /// List this directory's entries.
     pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
         let inode = self.inode()?;

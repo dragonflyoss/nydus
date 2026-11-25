@@ -3,9 +3,7 @@ package kernel
 import (
 	"encoding/binary"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
@@ -14,7 +12,6 @@ import (
 	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/sys/unix"
 )
 
 func TestNativeMount(t *testing.T) {
@@ -26,9 +23,9 @@ func TestNativeMount(t *testing.T) {
 
 		t.Run(layout.Name, func(t *testing.T) {
 			t.Parallel()
-			requireKernelFor(t, layout)
+			mount.MustHaveEROFS(t, layout)
 			img := fixture.Get(t, layout.Name)
-			mnt := mountEROFS(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, img.BlobDir, ""))
+			mnt := mountEROFS(t, img.Bootstrap, mount.DeviceFiles(t, img.Bootstrap, img.BlobDir, ""))
 			fstest.VerifyMount(t, mnt, img.Want, img.Compare())
 		})
 	}
@@ -41,9 +38,9 @@ func TestNativeMount(t *testing.T) {
 
 		t.Run(fixture.MergedPrefix+name, func(t *testing.T) {
 			t.Parallel()
-			requireKernelFor(t, layout)
+			mount.MustHaveEROFS(t, layout)
 			img := fixture.Merged(t, layout)
-			mnt := mountEROFS(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, img.BlobDir, ""))
+			mnt := mountEROFS(t, img.Bootstrap, mount.DeviceFiles(t, img.Bootstrap, img.BlobDir, ""))
 			fstest.VerifyMount(t, mnt, img.Want, img.Compare())
 		})
 	}
@@ -51,7 +48,7 @@ func TestNativeMount(t *testing.T) {
 	t.Run("Decoded", func(t *testing.T) {
 		t.Parallel()
 		layout := fixture.MustLayout(t, "none-4k")
-		requireKernelFor(t, layout)
+		mount.MustHaveEROFS(t, layout)
 		img := fixture.Get(t, layout.Name)
 		dir := env.WorkDir(t)
 		device := filepath.Join(dir, filepath.Base(img.Blob(t)))
@@ -59,7 +56,7 @@ func TestNativeMount(t *testing.T) {
 			t.FailNow()
 		}
 
-		mnt := mountEROFS(t, img.Bootstrap, deviceFiles(t, img.Bootstrap, dir, ""))
+		mnt := mountEROFS(t, img.Bootstrap, mount.DeviceFiles(t, img.Bootstrap, dir, ""))
 		fstest.VerifyMount(t, mnt, img.Want, img.Compare())
 	})
 }
@@ -74,7 +71,7 @@ func TestFUSEVsKernel(t *testing.T) {
 
 		t.Run(fixture.MergedPrefix+name, func(t *testing.T) {
 			t.Parallel()
-			requireKernelFor(t, layout)
+			mount.MustHaveEROFS(t, layout)
 			img := fixture.Merged(t, layout)
 
 			var fuse *mount.Mounted
@@ -82,10 +79,10 @@ func TestFUSEVsKernel(t *testing.T) {
 			var devices []string
 			if layout.Native {
 				fuse = mount.Mount(t, mount.FUSE{}, img, mount.Options{})
-				devices = deviceFiles(t, img.Bootstrap, img.BlobDir, "")
+				devices = mount.DeviceFiles(t, img.Bootstrap, img.BlobDir, "")
 			} else {
 				fuse = mount.Mount(t, mount.FUSE{}, img, mount.Options{Mode: mount.Warm})
-				devices = deviceFiles(t, img.Bootstrap, fuse.CacheDir, mount.CacheDataSuffix)
+				devices = mount.DeviceFiles(t, img.Bootstrap, fuse.CacheDir, mount.CacheDataSuffix)
 			}
 
 			kernel := mountEROFS(t, img.Bootstrap, devices)
@@ -98,74 +95,12 @@ func TestFUSEVsKernel(t *testing.T) {
 
 const blockSize = 4096
 
-func requireKernelFor(t testing.TB, layout fixture.Layout) {
-	t.Helper()
-	env.MustHaveKernel(t, 5, 16, "EROFS chunk-based files on extra devices")
-
-	switch layout.Compressor() {
-	case "erofs-lz4":
-		env.MustHaveKernel(t, 6, 1, "EROFS LZ4 fragments")
-
-	case "erofs-zstd":
-		env.MustHaveKernel(t, 6, 10, "EROFS zstd")
-	}
-}
-
 func mountEROFS(t testing.TB, bootstrap string, devices []string) string {
 	t.Helper()
-	env.MustHaveRoot(t)
-	env.MustHaveFilesystem(t, "erofs")
-	losetup := env.LookPath(t, "losetup")
-	if os.Getpagesize() != blockSize {
-		env.Skipf(t, "EROFS images use 4KiB blocks, the page size is %d", os.Getpagesize())
-	}
-
 	mnt := filepath.Join(env.WorkDir(t), "mnt")
-	if !assert.NoError(t, os.Mkdir(mnt, 0o755)) {
-		t.FailNow()
-	}
-
-	attach := func(path string) string {
-		dev := strings.TrimSpace(env.Run(t, losetup, "--find", "--show", "--read-only", path))
-
-		t.Cleanup(func() {
-			assert.NoError(t, exec.Command(losetup, "--detach", dev).Run())
-		})
-
-		return dev
-	}
-
-	primary := attach(bootstrap)
-	var opts []string
-
-	for _, path := range devices {
-		opts = append(opts, "device="+attach(path))
-	}
-
-	t.Cleanup(func() { mount.Unmount(mnt) })
-
-	if !assert.NoError(t, unix.Mount(primary, mnt, "erofs", unix.MS_RDONLY, strings.Join(opts, ","))) {
-		t.FailNow()
-	}
+	mount.EROFS(t, mnt, bootstrap, devices)
 
 	return mnt
-}
-
-func deviceFiles(t testing.TB, bootstrap, dir, suffix string) []string {
-	t.Helper()
-	tags, err := erofs.DeviceTags(bootstrap)
-	if !assert.NoError(t, err) {
-		t.FailNow()
-	}
-
-	files := make([]string, len(tags))
-
-	for i, tag := range tags {
-		files[i] = filepath.Join(dir, tag+suffix)
-		assert.FileExists(t, files[i])
-	}
-
-	return files
 }
 
 func decodeNoneBlob(t testing.TB, bootstrap, blob string) []byte {

@@ -1,5 +1,7 @@
 //! FUSE mount teardown and mount-table helpers.
 
+use std::fs::File;
+use std::io::Read;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::Path;
 
@@ -30,8 +32,11 @@ pub(super) fn finish_session(
     released: bool,
     mount_dev: Option<&str>,
 ) -> std::io::Result<()> {
-    let owned_mount_present = match mount_dev_of(mountpoint) {
-        Ok(current) => mount_dev.is_some() && current.as_deref() == mount_dev,
+    let owned_mount_present = match MountTable::read() {
+        Ok(table) => {
+            let current = table.entry_of(mountpoint).map(|entry| entry.device);
+            mount_dev.is_some() && current.as_deref() == mount_dev
+        }
         Err(err) => {
             warn!(
                 "cannot identify mount {}; refusing to unmount: {}",
@@ -62,67 +67,137 @@ pub(super) fn finish_session(
     Ok(())
 }
 
-/// Decodes mountinfo octal escapes as bytes to preserve UTF-8 paths.
-fn unescape_mountinfo(field: &str) -> String {
-    let mut out = Vec::with_capacity(field.len());
-    let mut chars = field.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            let mut buf = [0u8; 4];
-            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-            continue;
-        }
-        let octal: String = chars.clone().take(3).collect();
-        match u8::from_str_radix(&octal, 8) {
-            Ok(byte) if octal.len() == 3 => {
-                out.push(byte);
-                for _ in 0..3 {
-                    chars.next();
-                }
+/// One reading of `/proc/self/mountinfo`. Mounts are identified from it and
+/// never by a stat of their path: a crashed FUSE reader can leave path lookups
+/// blocked.
+pub(super) struct MountTable(String);
+
+/// The mount on top of a path.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct MountEntry {
+    /// The `major:minor` device.
+    pub(super) device: String,
+    /// The filesystem type.
+    fstype: String,
+}
+
+/// Implements the mount entry.
+impl MountEntry {
+    /// Returns whether the mount is a FUSE filesystem.
+    pub(super) fn is_fuse(&self) -> bool {
+        self.fstype == "fuse" || self.fstype.starts_with("fuse.")
+    }
+}
+
+/// Implements the mount table.
+impl MountTable {
+    /// The readings of a table that keeps changing before the last one is used.
+    const MAX_READ_ATTEMPTS: usize = 32;
+
+    /// Reads the mount table, again while it changed during the reading.
+    pub(super) fn read() -> std::io::Result<Self> {
+        Self::settled(Self::read_once)
+    }
+
+    /// Repeats `read` while it reports that the table changed under it. A
+    /// table that never settles yields its last reading.
+    fn settled(mut read: impl FnMut() -> std::io::Result<(String, bool)>) -> std::io::Result<Self> {
+        let mut attempts = 1;
+        loop {
+            let (mountinfo, changed) = read()?;
+            if !changed || attempts == Self::MAX_READ_ATTEMPTS {
+                return Ok(Self(mountinfo));
             }
-            _ => out.push(b'\\'),
+            attempts += 1;
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
-}
 
-/// Returns the top mount's `major:minor` device without accessing the target.
-pub(super) fn mount_dev_of(target: &Path) -> std::io::Result<Option<String>> {
-    Ok(mount_entry_of(target)?.map(|(dev, _fstype)| dev))
-}
+    /// Reads the mount table and reports whether it changed meanwhile: the
+    /// file then polls as changed. Before 5.8 the kernel resumes a partial
+    /// read by entry index, so an unmount in between skips an entry.
+    fn read_once() -> std::io::Result<(String, bool)> {
+        let mut file = File::open("/proc/self/mountinfo")?;
+        let mut mountinfo = String::new();
+        file.read_to_string(&mut mountinfo)?;
+        let mut pfd = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLPRI,
+            revents: 0,
+        };
+        // SAFETY: polling one fd owned by `file` for the duration of the call.
+        let ret = unsafe { libc::poll(&mut pfd, 1, 0) };
+        let changed = ret < 0 || pfd.revents & (libc::POLLERR | libc::POLLPRI) != 0;
+        Ok((mountinfo, changed))
+    }
 
-/// Reads device identity and filesystem type from the same mount-table snapshot.
-/// Never stats the target: a crashed FUSE reader can leave path lookups blocked.
-pub(super) fn mount_entry_of(target: &Path) -> std::io::Result<Option<(String, String)>> {
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
-    Ok(mount_entry_from(&mountinfo, target))
-}
+    /// The mount on top of `target`: later entries shadow earlier ones when
+    /// mounts are stacked.
+    pub(super) fn entry_of(&self, target: &Path) -> Option<MountEntry> {
+        let target = target.as_os_str().to_string_lossy();
+        self.0.lines().rev().find_map(|line| {
+            let (head, tail) = line.split_once(" - ")?;
+            let mut fields = head.split_whitespace();
+            let device = fields.nth(2)?;
+            let point = fields.nth(1)?;
+            if Self::unescape(point) != target {
+                return None;
+            }
+            Some(MountEntry {
+                device: device.to_string(),
+                fstype: tail.split_whitespace().next()?.to_string(),
+            })
+        })
+    }
 
-pub(super) fn is_fuse_fstype(fstype: &str) -> bool {
-    fstype == "fuse" || fstype.starts_with("fuse.")
-}
-
-fn mount_entry_from(mountinfo: &str, target: &Path) -> Option<(String, String)> {
-    let target = target.as_os_str().to_string_lossy();
-    // Later entries shadow earlier ones when mounts are stacked.
-    mountinfo.lines().rev().find_map(|line| {
-        let (head, tail) = line.split_once(" - ")?;
-        let mut fields = head.split_whitespace();
-        let device = fields.nth(2)?;
-        let point = fields.nth(1)?;
-        if unescape_mountinfo(point) != target {
-            return None;
+    /// Decodes the octal escapes of a field as bytes to preserve UTF-8 paths.
+    fn unescape(field: &str) -> String {
+        let mut out = Vec::with_capacity(field.len());
+        let mut chars = field.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                continue;
+            }
+            let octal: String = chars.clone().take(3).collect();
+            match u8::from_str_radix(&octal, 8) {
+                Ok(byte) if octal.len() == 3 => {
+                    out.push(byte);
+                    for _ in 0..3 {
+                        chars.next();
+                    }
+                }
+                _ => out.push(b'\\'),
+            }
         }
-        Some((
-            device.to_string(),
-            tail.split_whitespace().next()?.to_string(),
-        ))
-    })
+        String::from_utf8_lossy(&out).into_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_table_that_changed_while_it_was_read_is_read_again() {
+        for (changes, expected_reads) in
+            [(0, 1), (2, 3), (usize::MAX, MountTable::MAX_READ_ATTEMPTS)]
+        {
+            let mut reads = 0;
+            let table = MountTable::settled(|| {
+                reads += 1;
+                Ok((reads.to_string(), reads <= changes))
+            })
+            .unwrap();
+            assert_eq!(
+                (table.0, reads),
+                (expected_reads.to_string(), expected_reads)
+            );
+        }
+
+        let table = MountTable::read().unwrap();
+        assert!(!table.entry_of(Path::new("/proc")).unwrap().is_fuse());
+    }
 
     #[test]
     fn mount_entry_identifies_the_top_mount_at_a_reused_path() {
@@ -140,9 +215,14 @@ mod tests {
                 Some(("0:41", "fuse.nydus")),
             ),
         ] {
+            let entry = MountTable(mountinfo.into()).entry_of(Path::new(target));
             assert_eq!(
-                mount_entry_from(mountinfo, Path::new(target)),
-                expected.map(|(device, kind)| (device.into(), kind.into()))
+                entry.as_ref().map(MountEntry::is_fuse),
+                expected.map(|(_, fstype)| fstype != "tmpfs")
+            );
+            assert_eq!(
+                entry.map(|entry| (entry.device, entry.fstype)),
+                expected.map(|(device, fstype)| (device.into(), fstype.into()))
             );
         }
     }

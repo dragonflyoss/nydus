@@ -3153,6 +3153,7 @@ mod tests {
     #[test]
     fn z_erofs_compressible_data_packs_big_pclusters_with_cblkcnt() {
         let mut writer = z_writer();
+        let cfgs = writer.z_compr_cfgs();
         // A quarter noise, the rest zeros per block: roughly 4:1 (LZ4 stores
         // the noise as literals), so 1MiB needs several multi-block
         // pclusters.
@@ -3184,6 +3185,22 @@ mod tests {
             "compressed to less than half"
         );
         assert_eq!(decode_z_file(&data, &meta.tail, src.len()), src);
+        assert_eq!(
+            cfgs,
+            ZErofsComprCfgs {
+                lz4_max_pclusterblks: Some(16),
+                zstd_windowlog: None,
+            }
+        );
+        let widest = indexes
+            .iter()
+            .filter(|(kind, ..)| *kind == Z_EROFS_LCLUSTER_TYPE_NONHEAD)
+            .map(|(.., word)| *word as u16)
+            .filter(|delta0| delta0 & Z_EROFS_LI_D0_CBLKCNT != 0)
+            .map(|delta0| delta0 & !Z_EROFS_LI_D0_CBLKCNT)
+            .max()
+            .unwrap();
+        assert!((2..=16).contains(&widest), "widest pcluster: {widest}");
     }
 
     #[test]

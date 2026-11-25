@@ -9,6 +9,7 @@ package installer
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -54,24 +55,20 @@ var (
 	}
 )
 
-const testRootEnvVar = "NYDUS_INSTALLER_TEST_ROOT"
-
-var testRoot bool
-
 func TestMain(m *testing.M) {
 	if os.Getuid() != 0 {
 		os.Exit(m.Run())
 	}
 
-	dir := os.Getenv(testRootEnvVar)
-	if dir == "" {
+	flag.Parse()
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		dir, err := os.MkdirTemp("", "nydus-installer-")
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		cmd := exec.Command("/proc/self/exe", os.Args[1:]...)
-		cmd.Env = append(os.Environ(), testRootEnvVar+"="+dir)
+		cmd := exec.Command("/proc/self/exe", append(os.Args[1:], dir)...)
+		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
 		err = cmd.Run()
@@ -88,6 +85,7 @@ func TestMain(m *testing.M) {
 		return
 	}
 
+	dir := flag.Arg(flag.NArg() - 1)
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
@@ -132,7 +130,6 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 
-	testRoot = true
 	os.Exit(m.Run())
 }
 
@@ -366,7 +363,7 @@ func TestInstaller_Run(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if !testRoot {
+			if os.Getuid() != 0 {
 				t.Skip("needs root for a root filesystem of its own")
 			}
 
@@ -907,7 +904,7 @@ func TestInstaller_install(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if !testRoot {
+			if os.Getuid() != 0 {
 				t.Skip("needs root for a root filesystem of its own")
 			}
 

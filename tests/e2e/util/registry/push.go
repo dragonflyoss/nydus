@@ -98,7 +98,7 @@ func (r *Registry) PushBlobs(t testing.TB, repo string, blobs []string) {
 // get a source image for nydusify without docker.
 func (r *Registry) PushDirs(t testing.TB, ref string, dirs ...string) v1.Image {
 	t.Helper()
-	img := empty.Image
+	layers := make([]v1.Layer, 0, len(dirs))
 
 	for _, dir := range dirs {
 		layerTar := filepath.Join(t.TempDir(), "layer.tar")
@@ -117,20 +117,32 @@ func (r *Registry) PushDirs(t testing.TB, ref string, dirs ...string) v1.Image {
 		if err != nil {
 			t.Fatalf("layer from %s: %v", dir, err)
 		}
-		if img, err = mutate.AppendLayers(img, layer); err != nil {
-			t.Fatalf("append layer: %v", err)
-		}
+
+		layers = append(layers, layer)
 	}
 
-	cfg, err := img.ConfigFile()
+	return r.PushLayers(t, ref, layers...)
+}
+
+// PushLayers pushes an OCI image (linux/amd64) of layers, lowest first, as
+// ref and returns the image.
+func (r *Registry) PushLayers(t testing.TB, ref string, layers ...v1.Layer) v1.Image {
+	t.Helper()
+	cfg, err := empty.Image.ConfigFile()
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
 
 	cfg = cfg.DeepCopy()
 	cfg.OS, cfg.Architecture = "linux", "amd64"
-	if img, err = mutate.ConfigFile(img, cfg); err != nil {
+	// The config is set before the layers: it cannot be read back from an
+	// image holding a streamed layer that is not uploaded yet.
+	img, err := mutate.ConfigFile(empty.Image, cfg)
+	if err != nil {
 		t.Fatalf("set config: %v", err)
+	}
+	if img, err = mutate.AppendLayers(img, layers...); err != nil {
+		t.Fatalf("append layers: %v", err)
 	}
 
 	parsed, err := name.ParseReference(ref, name.Insecure)

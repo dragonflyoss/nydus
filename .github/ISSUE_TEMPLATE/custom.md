@@ -1,5 +1,5 @@
 ---
 name: Custom issue template
-about: Custom issue template for dragonfly
+about: Custom issue template for nydus 
 
 ---

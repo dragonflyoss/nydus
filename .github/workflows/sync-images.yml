@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       images:
-        description: Space-separated subset of Docker Hub images to mirror to GHCR (default all images in the list)
+        description: Space-separated Docker Hub images to mirror to GHCR, e.g. nginx grafana/grafana (default all images in the list)
 
 permissions:
   contents: read
@@ -20,7 +20,7 @@ jobs:
       images: ${{ steps.list.outputs.images }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: List images
         id: list
@@ -58,7 +58,7 @@ jobs:
           IMAGE: ${{ matrix.image }}
           GHCR_NAMESPACE: ghcr.io/${{ github.repository }}
         run: |
-          src="docker://docker.io/library/${IMAGE}:latest"
+          src="docker://docker.io/${IMAGE}:latest"
           dst="docker://${GHCR_NAMESPACE}/${IMAGE}:latest"
           wait=60
           while :; do

@@ -9,6 +9,9 @@ type Traits struct {
 	// it unmounts on SIGTERM and exits once the mount is gone. A daemon
 	// that only exports a device leaves mounting to its caller.
 	OwnsMount bool
+	// Daemonless reports that the kernel reads the image by itself: there
+	// is no daemon to signal, fail or query, and only native layouts mount.
+	Daemonless bool
 }
 
 // Traited is implemented by adapters whose traits differ from the default

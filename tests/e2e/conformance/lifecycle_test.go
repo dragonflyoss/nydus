@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
@@ -189,9 +190,12 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 		case <-time.After(time.Second):
 		}
 
-		if !assert.True(t, bytes.Equal(want, data)) {
-			t.FailNow()
-		}
+		fstest.ReadMapped(t, func() {
+			if !assert.True(t, bytes.Equal(want, data)) {
+				t.FailNow()
+			}
+		})
+
 		if !assert.True(t, m.Daemon.Alive()) {
 			t.FailNow()
 		}

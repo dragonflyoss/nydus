@@ -34,7 +34,7 @@ func TestConvertPublicImages(t *testing.T) {
 	var processed, succeeded atomic.Int64
 
 	for _, image := range images {
-		t.Run(imageBaseName(image), func(t *testing.T) {
+		t.Run(strings.ReplaceAll(imageName(image), "/", "_"), func(t *testing.T) {
 			t.Parallel()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -44,7 +44,7 @@ func TestConvertPublicImages(t *testing.T) {
 					processed.Add(1), total, succeeded.Load())
 			}()
 
-			target := fmt.Sprintf("%s/%s-nydus", cfg.registry, imageBaseName(image))
+			target := fmt.Sprintf("%s/%s-nydus", cfg.registry, imageName(image))
 
 			work := env.WorkDir(t)
 
@@ -69,7 +69,7 @@ func TestConvertPublicImages(t *testing.T) {
 
 			out, err := cfg.runWithRetry(t, "convert "+image, func() *exec.Cmd { return exec.Command(nydusify, args("convert")...) })
 			if err != nil && isImageNotFound(out) {
-				env.Skipf(t, "%s is not in its registry", image)
+				t.Skipf("%s is not in its registry", image)
 			}
 
 			if !assert.NoError(t, err) {
@@ -154,12 +154,13 @@ func readImageList(t *testing.T, path string) []string {
 	return images
 }
 
-func imageBaseName(image string) string {
-	if i := strings.LastIndex(image, "/"); i >= 0 {
-		return image[i+1:]
+func imageName(image string) string {
+	parts := strings.Split(image, "/")
+	if len(parts) > 3 && strings.ContainsAny(parts[0], ".:") {
+		return strings.Join(parts[3:], "/")
 	}
 
-	return image
+	return parts[len(parts)-1]
 }
 
 func isLocalRegistry(registry string) bool {

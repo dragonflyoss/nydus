@@ -5,7 +5,7 @@ use std::time::Duration;
 use super::lifecycle::SessionRuntimeHandle;
 use super::transfer::FuseInitState;
 
-pub(super) fn empty_filesystem() -> crate::fuse::ErofsFs {
+pub(in crate::fuse) fn empty_filesystem() -> crate::fuse::ErofsFs {
     use nydus_core::build::bootstrap::render_bootstrap;
     use nydus_core::build::inode::{build_tree, resolve_chunk_addrs};
     use nydus_format::erofs::EROFS_BLOCK_SIZE;

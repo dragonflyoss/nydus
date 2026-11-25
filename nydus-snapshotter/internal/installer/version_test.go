@@ -83,7 +83,7 @@ func TestInstaller_nydusBinaryVersion(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if !testRoot {
+			if os.Getuid() != 0 {
 				t.Skip("needs root for a root filesystem of its own")
 			}
 
@@ -281,7 +281,7 @@ func TestInstaller_switchNydusBinaryVersion(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if !testRoot {
+			if os.Getuid() != 0 {
 				t.Skip("needs root for a root filesystem of its own")
 			}
 

@@ -86,13 +86,15 @@ func (NBD) Start(t testing.TB, req mount.Request) (string, *mount.Daemon, func()
 	}
 }
 
-// loadModule loads the nbd module unless its devices already exist.
+// loadModule loads the nbd module unless its devices already exist, with
+// more than the default 16 devices: a test waiting for one would hold the
+// parallel slot of the mounted tests that free it.
 func loadModule() bool {
 	if _, err := os.Stat("/sys/block/nbd0"); err == nil {
 		return true
 	}
 
-	_ = exec.Command("modprobe", "nbd").Run()
+	_ = exec.Command("modprobe", "nbd", "nbds_max=64").Run()
 	_, err := os.Stat("/sys/block/nbd0")
 
 	return err == nil

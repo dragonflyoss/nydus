@@ -3,6 +3,7 @@ name = "nydus"
 version = "3.0.0-rc.0"
 edition = "2021"
 license = "Apache-2.0"
+publish = false
 description = "EROFS-oriented image tooling and runtime core APIs for Nydus images."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "../README.md"

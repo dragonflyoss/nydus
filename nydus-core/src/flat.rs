@@ -147,7 +147,7 @@ impl FlatImage {
 
         // The shared copy is gap-tolerant, so a drifted fetch contract would
         // show up as silently misplaced bytes rather than an error.
-        self.validate_contiguous_ranges(&ranges, offset, len)?;
+        Self::validate_contiguous_ranges(&ranges, offset, len)?;
         self.maps
             .copy_ranges(
                 &ranges,
@@ -159,7 +159,9 @@ impl FlatImage {
         Ok(())
     }
 
-    fn validate_contiguous_ranges(&self, ranges: &[Extent], offset: u64, len: u64) -> Result<()> {
+    /// Fails unless `ranges` tile `[offset, offset + len)` front to back,
+    /// with at most a hole at the end.
+    fn validate_contiguous_ranges(ranges: &[Extent], offset: u64, len: u64) -> Result<()> {
         let mut written = 0u64;
         for range in ranges {
             if range.source_offset != offset + written {
@@ -177,5 +179,31 @@ impl FlatImage {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetched_ranges_must_tile_the_read_window() {
+        let extent = |source_offset, len| Extent::new(-1, 0, len, source_offset);
+        let validate = FlatImage::validate_contiguous_ranges;
+        let window = [extent(4096, 4096), extent(8192, 8192)];
+        validate(&window, 4096, 12288).unwrap();
+        validate(&window[..1], 4096, 12288).unwrap();
+        validate(&[], 4096, 12288).unwrap();
+
+        let gap = [extent(4096, 4096), extent(12288, 4096)];
+        let err = validate(&gap, 4096, 12288).unwrap_err();
+        assert!(err.to_string().contains("not contiguous"), "{err}");
+        let err = validate(&window, 0, 12288).unwrap_err();
+        assert!(err.to_string().contains("not contiguous"), "{err}");
+        let err = validate(&window, 4096, 8192).unwrap_err();
+        assert!(
+            err.to_string().contains("overflow the read window"),
+            "{err}"
+        );
     }
 }
