@@ -9,6 +9,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -121,7 +122,7 @@ fn raise_nofile_limit() {
 impl FanotifyCommand {
     /// Executes the fanotify sub command, serving the EROFS image on demand
     /// through fanotify pre-content hooks until a termination signal arrives.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
@@ -137,17 +138,18 @@ impl FanotifyCommand {
 
         // Load the storage config and run the fanotify service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config))
+            .and_then(|config| self.run(signals, config, runtime))
             .inspect_err(|err| error!("nydus fanotify failed: {}", err.report()))
     }
 
     /// Runs the fanotify service: builds the core, spawns the event loop,
     /// mounts the EROFS bootstrap once the loop is ready, and unmounts it
     /// again on shutdown before releasing the fanotify group fd.
-    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
         raise_nofile_limit();
         let core = std::sync::Arc::new(
-            FanotifyCore::new(&self.bootstrap, config).context("failed to build fanotify core")?,
+            FanotifyCore::new(&self.bootstrap, config, Some(runtime))
+                .context("failed to build fanotify core")?,
         );
 
         let service = FanotifyService::new(core.clone())?;

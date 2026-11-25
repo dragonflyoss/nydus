@@ -27,6 +27,7 @@ use nydus_config::Config;
 use nydus_core::flat::{FlatImage, BLOCK_SIZE};
 use nydus_core::NydusCore;
 use nydus_error::{Error, Result};
+use tokio::runtime::Handle;
 
 /// Read-side handle for the NBD on-demand service.
 ///
@@ -41,9 +42,9 @@ impl NbdCore {
     /// Parse the bootstrap and config and compute the flattened device size.
     /// No blob meta is downloaded and no cache file is created until a read
     /// first touches a blob, so this returns quickly even for large images.
-    pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
+    pub fn new(bootstrap: &Path, config: Config, runtime: Option<Handle>) -> Result<Self> {
         // The NBD device addresses in EROFS blocks, so no extra rounding.
-        let image = FlatImage::open(bootstrap, config, BLOCK_SIZE, None)?;
+        let image = FlatImage::open(bootstrap, config, BLOCK_SIZE, runtime)?;
         Ok(Self { image })
     }
 

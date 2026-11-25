@@ -16,6 +16,7 @@ use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tracing::{error, info, warn, Level};
 
 use super::{default_log_dir, default_parallelism, NAME};
@@ -143,19 +144,19 @@ fn default_threads() -> usize {
 impl FuseCommand {
     /// Executes the fuse sub command, mounting the nydus image through FUSE
     /// and serving it until a termination signal arrives.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         let signals = signal::register_termination_signals()?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let stop = shutdown.clone();
         let signal_thread = signal::spawn_signal_thread("fuse", signals, move || {
             stop.store(true, Ordering::Relaxed);
         })?;
-        let result = self.run(shutdown);
+        let result = self.run(shutdown, runtime);
         signal_thread.shutdown()?;
         result
     }
 
-    fn run(&self, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn run(&self, shutdown: Arc<AtomicBool>, runtime: Handle) -> Result<()> {
         let api_socket = self
             .apiserver
             .as_deref()
@@ -171,12 +172,17 @@ impl FuseCommand {
             self.console,
         )?;
 
-        self.serve(shutdown, api_socket)
+        self.serve(shutdown, api_socket, runtime)
             .inspect_err(|err| error!("nydus fuse failed: {}", err.report()))
     }
 
     /// Mounts the image and serves it until `shutdown` is set.
-    fn serve(&self, shutdown: Arc<AtomicBool>, api_socket: Option<PathBuf>) -> Result<()> {
+    fn serve(
+        &self,
+        shutdown: Arc<AtomicBool>,
+        api_socket: Option<PathBuf>,
+        runtime: Handle,
+    ) -> Result<()> {
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.
         let storage_config = match &self.config {
@@ -237,7 +243,7 @@ impl FuseCommand {
             Some(Arc::new(Local::new(dir.clone(), metrics.clone())))
         } else if let Some(config) = storage_config.as_ref() {
             Some(
-                <dyn Backend>::new(config, None, metrics.clone())
+                <dyn Backend>::new(config, metrics.clone(), Some(runtime))
                     .context("failed to build blob backend")?,
             )
         } else {

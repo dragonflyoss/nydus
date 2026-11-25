@@ -2,7 +2,6 @@
 //! Dragonfly P2P reads. Every API returns `io::Result` to keep the OS errno.
 
 mod local;
-mod netns;
 
 #[cfg(feature = "registry")]
 mod registry;
@@ -12,13 +11,14 @@ use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::runtime::Handle;
+
 use nydus_config::{BackendConfig, Config};
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
 
 pub use local::Local;
-pub use netns::{Netns, NetnsId};
 
 #[cfg(feature = "registry")]
 pub(crate) use registry::Registry;
@@ -125,14 +125,14 @@ impl dyn Backend {
     #[cfg_attr(not(feature = "registry"), allow(unused_variables))]
     pub fn new(
         config: &Config,
-        netns: Option<Netns>,
         metrics: Arc<Metrics>,
+        runtime: Option<Handle>,
     ) -> io::Result<Arc<dyn Backend>> {
         match &config.backend {
             BackendConfig::Local(local) => Ok(Arc::new(Local::new(local.dir.clone(), metrics))),
             #[cfg(feature = "registry")]
             BackendConfig::Registry(registry) => {
-                Ok(Arc::new(Registry::new(config, registry, netns, metrics)?))
+                Ok(Arc::new(Registry::new(config, registry, metrics, runtime)?))
             }
             #[cfg(not(feature = "registry"))]
             BackendConfig::Registry(_) => Err(io::Error::new(
@@ -151,7 +151,7 @@ mod tests {
     fn new_builds_a_local_backend() {
         let config: Config =
             serde_yaml::from_str("backend:\n  type: local\n  config:\n    dir: /blobs\n").unwrap();
-        assert!(<dyn Backend>::new(&config, None, Arc::new(Metrics::new())).is_ok());
+        assert!(<dyn Backend>::new(&config, Arc::new(Metrics::new()), None).is_ok());
     }
 
     #[cfg(feature = "registry")]
@@ -161,7 +161,7 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: a/b\n",
         )
         .unwrap();
-        assert!(<dyn Backend>::new(&config, None, Arc::new(Metrics::new())).is_ok());
+        assert!(<dyn Backend>::new(&config, Arc::new(Metrics::new()), None).is_ok());
     }
 
     #[cfg(not(feature = "registry"))]
@@ -171,7 +171,7 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: a/b\n",
         )
         .unwrap();
-        let err = <dyn Backend>::new(&config, None, Arc::new(Metrics::new()))
+        let err = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None)
             .err()
             .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);

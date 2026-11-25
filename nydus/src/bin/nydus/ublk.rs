@@ -9,6 +9,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -122,7 +123,7 @@ impl UblkCommand {
     /// Note: the daemon must not share a mount namespace with whoever mounts the
     /// device. Otherwise the unmount triggered while the daemon exits flushes I/O
     /// to a device that is no longer being served, and both sides deadlock.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
@@ -138,14 +139,14 @@ impl UblkCommand {
 
         // Load the storage config and run the ublk service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config))
+            .and_then(|config| self.run(signals, config, runtime))
             .inspect_err(|err| error!("nydus ublk failed: {}", err.report()))
     }
 
     /// Runs the ublk service: builds the core, attaches the device, prints
     /// its path, and serves I/O until a termination signal stops it.
-    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
-        let core = Arc::new(UblkCore::new(&self.bootstrap, config)?);
+    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
+        let core = Arc::new(UblkCore::new(&self.bootstrap, config, Some(runtime))?);
         info!(
             "serving {} as a {} byte block device",
             self.bootstrap.display(),

@@ -8,6 +8,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -119,7 +120,7 @@ fn default_fileio_threads() -> NonZeroUsize {
 impl FileioCommand {
     /// Export the flattened image over FUSE and, when a mountpoint is given,
     /// mount it as file-backed EROFS until a termination signal arrives.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         let signals = signal::register_termination_signals()?;
 
         // The returned guards must stay alive for the daemon's lifetime or
@@ -133,14 +134,14 @@ impl FileioCommand {
         )?;
 
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config))
+            .and_then(|config| self.run(signals, config, runtime))
             .inspect_err(|err| error!("nydus fileio failed: {}", err.report()))
     }
 
-    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
         // The kernel EROFS driver reads the backing file in whole blocks.
         let flat = Arc::new(
-            FlatImage::open(&self.bootstrap, config, BLOCK_SIZE, None)
+            FlatImage::open(&self.bootstrap, config, BLOCK_SIZE, Some(runtime))
                 .context("failed to build the flattened view")?,
         );
         // Warm the blob preparation (meta download + cache file sizing) in

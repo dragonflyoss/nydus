@@ -23,6 +23,7 @@ nydus-format = { version = "3.0.0-rc.0", path = "../nydus-format" }
 nydus-storage = { version = "3.0.0-rc.0", path = "../nydus-storage" }
 nydus-telemetry = { version = "3.0.0-rc.0", path = "../nydus-telemetry" }
 sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 xattr = { workspace = true }
 

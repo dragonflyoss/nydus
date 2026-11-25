@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use nydus::error::Result;
 use nydus_config::{default_log_dir, VersionValueParser, NAME};
+use tokio::runtime::{Handle, Runtime};
 
 // musl's malloc serializes every allocation on one lock, which the many
 // backend and FUSE threads contend on.
@@ -184,25 +185,25 @@ impl Command {
         )
     }
 
-    pub fn execute(self) -> Result<()> {
+    pub fn execute(self, runtime: Handle) -> Result<()> {
         match self {
             Self::Build(cmd) => cmd.execute(),
-            Self::Repack(cmd) => cmd.execute(),
+            Self::Repack(cmd) => cmd.execute(runtime),
             Self::Export(cmd) => cmd.execute(),
             Self::Check(cmd) => cmd.execute(),
             Self::Merge(cmd) => cmd.execute(),
-            Self::Optimize(cmd) => cmd.execute(),
-            Self::Fuse(cmd) => cmd.execute(),
+            Self::Optimize(cmd) => cmd.execute(runtime),
+            Self::Fuse(cmd) => cmd.execute(runtime),
             #[cfg(feature = "ublk")]
-            Self::Ublk(cmd) => cmd.execute(),
+            Self::Ublk(cmd) => cmd.execute(runtime),
             #[cfg(feature = "uffd")]
-            Self::Uffd(cmd) => cmd.execute(),
+            Self::Uffd(cmd) => cmd.execute(runtime),
             #[cfg(feature = "fanotify")]
-            Self::Fanotify(cmd) => cmd.execute(),
+            Self::Fanotify(cmd) => cmd.execute(runtime),
             #[cfg(feature = "nbd")]
-            Self::Nbd(cmd) => cmd.execute(),
+            Self::Nbd(cmd) => cmd.execute(runtime),
             #[cfg(feature = "fileio")]
-            Self::Fileio(cmd) => cmd.execute(),
+            Self::Fileio(cmd) => cmd.execute(runtime),
         }
     }
 }
@@ -216,7 +217,8 @@ fn main() -> std::process::ExitCode {
     }
 
     // Execute the command.
-    match args.command.execute() {
+    let runtime = Runtime::new().unwrap();
+    match args.command.execute(runtime.handle().clone()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             print_error(&err);

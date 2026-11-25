@@ -15,6 +15,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
+use tokio::runtime::Handle;
 use tracing::{info, Level};
 
 /// The artifact optimize builds.
@@ -104,7 +105,7 @@ pub struct OptimizeCommand {
 impl OptimizeCommand {
     /// Executes the optimize sub command, running the optimize pipeline from
     /// [`nydus::optimize`] and writing out its artifacts.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         // Initializes the tracing subscriber for logging, using the specified log level and
         // console output preference.
         let _guards = init_command_tracing(self.log_level, self.console);
@@ -114,7 +115,7 @@ impl OptimizeCommand {
 
         // Prepares the access patterns, blob backend, cache directory and
         // cache options from the raw CLI flags.
-        let (patterns, backend, storage) = self.prepare()?;
+        let (patterns, backend, storage) = self.prepare(runtime)?;
 
         // Runs the pipeline of the requested artifact, persisting its
         // artifacts and printing the summary.
@@ -138,7 +139,10 @@ impl OptimizeCommand {
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
     /// from the ondemand record (file or apiserver), the blob backend, and the storage section the
     /// source blobs' caches are opened with.
-    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
+    fn prepare(
+        &self,
+        runtime: Handle,
+    ) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
             (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
@@ -153,7 +157,7 @@ impl OptimizeCommand {
 
         // Load the storage config.
         let storage_config = Config::load(&self.config)?;
-        let backend = <dyn Backend>::new(&storage_config, None, Arc::new(Metrics::new()))
+        let backend = <dyn Backend>::new(&storage_config, Arc::new(Metrics::new()), Some(runtime))
             .context("failed to build blob backend")?;
 
         Ok((patterns, backend, storage_config.storage))

@@ -9,6 +9,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tracing::{debug, error, info, warn, Level};
 
 use super::*;
@@ -113,7 +114,7 @@ fn default_nbd_threads() -> NonZeroUsize {
 impl NbdCommand {
     /// Executes the nbd sub command, exporting the nydus image as a block
     /// device through the NBD protocol until a termination signal arrives.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
@@ -129,16 +130,18 @@ impl NbdCommand {
 
         // Load the storage config and run the NBD service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config))
+            .and_then(|config| self.run(signals, config, runtime))
             .inspect_err(|err| error!("nydus nbd failed: {}", err.report()))
     }
 
     /// Runs the NBD service: builds the core, attaches the device, spawns
     /// the workers, optionally mounts the device, and serves until a
     /// termination signal stops it.
-    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
-        let core =
-            Arc::new(NbdCore::new(&self.bootstrap, config).context("failed to build nbd core")?);
+    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
+        let core = Arc::new(
+            NbdCore::new(&self.bootstrap, config, Some(runtime))
+                .context("failed to build nbd core")?,
+        );
         let service = Arc::new(NbdService::new(
             core.clone(),
             &self.device,

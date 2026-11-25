@@ -7,6 +7,7 @@ use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tracing::{error, Level};
 
 use super::*;
@@ -81,7 +82,7 @@ pub struct UffdCommand {
 impl UffdCommand {
     /// Executes the uffd sub command, serving the nydus image through
     /// userfaultfd until a termination signal arrives.
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, runtime: Handle) -> Result<()> {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
@@ -97,15 +98,15 @@ impl UffdCommand {
 
         // Load the storage config and run the userfaultfd service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config))
+            .and_then(|config| self.run(signals, config, runtime))
             .inspect_err(|err| error!("nydus uffd failed: {}", err.report()))
     }
 
     /// Runs the userfaultfd service: builds the core, spawns the signal
     /// thread, and blocks on the tokio runtime until a termination signal or
     /// a fatal error stops it.
-    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
-        let core = Arc::new(UffdCore::new(&self.bootstrap, config)?);
+    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
+        let core = Arc::new(UffdCore::new(&self.bootstrap, config, Some(runtime))?);
         let service = Arc::new(UffdService::new(core, self.socket.clone()));
         let signal_service = service.clone();
         let signal_thread = signal::spawn_signal_thread("uffd", signals, move || {
