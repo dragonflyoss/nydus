@@ -3,13 +3,13 @@ use nydus::error::{Context, Error, Result};
 use nydus::mount::{umount2, unmount};
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
 use nydus::signal;
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_telemetry::logging::init_tracing;
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tracing::{debug, error, info, warn, Level};
 
 use super::*;
@@ -118,9 +118,6 @@ impl NbdCommand {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
-        // Build the tokio runtime after registering the signals.
-        let runtime = Runtime::new().context("failed to build tokio runtime")?;
-
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
         let _guards = init_tracing(
@@ -133,17 +130,26 @@ impl NbdCommand {
 
         // Load the storage config and run the NBD service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
+            .and_then(|config| self.run(signals, config))
             .inspect_err(|err| error!("nydus nbd failed: {}", err.report()))
     }
 
     /// Runs the NBD service: builds the core, attaches the device, spawns
     /// the workers, optionally mounts the device, and serves until a
     /// termination signal stops it.
-    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
         let core = Arc::new(
-            NbdCore::new(&self.bootstrap, config, Some(runtime))
-                .context("failed to build nbd core")?,
+            NbdCore::new(
+                &self.bootstrap,
+                config,
+                runtime.as_ref().map(Runtime::handle).cloned(),
+            )
+            .context("failed to build nbd core")?,
         );
         let service = Arc::new(NbdService::new(
             core.clone(),

@@ -2,13 +2,13 @@ use clap::Parser;
 use nydus::error::{Context, Result};
 use nydus::fileio::{image_path, mount_image_file, warm_bootstrap, FileioService, FlatImageFs};
 use nydus::signal;
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_core::flat::{FlatImage, BLOCK_SIZE};
 use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -122,7 +122,6 @@ impl FileioCommand {
     /// mount it as file-backed EROFS until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
         let signals = signal::register_termination_signals()?;
-        let runtime = Runtime::new().context("failed to build tokio runtime")?;
 
         // The returned guards must stay alive for the daemon's lifetime or
         // file logging stops.
@@ -135,15 +134,26 @@ impl FileioCommand {
         )?;
 
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
+            .and_then(|config| self.run(signals, config))
             .inspect_err(|err| error!("nydus fileio failed: {}", err.report()))
     }
 
-    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+
         // The kernel EROFS driver reads the backing file in whole blocks.
         let flat = Arc::new(
-            FlatImage::open(&self.bootstrap, config, BLOCK_SIZE, Some(runtime))
-                .context("failed to build the flattened view")?,
+            FlatImage::open(
+                &self.bootstrap,
+                config,
+                BLOCK_SIZE,
+                runtime.as_ref().map(Runtime::handle).cloned(),
+            )
+            .context("failed to build the flattened view")?,
         );
         // Warm the blob preparation (meta download + cache file sizing) in
         // the background so the FUSE export and EROFS mount come up without

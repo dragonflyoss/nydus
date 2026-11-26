@@ -227,13 +227,13 @@ their sockets:
 `tokio::runtime::Handle` a registry backend runs its requests on and the
 `Metrics` every read records into. Without a handle the registry backend
 builds a default runtime of its own with tokio's default thread counts. A
-`nydus` command that reads from a backend builds one runtime, a daemon only
-after it registered its termination signals, and passes the handle down; an
-embedder passes the handle of its own runtime to `NydusCore::new`, so its
-cores share one runtime. That runtime must be
-multi-thread with I/O and timers enabled: a current-thread runtime drives
-its sockets and timers only inside `Runtime::block_on`, so the registry
-backend rejects its handle. A local backend uses no runtime.
+`nydus` command builds one runtime when its backend is a registry, a daemon
+only after it registered its termination signals, and passes the handle
+down; with a local backend it builds none. An embedder passes the handle of
+its own runtime to `NydusCore::new`, so its cores share one runtime. That
+runtime must be multi-thread with I/O and timers enabled: a current-thread
+runtime drives its sockets and timers only inside `Runtime::block_on`, so
+the registry backend rejects its handle. A local backend uses no runtime.
 
 ### `nydus-core` API
 

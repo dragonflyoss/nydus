@@ -2,12 +2,12 @@ use clap::Parser;
 use nydus::error::{Context, Result};
 use nydus::signal;
 use nydus::uffd::{UffdCore, UffdService};
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tracing::{error, Level};
 
 use super::*;
@@ -86,9 +86,6 @@ impl UffdCommand {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
-        // Build the tokio runtime after registering the signals.
-        let runtime = Runtime::new().context("failed to build tokio runtime")?;
-
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
         let _guards = init_tracing(
@@ -101,15 +98,24 @@ impl UffdCommand {
 
         // Load the storage config and run the userfaultfd service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
+            .and_then(|config| self.run(signals, config))
             .inspect_err(|err| error!("nydus uffd failed: {}", err.report()))
     }
 
     /// Runs the userfaultfd service: builds the core, spawns the signal
     /// thread, and blocks on the tokio runtime until a termination signal or
     /// a fatal error stops it.
-    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
-        let core = Arc::new(UffdCore::new(&self.bootstrap, config, Some(runtime))?);
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+        let core = Arc::new(UffdCore::new(
+            &self.bootstrap,
+            config,
+            runtime.as_ref().map(Runtime::handle).cloned(),
+        )?);
         let service = Arc::new(UffdService::new(core, self.socket.clone()));
         let signal_service = service.clone();
         let signal_thread = signal::spawn_signal_thread("uffd", signals, move || {

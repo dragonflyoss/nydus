@@ -1,5 +1,5 @@
 use clap::Parser;
-use nydus::error::{Context, Error, Result};
+use nydus::error::{Error, Result};
 use nydus_config::{
     default_runtime_dir, BackendConfig, Config, LocalConfig, PrefetchConfig, PrefetchScope,
     StorageConfig,
@@ -37,8 +37,15 @@ impl RepackCommand {
         let runtime;
         let core = if let Some(path) = &self.config {
             let config = nydus_config::Config::load(path)?;
-            runtime = Runtime::new().context("failed to build tokio runtime")?;
-            nydus_core::NydusCore::new(&self.bootstrap, config, Some(runtime.handle().clone()))?
+            runtime = match &config.backend {
+                BackendConfig::Registry(_) => Some(Runtime::new()?),
+                BackendConfig::Local(_) => None,
+            };
+            nydus_core::NydusCore::new(
+                &self.bootstrap,
+                config,
+                runtime.as_ref().map(Runtime::handle).cloned(),
+            )?
         } else {
             local_core(&self.bootstrap, &self.blob_dir, &self.output_dir)?
         };

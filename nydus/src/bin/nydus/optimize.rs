@@ -5,7 +5,7 @@ use nydus::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, ChunkGroupRef,
 };
 use nydus_backend::Backend;
-use nydus_config::{Config, StorageConfig};
+use nydus_config::{BackendConfig, Config, StorageConfig};
 use nydus_core::CacheOptions;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
@@ -113,10 +113,17 @@ impl OptimizeCommand {
         // Validates the flag combination before any expensive work.
         self.validate()?;
 
+        // Load the storage config.
+        let config = Config::load(&self.config)?;
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+
         // Prepares the access patterns, blob backend, cache directory and
         // cache options from the raw CLI flags.
-        let runtime = Runtime::new().context("failed to build tokio runtime")?;
-        let (patterns, backend, storage) = self.prepare(runtime.handle().clone())?;
+        let (patterns, backend, storage) =
+            self.prepare(config, runtime.as_ref().map(Runtime::handle).cloned())?;
 
         // Runs the pipeline of the requested artifact, persisting its
         // artifacts and printing the summary.
@@ -142,7 +149,8 @@ impl OptimizeCommand {
     /// source blobs' caches are opened with.
     fn prepare(
         &self,
-        runtime: Handle,
+        config: Config,
+        runtime: Option<Handle>,
     ) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
@@ -156,12 +164,10 @@ impl OptimizeCommand {
             ));
         }
 
-        // Load the storage config.
-        let storage_config = Config::load(&self.config)?;
-        let backend = <dyn Backend>::new(&storage_config, Arc::new(Metrics::new()), Some(runtime))
+        let backend = <dyn Backend>::new(&config, Arc::new(Metrics::new()), runtime)
             .context("failed to build blob backend")?;
 
-        Ok((patterns, backend, storage_config.storage))
+        Ok((patterns, backend, config.storage))
     }
 
     /// Runs the ondemand blob pipeline: builds the ondemand blob, persists the

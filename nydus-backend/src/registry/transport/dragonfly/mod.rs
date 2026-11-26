@@ -273,20 +273,16 @@ impl SeedPeerClient {
             let mut ondemand_proxy = None::<ProxyWithSeedPeers>;
             let mut prefetch_proxy = None::<ProxyWithSeedPeers>;
             loop {
-                let resolved = seed_peer_resolver.resolve().await.and_then(|resolved| {
-                    let seed_peers = resolved.seed_peers();
-                    if seed_peers.is_empty() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::NotFound,
-                            "no dragonfly seed peer resolved",
-                        ));
-                    }
+                // Resolve the seed peers, stopping once a client is dropped.
+                let result = tokio::select! {
+                    _ = ondemand_tx.closed() => break,
+                    _ = prefetch_tx.closed() => break,
+                    result = seed_peer_resolver.resolve() => result,
+                };
 
-                    Ok((seed_peers, resolved.next_refresh_at))
-                });
-
-                let next_refresh_at = match resolved {
-                    Ok((seed_peers, next_refresh_at)) => {
+                let next_refresh_at = match result {
+                    Ok(seed_peer_state) => {
+                        let seed_peers = seed_peer_state.seed_peers();
                         if let Some(proxy) = ondemand_proxy.as_ref() {
                             proxy.update_seed_peers(seed_peers.clone()).await;
                         } else {
@@ -333,7 +329,7 @@ impl SeedPeerClient {
                             }
                         }
 
-                        next_refresh_at
+                        seed_peer_state.next_refresh_at
                     }
                     Err(err) => {
                         error!("{err}, retrying in {:?}", SeedPeerResolver::RETRY_INTERVAL);
@@ -415,6 +411,7 @@ mod tests {
     use dragonfly_client_request::SeedPeer;
     use serde_json::json;
     use std::fs;
+    use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use tempfile::tempdir;
@@ -605,6 +602,32 @@ mod tests {
         drop(clients);
 
         let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime.metrics().num_alive_tasks() > 0 {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn clients_end_the_resolve_task_once_dropped_while_the_scheduler_hangs() {
+        let dir = tempdir().unwrap();
+        let scheduler = TcpListener::bind("127.0.0.1:0").unwrap();
+        let runtime = Runtime::new().unwrap();
+        let clients = SeedPeerClient::clients(
+            runtime.handle(),
+            SeedPeerResolver::new(
+                dir.path(),
+                format!("http://{}/", scheduler.local_addr().unwrap()),
+            ),
+            0,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        let _connection = scheduler.accept().unwrap();
+
+        drop(clients);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
         while runtime.metrics().num_alive_tasks() > 0 {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(10));

@@ -1,15 +1,15 @@
 use clap::Parser;
-use nydus::error::{Context, Result};
+use nydus::error::Result;
 use nydus::signal;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_telemetry::logging::init_tracing;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -127,9 +127,6 @@ impl UblkCommand {
         // Register the termination signals (TERM set + SIGHUP).
         let signals = signal::register_termination_signals()?;
 
-        // Build the tokio runtime after registering the signals.
-        let runtime = Runtime::new().context("failed to build tokio runtime")?;
-
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
         let _guards = init_tracing(
@@ -142,14 +139,23 @@ impl UblkCommand {
 
         // Load the storage config and run the ublk service until shutdown.
         Config::load(&self.config)
-            .and_then(|config| self.run(signals, config, runtime.handle().clone()))
+            .and_then(|config| self.run(signals, config))
             .inspect_err(|err| error!("nydus ublk failed: {}", err.report()))
     }
 
     /// Runs the ublk service: builds the core, attaches the device, prints
     /// its path, and serves I/O until a termination signal stops it.
-    fn run(&self, signals: signal::Signals, config: Config, runtime: Handle) -> Result<()> {
-        let core = Arc::new(UblkCore::new(&self.bootstrap, config, Some(runtime))?);
+    fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+        let core = Arc::new(UblkCore::new(
+            &self.bootstrap,
+            config,
+            runtime.as_ref().map(Runtime::handle).cloned(),
+        )?);
         info!(
             "serving {} as a {} byte block device",
             self.bootstrap.display(),

@@ -7,7 +7,7 @@ use nydus::signal;
 use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, default_runtime_dir,
-    Config, PrefetchScope,
+    BackendConfig, Config, PrefetchScope,
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -16,7 +16,7 @@ use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tracing::{error, info, warn, Level};
 
 use super::{default_log_dir, default_parallelism, NAME};
@@ -146,18 +146,17 @@ impl FuseCommand {
     /// and serving it until a termination signal arrives.
     pub fn execute(&self) -> Result<()> {
         let signals = signal::register_termination_signals()?;
-        let runtime = Runtime::new().context("failed to build tokio runtime")?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let stop = shutdown.clone();
         let signal_thread = signal::spawn_signal_thread("fuse", signals, move || {
             stop.store(true, Ordering::Relaxed);
         })?;
-        let result = self.run(shutdown, runtime.handle().clone());
+        let result = self.run(shutdown);
         signal_thread.shutdown()?;
         result
     }
 
-    fn run(&self, shutdown: Arc<AtomicBool>, runtime: Handle) -> Result<()> {
+    fn run(&self, shutdown: Arc<AtomicBool>) -> Result<()> {
         let api_socket = self
             .apiserver
             .as_deref()
@@ -173,17 +172,12 @@ impl FuseCommand {
             self.console,
         )?;
 
-        self.serve(shutdown, api_socket, runtime)
+        self.serve(shutdown, api_socket)
             .inspect_err(|err| error!("nydus fuse failed: {}", err.report()))
     }
 
     /// Mounts the image and serves it until `shutdown` is set.
-    fn serve(
-        &self,
-        shutdown: Arc<AtomicBool>,
-        api_socket: Option<PathBuf>,
-        runtime: Handle,
-    ) -> Result<()> {
+    fn serve(&self, shutdown: Arc<AtomicBool>, api_socket: Option<PathBuf>) -> Result<()> {
         // Load the optional storage config. CLI flags take precedence over config
         // values, so --blob-dir/--cache-dir override the backend/cache directories.
         let storage_config = match &self.config {
@@ -232,6 +226,7 @@ impl FuseCommand {
         // cover it all.
         let metrics = Arc::new(Metrics::new());
         let ondemand_recorder = Arc::new(OndemandRecorder::default());
+        let runtime;
         let backend: Option<Arc<dyn Backend>> = if self.blob.is_some() {
             None
         } else if let Some(dir) = self.blob_dir.as_ref() {
@@ -243,9 +238,18 @@ impl FuseCommand {
             }
             Some(Arc::new(Local::new(dir.clone(), metrics.clone())))
         } else if let Some(config) = storage_config.as_ref() {
+            // Build the tokio runtime a registry backend runs on, after the signals are registered.
+            runtime = match &config.backend {
+                BackendConfig::Registry(_) => Some(Runtime::new()?),
+                BackendConfig::Local(_) => None,
+            };
             Some(
-                <dyn Backend>::new(config, metrics.clone(), Some(runtime))
-                    .context("failed to build blob backend")?,
+                <dyn Backend>::new(
+                    config,
+                    metrics.clone(),
+                    runtime.as_ref().map(Runtime::handle).cloned(),
+                )
+                .context("failed to build blob backend")?,
             )
         } else {
             None
