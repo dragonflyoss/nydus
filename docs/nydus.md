@@ -2280,9 +2280,11 @@ Inside the layer data:
 	deduplicates or snapshots
 	at a fixed granularity (2MiB on common cloud disks) sees stable blocks.
 	Because the alignment is relative to the data file, not to the image
-	address space, `merge` may map the device anywhere. Put the store on a
-	filesystem that keeps file extents on that grid as well (e.g. XFS with
-	`su=2m` / `extsize 2m`).
+	address space, `merge` may map the device anywhere. The blob file has to
+	sit on that grid of the volume as well: `build` allocates it ahead of the
+	writes in steps of `N` (at least 2MiB), which ext4 with 4KiB blocks places
+	on boundaries of the step while the volume has free runs of that size and
+	alignment; on XFS use `su=2m` / `extsize 2m`.
 - The builder compresses on a worker pool: file data (and the packed
 	stream) is cut into 4MiB segments handed to `min(CPUs, 8)` threads, and
 	segments are committed to the blob strictly in submission order, so the

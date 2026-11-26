@@ -14,7 +14,7 @@ use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use tabled::{settings::Style, Table, Tabled};
-use tracing::Level;
+use tracing::{warn, Level};
 
 #[derive(Debug, Clone, Parser)]
 #[command(group(
@@ -419,7 +419,12 @@ impl BuildCommand {
     fn run(&self, options: &BuildImageOptions) -> Result<()> {
         self.validate()?;
         let blob_output = BlobOutput::new(self.blob.as_deref(), self.blob_dir.as_deref())?;
-        let writer = BufWriter::new(blob_output.create()?);
+        // An aligned layer is laid out for block-level dedup of the volume,
+        // which also needs the blob file itself on the volume's grid.
+        let writer = BufWriter::new(PreallocWriter::new(
+            blob_output.create()?,
+            self.erofs_data_alignment.as_u64(),
+        ));
         let image = match self.source_type {
             SourceType::Dir => build_image(options, writer),
             SourceType::Tar => build_image_from_tar_layer(options, &self.source, writer),
@@ -581,6 +586,129 @@ impl BlobOutput {
                 })?;
 
                 Ok(full_blob_path)
+            }
+        }
+    }
+}
+
+/// The blob file writer that allocates the space of the file ahead of the
+/// writes, one step at a time.
+///
+/// A layer is streamed with its size unknown, and space allocated write by
+/// write lands wherever the volume is free at the moment. ext4 serves a power
+/// of two request from a free buddy of that size, which starts on a multiple
+/// of it, so every step lands on that grid of the volume. Small steps still
+/// find such a buddy on a fragmented volume.
+struct PreallocWriter {
+    /// The blob file.
+    file: File,
+
+    /// The length of the bytes written to the file.
+    written: u64,
+
+    /// The length of the space allocated for the file.
+    allocated: u64,
+
+    /// The length of the space allocated at a time; zero writes without
+    /// allocating ahead.
+    step: u64,
+}
+
+/// Implements the allocation of the blob file for PreallocWriter.
+impl PreallocWriter {
+    /// The smallest step the allocation grows by; a smaller alignment would
+    /// cost an allocation per write.
+    const MIN_STEP: u64 = 2 << 20;
+
+    /// Creates a writer that allocates ahead in steps of the alignment, at
+    /// least [Self::MIN_STEP]; a zero alignment writes without allocating
+    /// ahead.
+    fn new(file: File, alignment: u64) -> Self {
+        let step = match alignment {
+            0 => 0,
+            alignment => alignment.max(Self::MIN_STEP),
+        };
+
+        Self {
+            file,
+            written: 0,
+            allocated: 0,
+            step,
+        }
+    }
+
+    /// Allocates `len` bytes of `file` at `offset` without changing its size,
+    /// only on Linux.
+    #[allow(unused_variables)]
+    fn allocate(file: &File, offset: u64, len: u64) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+
+            loop {
+                // SAFETY: fallocate takes no pointers.
+                let ret = unsafe {
+                    libc::fallocate(
+                        file.as_raw_fd(),
+                        libc::FALLOC_FL_KEEP_SIZE,
+                        offset as libc::off_t,
+                        len as libc::off_t,
+                    )
+                };
+                if ret == 0 {
+                    return Ok(());
+                }
+
+                let err = io::Error::last_os_error();
+                if err.kind() != io::ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Implements the write that allocates ahead for PreallocWriter.
+impl Write for PreallocWriter {
+    /// Writes the buffer after allocating the steps it runs into. A failed
+    /// allocation (a FIFO, a file system without fallocate, a full volume)
+    /// stops allocating ahead, and the writes still allocate what they need.
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Allocate one step per request, so each request stays a power of two.
+        while self.step != 0 && self.written + buf.len() as u64 > self.allocated {
+            if let Err(err) = Self::allocate(&self.file, self.allocated, self.step) {
+                warn!(
+                    "failed to allocate the blob file ahead, falling back to plain writes: {}",
+                    err
+                );
+                self.step = 0;
+                break;
+            }
+
+            self.allocated += self.step;
+        }
+
+        let n = self.file.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    /// Flushes the blob file.
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl Drop for PreallocWriter {
+    /// Frees the unused tail of the last step; a failure only leaves it
+    /// allocated.
+    fn drop(&mut self) {
+        if self.allocated > self.written {
+            if let Err(err) = self.file.set_len(self.written) {
+                warn!("failed to free the unused tail of the blob file: {}", err);
             }
         }
     }
@@ -1378,5 +1506,41 @@ mod tests {
         .unwrap();
 
         assert_eq!(hex::encode(slot.blob_id().unwrap()), full_blob_digest);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prealloc_writer_allocates_ahead_and_frees_the_tail() {
+        const STEP: u64 = 32 << 20;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob");
+        let allocated = || fs::metadata(&path).unwrap().blocks() * 512;
+        let expected = vec![0xa5u8; (1 << 20) + 100];
+
+        let mut writer = PreallocWriter::new(File::create(&path).unwrap(), STEP);
+        writer.write_all(&expected).unwrap();
+        assert!(allocated() >= STEP);
+        drop(writer);
+
+        assert!(allocated() < STEP);
+        assert_eq!(fs::read(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn prealloc_writer_falls_back_to_plain_writes_on_a_pipe() {
+        let (mut reader, writer) = io::pipe().unwrap();
+        let expected = vec![0xa5u8; 100];
+
+        let mut writer = PreallocWriter::new(
+            File::from(std::os::fd::OwnedFd::from(writer)),
+            PreallocWriter::MIN_STEP,
+        );
+        writer.write_all(&expected).unwrap();
+        assert_eq!(writer.step, 0);
+        drop(writer);
+
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content).unwrap();
+        assert_eq!(content, expected);
     }
 }
