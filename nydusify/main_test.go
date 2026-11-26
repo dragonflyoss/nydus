@@ -55,6 +55,12 @@ func mockApp() *cli.App {
 	}
 }
 
+func TestParentCacheRequiresCapture(t *testing.T) {
+	err := mockApp().Run([]string{"nydusify", "convert", "--source", mockSourceRef,
+		"--target", mockTargetRef, "--parent-cache-dir", t.TempDir()})
+	assert.EqualError(t, err, "--parent-cache-dir requires --cache")
+}
+
 func builderPath(t *testing.T) string {
 	builder := os.Getenv("NYDUS_TEST_BUILDER")
 	if builder == "" {
@@ -983,6 +989,24 @@ func TestRunConvert(t *testing.T) {
 			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "unsupported --compressor")
+			},
+		},
+		{
+			name: "cache rejects native erofs compressor",
+			args: func(t *testing.T, _ *registrytest.Registry, dir string) []string {
+				return []string{"--target", mockTargetRef, "--cache", filepath.Join(dir, "capture.json"), "--compressor", "erofs-lz4"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert.ErrorContains(t, err, "--cache supports --compressor none, zstd or lz4")
+			},
+		},
+		{
+			name: "cache rejects oci compressor",
+			args: func(t *testing.T, _ *registrytest.Registry, dir string) []string {
+				return []string{"--target", mockTargetRef, "--cache", filepath.Join(dir, "capture.json"), "--compressor", "oci-tar"}
+			},
+			expect: func(t *testing.T, _ *registrytest.Registry, _ string, err error) {
+				assert.ErrorContains(t, err, "--cache supports --compressor none, zstd or lz4")
 			},
 		},
 		{

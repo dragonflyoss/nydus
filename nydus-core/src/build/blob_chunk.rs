@@ -68,6 +68,9 @@ pub(crate) fn validate_chunk_group_min_size(chunk_group_min_size: u32) -> Result
 /// device mode places chunks immediately and needs no resolution.
 pub struct BlobWriter<W> {
     writer: W,
+    // Called after a group's logical placement is fixed, before encoding.
+    capture: Option<CaptureOutput>,
+    decoded_group: Option<ChunkGroupCallback>,
     file_chunk_size: u32,
     compressor: BlobMetadataCompressor,
     digester: Option<BlobMetadataDigester>,
@@ -150,6 +153,13 @@ struct Bin {
     placements: Vec<usize>,
     blocks: u64,
     digest: Option<BlobMetadataChunkGroupDigest>,
+}
+
+type ChunkGroupCallback = Box<dyn FnMut(u64, &[u32], &[u8]) -> Result<()> + Send>;
+
+struct CaptureOutput {
+    write_group: ChunkGroupCallback,
+    buffer: Vec<u8>,
 }
 
 enum ChunkInput<'a> {
@@ -899,9 +909,8 @@ impl ChunkGroupEncoder {
         self.free_buffers.pop()
     }
 
-    fn recycle_buffer(&mut self, mut buf: Vec<u8>) {
+    fn recycle_buffer(&mut self, buf: Vec<u8>) {
         if self.free_buffers.len() < ENCODE_MAX_IN_FLIGHT {
-            buf.clear();
             self.free_buffers.push(buf);
         }
     }
@@ -1002,6 +1011,8 @@ impl<W: Write> BlobWriter<W> {
         };
         let mut writer = Self {
             writer,
+            capture: None,
+            decoded_group: None,
             file_chunk_size: chunk_size,
             compressor,
             digester,
@@ -1018,7 +1029,7 @@ impl<W: Write> BlobWriter<W> {
             members: Vec::new(),
             digests: Vec::new(),
             blob_metadata_chunk_groups: Vec::new(),
-            chunk_buf: vec![0u8; chunk_size as usize],
+            chunk_buf: Vec::new(),
             encoder: None,
             raw_device: false,
             data_alignment: 0,
@@ -1383,6 +1394,52 @@ impl<W: Write> BlobWriter<W> {
 
     pub fn into_parts(self) -> (W, Option<Sha256>) {
         (self.writer, self.data_hasher)
+    }
+
+    /// Capture fixes logical placements without encoding or hashing payloads.
+    pub(crate) fn set_capture_only<F>(&mut self, capture: F)
+    where
+        F: FnMut(u64, &[u32], &[u8]) -> Result<()> + Send + 'static,
+    {
+        self.capture = Some(CaptureOutput {
+            write_group: Box::new(capture),
+            buffer: Vec::new(),
+        });
+        self.digester = None;
+        self.data_hasher = None;
+    }
+
+    /// Observe the exact decoded group buffer before it is handed to the encoder.
+    pub(crate) fn set_decoded_group_callback<F>(&mut self, callback: F)
+    where
+        F: FnMut(u64, &[u32], &[u8]) -> Result<()> + Send + 'static,
+    {
+        self.decoded_group = Some(Box::new(callback));
+    }
+
+    /// Encode an already placed decoded group without regrouping its chunks.
+    pub(crate) fn write_placed_group(
+        &mut self,
+        first_block: u64,
+        lengths: &[u32],
+        data: Vec<u8>,
+    ) -> Result<()> {
+        if first_block != self.next_blkaddr
+            || lengths.is_empty()
+            || lengths
+                .iter()
+                .any(|len| *len == 0 || *len > self.file_chunk_size)
+            || lengths.iter().map(|len| *len as u64).sum::<u64>() != data.len() as u64
+        {
+            return Err(Error::InvalidParameter(
+                "invalid captured group".to_string(),
+            ));
+        }
+        let blocks = lengths
+            .iter()
+            .map(|len| u64::from(*len).div_ceil(4096))
+            .sum();
+        self.submit_group(ChunkInput::Owned(data), lengths, blocks, None)
     }
 
     /// Lengths of all sealed chunks in group order, including lone chunks.
@@ -1811,17 +1868,9 @@ impl<W: Write> BlobWriter<W> {
         self.placements.push(PENDING);
 
         if len >= self.chunk_group_min_size {
-            let data = match input {
-                ChunkInput::Borrowed(data) => data.to_vec(),
-                ChunkInput::Owned(data) => data,
-            };
-            self.submit_bin(Bin {
-                data,
-                lens: vec![len],
-                digest,
-                placements: vec![placement],
-                blocks,
-            })?;
+            let first_block = self.next_blkaddr;
+            self.submit_group(input, &[len], blocks, digest)?;
+            self.placements[placement] = first_block;
             return Ok(placement as u64);
         }
 
@@ -1850,15 +1899,27 @@ impl<W: Write> BlobWriter<W> {
             let data = match input {
                 ChunkInput::Borrowed(data) => {
                     let buffer = self
-                        .encoder
-                        .as_mut()
-                        .and_then(ChunkGroupEncoder::take_buffer)
+                        .take_group_buffer()
                         .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
                     let mut buffer = buffer;
                     buffer.extend_from_slice(data);
                     buffer
                 }
-                ChunkInput::Owned(data) => data,
+                ChunkInput::Owned(data) => {
+                    if self
+                        .capture
+                        .as_ref()
+                        .is_some_and(|capture| capture.buffer.capacity() > data.capacity())
+                    {
+                        let mut buffer =
+                            self.take_group_buffer().expect("capture buffer available");
+                        buffer.extend_from_slice(&data);
+                        self.recycle_source_buffer(data);
+                        buffer
+                    } else {
+                        data
+                    }
+                }
             };
             self.open_bin = Some(Bin {
                 data,
@@ -1890,22 +1951,37 @@ impl<W: Write> BlobWriter<W> {
         Ok(placement as u64)
     }
 
-    fn take_source_buffer(&mut self) -> Vec<u8> {
+    pub(crate) fn take_source_buffer(&mut self) -> Vec<u8> {
         let mut buffer = mem::take(&mut self.chunk_buf);
         if buffer.capacity() == 0 {
-            buffer = self
-                .encoder
-                .as_mut()
-                .and_then(ChunkGroupEncoder::take_buffer)
-                .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize));
+            buffer = match self.capture.as_mut() {
+                Some(capture) if capture.buffer.capacity() != 0 => mem::take(&mut capture.buffer),
+                _ => self
+                    .encoder
+                    .as_mut()
+                    .and_then(ChunkGroupEncoder::take_buffer)
+                    .unwrap_or_else(|| Vec::with_capacity(self.file_chunk_size as usize)),
+            };
         }
         buffer
     }
 
-    fn recycle_source_buffer(&mut self, mut buffer: Vec<u8>) {
+    fn take_group_buffer(&mut self) -> Option<Vec<u8>> {
+        let mut buffer = match self.capture.as_mut() {
+            Some(capture) if capture.buffer.capacity() != 0 => mem::take(&mut capture.buffer),
+            _ => self.encoder.as_mut()?.take_buffer()?,
+        };
         buffer.clear();
+        Some(buffer)
+    }
+
+    fn recycle_source_buffer(&mut self, buffer: Vec<u8>) {
         if self.chunk_buf.capacity() == 0 {
             self.chunk_buf = buffer;
+        } else if let Some(capture) = self.capture.as_mut() {
+            if buffer.capacity() > capture.buffer.capacity() {
+                capture.buffer = buffer;
+            }
         } else if let Some(encoder) = self.encoder.as_mut() {
             encoder.recycle_buffer(buffer);
         }
@@ -1938,23 +2014,63 @@ impl<W: Write> BlobWriter<W> {
             block += u64::from(len).div_ceil(u64::from(EROFS_BLOCK_SIZE));
         }
         debug_assert_eq!(block, end_block);
-        let first_chunk_index = u32::try_from(self.members.len())
-            .map_err(|_| Error::Overflow("blob holds too many chunks".to_string()))?;
-        self.members.extend_from_slice(&bin.lens);
-        if self.digester.is_some() {
-            self.digests.push(match bin.digest {
-                Some(digest) => digest,
-                None => BlobMetadataChunkGroupDigest::from_chunks([bin.data.as_slice()]),
-            });
+        self.submit_group(
+            ChunkInput::Owned(bin.data),
+            &bin.lens,
+            bin.blocks,
+            bin.digest,
+        )
+    }
+
+    // Shared by newly placed chunks and capture replay; replay has no inode
+    // addresses to resolve and does not need a placements table.
+    fn submit_group(
+        &mut self,
+        input: ChunkInput<'_>,
+        lengths: &[u32],
+        blocks: u64,
+        digest: Option<BlobMetadataChunkGroupDigest>,
+    ) -> Result<()> {
+        let group = self.next_group;
+        let first_block = self.next_blkaddr;
+        let end_block = first_block
+            .checked_add(blocks)
+            .filter(|end| *end <= u32::MAX as u64)
+            .ok_or_else(|| Error::Overflow("blob exceeds 32-bit block count".to_string()))?;
+        if let Some(capture) = self.capture.as_mut() {
+            (capture.write_group)(first_block, lengths, input.as_slice())?;
+            self.next_group = group + 1;
+            self.next_blkaddr = end_block;
+            if let ChunkInput::Owned(data) = input {
+                if data.capacity() > capture.buffer.capacity() {
+                    capture.buffer = data;
+                }
+            }
+            return Ok(());
+        }
+        if let Some(callback) = self.decoded_group.as_mut() {
+            callback(first_block, lengths, input.as_slice())?;
         }
         self.next_group = group + 1;
         self.next_blkaddr = end_block;
-
+        let data = match input {
+            ChunkInput::Owned(data) => data,
+            ChunkInput::Borrowed(data) => data.to_vec(),
+        };
+        let first_chunk_index = u32::try_from(self.members.len())
+            .map_err(|_| Error::Overflow("blob holds too many chunks".to_string()))?;
+        self.members.extend_from_slice(lengths);
+        if self.digester.is_some() {
+            self.digests.push(match digest {
+                Some(digest) => digest,
+                None => BlobMetadataChunkGroupDigest::from_chunks([data.as_slice()]),
+            });
+        }
         let compressor = self.compressor;
         let encoder = self
             .encoder
             .get_or_insert_with(|| ChunkGroupEncoder::new(compressor));
-        encoder.submit(bin.data, first_block as u32, first_chunk_index)?;
+        encoder.submit(data, first_block as u32, first_chunk_index)?;
         while self
             .encoder
             .as_ref()
@@ -2029,6 +2145,148 @@ pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_callback_and_encoder_share_placed_group_buffer() {
+        let payload = vec![42; 4096];
+        let address = payload.as_ptr() as usize;
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback = observed.clone();
+        let mut encoded = Vec::new();
+        let mut writer = BlobWriter::new(
+            &mut encoded,
+            4096,
+            BlobMetadataCompressor::None,
+            None,
+            true,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: 4096,
+            },
+        )
+        .unwrap();
+        writer.set_decoded_group_callback(move |first, lengths, bytes| {
+            assert_eq!(first, 0);
+            assert_eq!(lengths, &[4096]);
+            assert_eq!(bytes.as_ptr() as usize, address);
+            callback.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        });
+        writer.write_placed_group(0, &[4096], payload).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        assert_eq!(encoded, *observed.lock().unwrap());
+        assert_eq!(encoded, vec![42; 4096]);
+    }
+
+    #[test]
+    fn group_callback_failure_does_not_advance_or_encode() {
+        for capture in [false, true] {
+            let mut encoded = Vec::new();
+            let mut writer = BlobWriter::new(
+                &mut encoded,
+                4096,
+                BlobMetadataCompressor::None,
+                None,
+                true,
+                BlobLayout::ChunkGroups {
+                    chunk_group_min_size: 4096,
+                },
+            )
+            .unwrap();
+            let callback =
+                |_: u64, _: &[u32], _: &[u8]| Err(Error::Runtime("cache write failed".to_string()));
+            if capture {
+                writer.set_capture_only(callback);
+            } else {
+                writer.set_decoded_group_callback(callback);
+            }
+            let error = writer
+                .write_placed_group(0, &[4096], vec![42; 4096])
+                .unwrap_err();
+            assert!(error.to_string().contains("cache write failed"));
+            assert_eq!(writer.next_blkaddr, 0);
+            assert_eq!(writer.next_group, 0);
+            assert!(writer.members.is_empty());
+            assert!(writer.blob_metadata_chunk_groups.is_empty());
+            assert!(writer.encoder.is_none());
+            drop(writer);
+            assert!(encoded.is_empty());
+        }
+    }
+
+    #[test]
+    fn capture_borrows_lone_chunks_and_reuses_packed_groups() {
+        let mut writer = BlobWriter::new(
+            std::io::sink(),
+            4096,
+            BlobMetadataCompressor::None,
+            None,
+            false,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: 8192,
+            },
+        )
+        .unwrap();
+        writer.set_capture_only(|_, _, _| Ok(()));
+        let chunk = vec![42; 4096];
+        for _ in 0..8 {
+            writer.write_data_chunk(&chunk).unwrap();
+        }
+        let buffer = &writer.capture.as_ref().unwrap().buffer;
+        assert!(buffer.capacity() >= 32768);
+        let address = buffer.as_ptr();
+        writer.write_data_chunk(&chunk).unwrap();
+        assert_eq!(writer.open_bin.as_ref().unwrap().data.as_ptr(), address);
+        assert_eq!(writer.capture.as_ref().unwrap().buffer.capacity(), 0);
+
+        let chunk = vec![42; 8192];
+        let address = chunk.as_ptr() as usize;
+        let mut writer = BlobWriter::new(
+            std::io::sink(),
+            8192,
+            BlobMetadataCompressor::None,
+            None,
+            false,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: 8192,
+            },
+        )
+        .unwrap();
+        writer.set_capture_only(move |_, _, payload| {
+            assert_eq!(payload.as_ptr() as usize, address);
+            Ok(())
+        });
+        writer.write_data_chunk(&chunk).unwrap();
+        assert_eq!(writer.chunk_buf.capacity(), 0);
+
+        let mut writer = BlobWriter::new(
+            std::io::sink(),
+            8192,
+            BlobMetadataCompressor::None,
+            None,
+            false,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: 8192,
+            },
+        )
+        .unwrap();
+        writer.set_capture_only(|_, _, _| Ok(()));
+        writer
+            .write_data_chunk_from_source(8192, |data| {
+                data.fill(42);
+                Ok(())
+            })
+            .unwrap();
+        let address = writer.capture.as_ref().unwrap().buffer.as_ptr() as usize;
+        writer
+            .write_data_chunk_from_source(8192, |data| {
+                assert_eq!(data.as_ptr() as usize, address);
+                assert!(data.iter().all(|&byte| byte == 42));
+                data.fill(43);
+                Ok(())
+            })
+            .unwrap();
+    }
 
     /// Geometry the layout assertions below are written against: 64 KiB
     /// chunks (16 blocks) and a 32 KiB chunk group minimum size (what `plain`

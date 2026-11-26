@@ -12,6 +12,7 @@ import "github.com/pkg/errors"
 // nydusify convert. Normal source mode builds from --source; artifact mode
 // packages an existing bootstrap and any referenced local or parent blobs.
 type ConvertInput struct {
+	CachePath     string
 	Sources       []string
 	BootstrapPath string
 	BlobPaths     []string
@@ -22,6 +23,15 @@ type ConvertInput struct {
 // ValidateConvertInputs validates the input mode and reports whether artifact
 // packaging mode should be used.
 func ValidateConvertInputs(input ConvertInput) (bool, error) {
+	if input.CachePath != "" {
+		if len(input.Sources) > 0 || input.BootstrapPath != "" || len(input.BlobPaths) > 0 || input.BlobDir != "" {
+			return false, errors.New("--cache cannot be combined with --source/--bootstrap/--blob/--blob-dir")
+		}
+		if len(input.ParentImages) > 1 {
+			return false, errors.New("only one --parent-image is supported")
+		}
+		return true, nil
+	}
 	artifactMode := input.BootstrapPath != "" || len(input.BlobPaths) > 0 || input.BlobDir != "" || len(input.ParentImages) > 0
 	if len(input.Sources) == 0 && !artifactMode {
 		return false, errors.New("either --source or --bootstrap is required")

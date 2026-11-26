@@ -1,12 +1,1174 @@
 #![allow(clippy::type_complexity)]
 
+// Retain a real, previously published blob as an unused device. This models
+// an overlaid layer's stale device table without changing any file contents.
+fn retain_prune_parent_device(capture: &Path, parent: &Path, evidence: &Path) {
+    use nydus_format::erofs::{
+        ErofsDeviceSlot, ErofsSuperblock, EROFS_DEVICESLOT_SIZE, EROFS_SUPER_OFFSET,
+    };
+
+    let sb_at = EROFS_SUPER_OFFSET as usize;
+
+    let parent_reader = ErofsReader::open_metadata_only(parent).unwrap();
+    let parent_infos = parent_reader.blob_infos().unwrap();
+    assert_eq!(parent_infos.len(), 1);
+    let parent_bytes = fs::read(parent).unwrap();
+    let parent_sb = ErofsSuperblock::from_bytes(&parent_bytes[sb_at..]).unwrap();
+    let parent_at = usize::from(parent_sb.devt_slotoff()) * EROFS_DEVICESLOT_SIZE;
+    let parent_slot = *ErofsDeviceSlot::from_bytes(&parent_bytes[parent_at..]).unwrap();
+
+    let mut bytes = fs::read(capture).unwrap();
+    let mut sb = *ErofsSuperblock::from_bytes(&bytes[sb_at..]).unwrap();
+    assert_eq!(
+        sb.extra_devices(),
+        1,
+        "fixture requires a fresh Full capture"
+    );
+    let at = usize::from(sb.devt_slotoff()) * EROFS_DEVICESLOT_SIZE;
+    let end = at + 2 * EROFS_DEVICESLOT_SIZE;
+    assert!(end <= sb.meta_blkaddr() as usize * EROFS_BLOCK_SIZE as usize);
+    assert!(bytes[at + EROFS_DEVICESLOT_SIZE..end]
+        .iter()
+        .all(|b| *b == 0));
+    let current_slot = *ErofsDeviceSlot::from_bytes(&bytes[at..]).unwrap();
+    sb.extra_devices = 2u16.to_le_bytes();
+    bytes[sb_at..sb_at + sb.as_bytes().len()].copy_from_slice(sb.as_bytes());
+    nydus_core::build::bootstrap::patch_device_slots(&mut bytes, &[current_slot, parent_slot])
+        .unwrap();
+    let temporary = capture.with_extension("prune.tmp");
+    fs::write(&temporary, bytes).unwrap();
+    fs::rename(temporary, capture).unwrap();
+    assert_eq!(
+        ErofsReader::open_metadata_only(capture)
+            .unwrap()
+            .blob_infos()
+            .unwrap()
+            .len(),
+        2
+    );
+    fs::write(
+        evidence,
+        serde_json::to_vec(&serde_json::json!({
+            "removed_blobs": [hex::encode(parent_infos[0].blob_id)],
+            "before_device_count": 2,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "node-side fixture for the decoded-cache prune E2E"]
+fn incremental_writer_prune_e2e_fixture() {
+    // Workspace CI includes ignored tests without node-side fixture inputs.
+    let Some(capture) = std::env::var_os("NYDUS_PRUNE_CAPTURE") else {
+        assert!(
+            std::env::var_os("NYDUS_PRUNE_PARENT").is_none()
+                && std::env::var_os("NYDUS_PRUNE_EVIDENCE").is_none(),
+            "capture bootstrap path is required when configuring the prune fixture"
+        );
+        return;
+    };
+    let parent = std::env::var_os("NYDUS_PRUNE_PARENT").expect("published parent bootstrap path");
+    let evidence = std::env::var_os("NYDUS_PRUNE_EVIDENCE").expect("fixture evidence path");
+    retain_prune_parent_device(
+        Path::new(&capture),
+        Path::new(&parent),
+        Path::new(&evidence),
+    );
+}
+
+fn run_prune_fixture(
+    capture: Option<&Path>,
+    parent: Option<&Path>,
+    evidence: Option<&Path>,
+) -> std::process::Output {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args([
+        "--include-ignored",
+        "--exact",
+        "incremental_writer::incremental_writer_prune_e2e_fixture",
+    ]);
+    for (name, path) in [
+        ("NYDUS_PRUNE_CAPTURE", capture),
+        ("NYDUS_PRUNE_PARENT", parent),
+        ("NYDUS_PRUNE_EVIDENCE", evidence),
+    ] {
+        command.env_remove(name);
+        if let Some(path) = path {
+            command.env(name, path);
+        }
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn incremental_writer_prune_fixture_requires_complete_node_inputs() {
+    let absent = Path::new("missing-prune-fixture");
+    for (capture, parent, evidence, success) in [
+        (None, None, None, true),
+        (None, Some(absent), None, false),
+        (Some(absent), None, Some(absent), false),
+    ] {
+        let output = run_prune_fixture(capture, parent, evidence);
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+fn incremental_writer_capture_prunes_retained_parent_device() {
+    let temp = tempdir().unwrap();
+    let parent = temp.path().join("parent");
+    let child = temp.path().join("child");
+    let mut writer = IncrementalWriter::create(capture_options(&parent)).unwrap();
+    writer
+        .replace_file(Path::new("data"), vec![1; 8192])
+        .unwrap();
+    writer.commit().unwrap();
+    let mut writer = IncrementalWriter::create(capture_options(&child)).unwrap();
+    writer
+        .replace_file(Path::new("data"), vec![2; 8192])
+        .unwrap();
+    fs::create_dir_all(&child).unwrap();
+    let data = capture_data_file(&child);
+    writer.commit_capture(CaptureCache(data.clone())).unwrap();
+    let fixture = run_prune_fixture(
+        Some(&child.join("capture.boot")),
+        Some(&parent.join("image.boot")),
+        Some(&child.join("fixture.json")),
+    );
+    assert!(
+        fixture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fixture.stdout)
+    );
+    let original = fs::read(child.join("capture.boot")).unwrap();
+    let (result, _) = encode_cache_options(
+        &child,
+        Some(&data),
+        nydus_core::EncodeCacheOptions {
+            compressor: None,
+            prune: true,
+            compact_max_layers: 2,
+            config: None,
+            parent_cache_dir: None,
+        },
+    );
+    assert_eq!(result["pruned"], true);
+    assert_ne!(result["compacted"], true);
+    assert_eq!(
+        ErofsReader::open_metadata_only(&child.join("image.boot"))
+            .unwrap()
+            .blob_infos()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(fs::read(child.join("capture.boot")).unwrap(), original);
+}
+
+#[derive(Clone)]
+struct CaptureCache(Arc<fs::File>);
+
+impl nydus_core::ChunkGroupCache for CaptureCache {
+    fn write_group(&mut self, first_block: u64, lengths: &[u32], payload: &[u8]) -> io::Result<()> {
+        let end =
+            nydus_storage::cache::write_decoded_group(&self.0, first_block, lengths, payload)?;
+        self.0.set_len(end * EROFS_BLOCK_SIZE as u64)
+    }
+}
+
+fn capture_options(output: &Path) -> IncrementalWriterOptions {
+    let mut options = writer_options(output.to_path_buf());
+    options.chunk_size = EROFS_BLOCK_SIZE;
+    options.chunk_group_min_size = EROFS_BLOCK_SIZE * 2;
+    options
+}
+
+fn capture_data_file(output: &Path) -> Arc<fs::File> {
+    Arc::new(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(output.join("capture.data"))
+            .unwrap(),
+    )
+}
+
+fn encode_cache_options(
+    output: &Path,
+    data: Option<&fs::File>,
+    options: nydus_core::EncodeCacheOptions,
+) -> (serde_json::Value, Vec<u8>) {
+    let mut stream = Vec::new();
+    nydus_core::encode_cache(&output.join("capture.json"), data, &mut stream, options).unwrap();
+    let result =
+        serde_json::from_slice(&fs::read(output.join("cache-result.json")).unwrap()).unwrap();
+    (result, stream)
+}
+
+#[test]
+fn incremental_writer_capture_compressor_inheritance_and_override() {
+    let compressors = [
+        BlobMetadataCompressor::None,
+        BlobMetadataCompressor::Zstd,
+        BlobMetadataCompressor::Lz4Block,
+    ];
+    for compact in [false, true] {
+        for captured in compressors {
+            for override_compressor in [None].into_iter().chain(compressors.map(Some)) {
+                let temp = tempdir().unwrap();
+                let output = temp.path();
+                let mut options = capture_options(output);
+                options.compressor = captured;
+                let mut parent = IncrementalWriter::create(options).unwrap();
+                let parent_bytes = vec![b'P'; 8192];
+                parent
+                    .replace_file(Path::new("parent"), parent_bytes.clone())
+                    .unwrap();
+                parent.commit().unwrap();
+                let mut options = capture_options(output);
+                options.compressor = captured;
+                let mut child =
+                    IncrementalWriter::open_metadata_only(&output.join("image.boot"), options)
+                        .unwrap();
+                let upper_bytes = vec![b'U'; 8192];
+                child
+                    .replace_file(Path::new("upper"), upper_bytes.clone())
+                    .unwrap();
+                let data = capture_data_file(output);
+                child.commit_capture(CaptureCache(data.clone())).unwrap();
+                let names = ["capture.json", "capture.boot", "capture.data"];
+                let before = names.map(|name| fs::read(output.join(name)).unwrap());
+                let (result, stream) = encode_cache_options(
+                    output,
+                    Some(&data),
+                    nydus_core::EncodeCacheOptions {
+                        compressor: override_compressor,
+                        compact_max_layers: usize::from(compact),
+                        config: Some(local_config(output, &output.join("source-cache"))),
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(result.get("compacted").is_some(), compact);
+                let digest = result["digest"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("sha256:")
+                    .unwrap();
+                let metadata =
+                    BlobMetadata::from_path(&output.join(format!("{digest}.blob.meta"))).unwrap();
+                assert_eq!(
+                    metadata.compressor(),
+                    override_compressor.unwrap_or(captured)
+                );
+                fs::write(output.join(digest), stream).unwrap();
+                assert_capture_file(output, "parent", &parent_bytes);
+                assert_capture_file(output, "upper", &upper_bytes);
+                for (name, original) in names.into_iter().zip(before) {
+                    assert_eq!(fs::read(output.join(name)).unwrap(), original);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn incremental_writer_capture_retry_protects_sidecar_and_invalidates_commit_marker() {
+    use std::os::unix::fs::MetadataExt;
+    struct BlockResult(PathBuf);
+    impl Write for BlockResult {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if !self.0.exists() {
+                fs::create_dir(&self.0)?;
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for compact in [false, true] {
+        for late_result in [false, true] {
+            let temp = tempdir().unwrap();
+            let output = temp.path();
+            let mut parent = IncrementalWriter::create(capture_options(output)).unwrap();
+            parent
+                .replace_file(Path::new("keep"), b"parent".to_vec())
+                .unwrap();
+            parent.commit().unwrap();
+            let mut child = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                capture_options(output),
+            )
+            .unwrap();
+            child
+                .replace_file(Path::new("upper"), b"upper".to_vec())
+                .unwrap();
+            let data = capture_data_file(output);
+            child.commit_capture(CaptureCache(data.clone())).unwrap();
+            let options = || nydus_core::EncodeCacheOptions {
+                compressor: None,
+                compact_max_layers: usize::from(compact),
+                prune: false,
+                config: Some(local_config(output, &output.join("source-cache"))),
+                parent_cache_dir: None,
+            };
+            let (result, _) = encode_cache_options(output, Some(&data), options());
+            let digest = result["digest"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap();
+            let sidecar = output.join(format!("{digest}.blob.meta"));
+            let original_sidecar = fs::read(&sidecar).unwrap();
+            let imported = output.join("imported.blob.meta");
+            fs::hard_link(&sidecar, &imported).unwrap();
+            fs::write(&imported, b"old-sidecar-sentinel").unwrap();
+            let old_inode = fs::metadata(&imported).unwrap().ino();
+            encode_cache_options(output, Some(&data), options());
+            assert_ne!(fs::metadata(&sidecar).unwrap().ino(), old_inode);
+            assert_eq!(fs::read(&imported).unwrap(), b"old-sidecar-sentinel");
+            assert_eq!(fs::read(&sidecar).unwrap(), original_sidecar);
+
+            let marker = output.join("cache-result.json");
+            let old_marker = fs::read(&marker).unwrap();
+            let old_boot = fs::read(output.join("image.boot")).unwrap();
+            let mut published = result.clone();
+            published["image"] = serde_json::json!({"digest": "sha256:published"});
+            fs::write(&marker, serde_json::to_vec(&published).unwrap()).unwrap();
+            let published_bytes = fs::read(&marker).unwrap();
+            let mut rejected = Vec::new();
+            assert!(nydus_core::encode_cache(
+                &output.join("capture.json"),
+                Some(&data),
+                &mut rejected,
+                options()
+            )
+            .is_err());
+            assert!(rejected.is_empty());
+            assert_eq!(fs::read(&marker).unwrap(), published_bytes);
+            assert_eq!(fs::read(output.join("image.boot")).unwrap(), old_boot);
+            fs::write(&marker, &old_marker).unwrap();
+
+            let mut sink: Box<dyn Write> = if late_result {
+                Box::new(BlockResult(marker.clone()))
+            } else {
+                fs::remove_file(output.join("image.boot")).unwrap();
+                fs::create_dir(output.join("image.boot")).unwrap();
+                Box::new(io::sink())
+            };
+            assert!(nydus_core::encode_cache(
+                &output.join("capture.json"),
+                Some(&data),
+                &mut sink,
+                options()
+            )
+            .is_err());
+            assert!(!marker.is_file());
+            assert!(fs::read(&marker).is_err());
+            assert_eq!(fs::read(&imported).unwrap(), b"old-sidecar-sentinel");
+            assert!(!fs::read_dir(output).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".nydus-")));
+        }
+    }
+}
+
+#[test]
+fn incremental_writer_capture_prunes_before_limit_without_parent_backend() {
+    for upper in [false, true] {
+        let temp = tempdir().unwrap();
+        let output = temp.path();
+        let mut parent = IncrementalWriter::create(capture_options(output)).unwrap();
+        parent
+            .replace_file(Path::new("data"), vec![b'A'; 4096])
+            .unwrap();
+        parent.commit().unwrap();
+        let mut child = IncrementalWriter::open_metadata_only(
+            &output.join("image.boot"),
+            capture_options(output),
+        )
+        .unwrap();
+        child
+            .replace_file(Path::new("data"), b"replacement-tail".to_vec())
+            .unwrap();
+        if !upper {
+            child.commit().unwrap();
+            child = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                capture_options(output),
+            )
+            .unwrap();
+        }
+        let data = capture_data_file(output);
+        child.commit_capture(CaptureCache(data.clone())).unwrap();
+        let before: Vec<_> = ["capture.boot", "capture.json", "capture.data"]
+            .iter()
+            .map(|name| fs::read(output.join(name)).unwrap())
+            .collect();
+        let unused_cache = output.join("must-not-open-cache");
+        let (result, stream) = encode_cache_options(
+            output,
+            upper.then_some(data.as_ref()),
+            nydus_core::EncodeCacheOptions {
+                compressor: None,
+                prune: true,
+                compact_max_layers: 1,
+                config: Some(local_config(&output.join("missing-backend"), &unused_cache)),
+                parent_cache_dir: None,
+            },
+        );
+        assert_eq!(result["pruned"], true);
+        assert!(result.get("compacted").is_none());
+        assert!(result.get("data_file").is_none());
+        assert!(!unused_cache.exists());
+        assert!(!output.join("compact.data").exists());
+        let reader = ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+        assert_eq!(reader.blob_infos().unwrap().len(), 1);
+        if upper {
+            fs::write(
+                output.join(
+                    result["digest"]
+                        .as_str()
+                        .unwrap()
+                        .strip_prefix("sha256:")
+                        .unwrap(),
+                ),
+                stream,
+            )
+            .unwrap();
+        } else {
+            assert!(stream.is_empty());
+            assert_eq!(result["digest"], "");
+        }
+        assert_capture_file(output, "data", b"replacement-tail");
+        for (index, name) in ["capture.boot", "capture.json", "capture.data"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(fs::read(output.join(name)).unwrap(), before[index]);
+        }
+    }
+}
+
+#[test]
+fn incremental_writer_capture_compacts_parent_upper_alias_holes_and_tails() {
+    use std::os::unix::fs::MetadataExt;
+    struct FailedUpload;
+    impl io::Write for FailedUpload {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected upload failure"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    for parent_only in [false, true] {
+        for warmth in 0..3 {
+            let warm = warmth != 0;
+            let temp = tempdir().unwrap();
+            let output = temp.path();
+            let mut expected = vec![b'P'; 8192];
+            expected.extend_from_slice(&[0; 4096]);
+            expected.extend_from_slice(b"short-parent-tail");
+            let mut parent_options = capture_options(output);
+            parent_options.chunk_group_min_size = EROFS_BLOCK_SIZE;
+            let mut parent = IncrementalWriter::create(parent_options).unwrap();
+            parent
+                .replace_file(Path::new("memory"), expected.clone())
+                .unwrap();
+            parent
+                .replace_file(Path::new("alias"), vec![b'P'; 4096])
+                .unwrap();
+            parent.commit().unwrap();
+            let mut middle = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                capture_options(output),
+            )
+            .unwrap();
+            middle
+                .write_at_owned(Path::new("memory"), 4096, vec![b'B'; 4096])
+                .unwrap();
+            middle.commit().unwrap();
+            expected[4096..8192].fill(b'B');
+            let cache_dir = output.join("parent-cache");
+            if warm {
+                let core = NydusCore::new(
+                    &output.join("image.boot"),
+                    local_config(output, &cache_dir),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(core.fs.open("memory").unwrap().read().unwrap(), expected);
+                core.fs.open("alias").unwrap().read().unwrap();
+            }
+            let mut child = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                capture_options(output),
+            )
+            .unwrap();
+            if !parent_only {
+                child
+                    .write_at_owned(Path::new("memory"), 0, vec![b'U'; 4096])
+                    .unwrap();
+                expected[..4096].fill(b'U');
+            }
+            let data = capture_data_file(output);
+            child.commit_capture(CaptureCache(data.clone())).unwrap();
+            // Make two inodes share the exact source chunk, including upper.
+            let boot = output.join("capture.boot");
+            let reader = ErofsReader::open_metadata_only(&boot).unwrap();
+            let memory_nid = find_path(&reader, "memory");
+            let memory_inode = reader.inode(memory_nid).unwrap();
+            let memory_entries = reader
+                .read_chunk_index_entries(memory_nid, &memory_inode)
+                .unwrap();
+            let mut next_mapping = fs::metadata(&boot).unwrap().len().div_ceil(4096) + 1;
+            let mappings: Vec<_> = reader
+                .blob_infos()
+                .unwrap()
+                .iter()
+                .map(|info| {
+                    let start = next_mapping;
+                    next_mapping += info.blocks;
+                    start
+                })
+                .collect();
+            let flatten = |mut entry: ErofsChunkAddr| {
+                if warm && !entry.is_hole() && entry.device_id > 0 {
+                    let info = &reader.blob_infos().unwrap()[usize::from(entry.device_id) - 1];
+                    if info.blob_id != [0; 32] {
+                        entry.blkaddr += mappings[usize::from(entry.device_id) - 1];
+                        entry.device_id = 0;
+                    }
+                }
+                entry
+            };
+            let source = flatten(memory_entries[0]);
+            let alias_nid = find_path(&reader, "alias");
+            let alias_inode = reader.inode(alias_nid).unwrap();
+            let offset = reader.superblock().meta_blkaddr() as usize * 4096
+                + alias_nid as usize * EROFS_SLOTSIZE as usize
+                + (alias_inode.header_size() + alias_inode.xattr_size())
+                    .next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
+            let mut bytes = fs::read(&boot).unwrap();
+            if warm {
+                use nydus_format::erofs::{ErofsDeviceSlot, EROFS_DEVICESLOT_SIZE};
+                let base = reader.superblock().devt_slotoff() as usize * EROFS_DEVICESLOT_SIZE;
+                for (index, info) in reader.blob_infos().unwrap().iter().enumerate() {
+                    if info.blob_id != [0; 32] {
+                        let slot = ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(
+                            info.blocks,
+                            &info.blob_id,
+                            mappings[index],
+                        )
+                        .unwrap();
+                        let start = base + index * EROFS_DEVICESLOT_SIZE;
+                        bytes[start..start + EROFS_DEVICESLOT_SIZE]
+                            .copy_from_slice(slot.as_bytes());
+                    }
+                }
+            }
+            let memory_base = reader.superblock().meta_blkaddr() as usize * 4096
+                + memory_nid as usize * EROFS_SLOTSIZE as usize
+                + (memory_inode.header_size() + memory_inode.xattr_size())
+                    .next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
+            for (index, entry) in memory_entries.into_iter().enumerate() {
+                let start = memory_base + index * EROFS_CHUNK_INDEX_SIZE;
+                bytes[start..start + EROFS_CHUNK_INDEX_SIZE]
+                    .copy_from_slice(ErofsChunkIndex::new(flatten(entry)).unwrap().as_bytes());
+            }
+            bytes[offset..offset + EROFS_CHUNK_INDEX_SIZE]
+                .copy_from_slice(ErofsChunkIndex::new(source).unwrap().as_bytes());
+            fs::write(&boot, bytes).unwrap();
+            if warm {
+                for info in reader.blob_infos().unwrap() {
+                    if info.blob_id != [0; 32] {
+                        // Poison only ready groups. A partial-cache fallback
+                        // must not extend its fetch window into these bytes.
+                        use std::os::unix::fs::FileExt;
+                        let id = hex::encode(info.blob_id);
+                        let metadata =
+                            BlobMetadata::from_path(&cache_dir.join(format!("{id}.blob.meta")))
+                                .unwrap();
+                        let map = nydus_storage::chunk_group_map::ChunkGroupMap::open(
+                            &cache_dir.join(format!("{id}.group.map")),
+                            metadata.chunk_group_count(),
+                        )
+                        .unwrap();
+                        if warmth == 1 {
+                            map.reset().unwrap();
+                        }
+                        let file = fs::OpenOptions::new()
+                            .write(true)
+                            .open(output.join(id))
+                            .unwrap();
+                        for group in metadata.chunk_groups() {
+                            if warmth == 2 || group.index() % 2 == 0 {
+                                map.set_ready(group.index() as usize).unwrap();
+                                file.write_all_at(
+                                    &vec![0; group.compressed_size() as usize],
+                                    group.compressed_offset(),
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+            let before: Vec<_> = ["capture.boot", "capture.json", "capture.data"]
+                .iter()
+                .map(|name| fs::read(output.join(name)).unwrap())
+                .collect();
+            let options = || nydus_core::EncodeCacheOptions {
+                compressor: None,
+                prune: true,
+                compact_max_layers: 1,
+                config: Some(local_config(output, &output.join("compact-source-cache"))),
+                parent_cache_dir: warm.then(|| cache_dir.clone()),
+            };
+            let mut invalid_options = options();
+            invalid_options.config.as_mut().unwrap().storage.dir = None;
+            let mut rejected_stream = Vec::new();
+            let error = nydus_core::encode_cache(
+                &output.join("capture.json"),
+                (!parent_only).then_some(data.as_ref()),
+                &mut rejected_stream,
+                invalid_options,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("storage.dir"));
+            assert!(rejected_stream.is_empty());
+            fs::write(output.join("compact.data"), b"previous-cache").unwrap();
+            let previous_boot = fs::read(output.join("image.boot")).unwrap();
+            assert!(nydus_core::encode_cache(
+                &output.join("capture.json"),
+                (!parent_only).then_some(data.as_ref()),
+                FailedUpload,
+                options(),
+            )
+            .is_err());
+            assert_eq!(
+                fs::read(output.join("compact.data")).unwrap(),
+                b"previous-cache"
+            );
+            assert_eq!(fs::read(output.join("image.boot")).unwrap(), previous_boot);
+            assert!(!output.join("cache-result.json").exists());
+            assert!(!fs::read_dir(output).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".nydus-")));
+            let (result, stream) =
+                encode_cache_options(output, (!parent_only).then_some(data.as_ref()), options());
+            assert_eq!(
+                output.join("compact-source-cache").exists(),
+                warmth != 2,
+                "parent_only={parent_only}, warmth={warmth}"
+            );
+            assert_eq!(result["compacted"], true);
+            assert_eq!(result["data_file"], "compact.data");
+            let digest = result["digest"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap();
+            assert!(!output.join(digest).exists());
+            assert_eq!(stream.len() as u64, result["size"].as_u64().unwrap());
+            fs::write(output.join(digest), &stream).unwrap();
+            assert_capture_file(output, "memory", &expected);
+            assert_capture_file(output, "alias", &expected[..4096]);
+            let reader = ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+            assert_eq!(reader.blob_infos().unwrap().len(), 1);
+            let nid = find_path(&reader, "memory");
+            let entries = reader
+                .read_chunk_index_entries(nid, &reader.inode(nid).unwrap())
+                .unwrap();
+            assert!(entries[2].is_hole());
+            let cache_bytes = fs::read(output.join("compact.data")).unwrap();
+            assert_eq!(
+                cache_bytes.len() as u64,
+                result["data_size"].as_u64().unwrap()
+            );
+            for (index, entry) in entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| !entry.is_hole())
+            {
+                let start = index * 4096;
+                let end = (start + 4096).min(expected.len());
+                let cached = entry.blkaddr as usize * 4096;
+                assert_eq!(
+                    &cache_bytes[cached..cached + end - start],
+                    &expected[start..end]
+                );
+                assert!(cache_bytes[cached + end - start..cached + 4096]
+                    .iter()
+                    .all(|byte| *byte == 0));
+            }
+            let alias = find_path(&reader, "alias");
+            assert_eq!(
+                reader
+                    .read_chunk_index_entries(alias, &reader.inode(alias).unwrap())
+                    .unwrap()[0]
+                    .blkaddr,
+                entries[0].blkaddr
+            );
+            fs::hard_link(
+                output.join("compact.data"),
+                output.join("imported-cache.data"),
+            )
+            .unwrap();
+            let old_inode = fs::metadata(output.join("compact.data")).unwrap().ino();
+            let (_, retry_stream) =
+                encode_cache_options(output, (!parent_only).then_some(data.as_ref()), options());
+            assert_eq!(retry_stream, stream);
+            assert_ne!(
+                fs::metadata(output.join("compact.data")).unwrap().ino(),
+                old_inode
+            );
+            assert_eq!(
+                fs::read(output.join("imported-cache.data")).unwrap(),
+                cache_bytes
+            );
+            assert_eq!(fs::read(output.join("compact.data")).unwrap(), cache_bytes);
+            for (index, name) in ["capture.boot", "capture.json", "capture.data"]
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(fs::read(output.join(name)).unwrap(), before[index]);
+            }
+            assert!(!fs::read_dir(output).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".nydus-")));
+        }
+    }
+}
+
+fn finalize_test_capture(output: &Path, cache: &fs::File) -> serde_json::Value {
+    let mut stream = Vec::new();
+    nydus_core::encode_cache(
+        &output.join("capture.json"),
+        Some(cache),
+        &mut stream,
+        Default::default(),
+    )
+    .unwrap();
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("cache-result.json")).unwrap()).unwrap();
+    if let Some(digest) = result["digest"].as_str().unwrap().strip_prefix("sha256:") {
+        assert!(!output.join(digest).exists());
+        assert_eq!(stream.len() as u64, result["size"].as_u64().unwrap());
+        fs::write(output.join(digest), &stream).unwrap();
+        assert!(output.join(format!("{digest}.blob.meta")).exists());
+    } else {
+        assert!(stream.is_empty());
+    }
+    result
+}
+
+fn assert_capture_file(output: &Path, path: &str, expected: &[u8]) {
+    let backend = Arc::new(nydus_backend::Local::new(
+        output.to_path_buf(),
+        Arc::new(Metrics::new()),
+    ));
+    let reader = ErofsReader::open_bootstrap(
+        &output.join("image.boot"),
+        backend,
+        None,
+        None,
+        CacheOptions::default(),
+    )
+    .unwrap();
+    let nid = find_path(&reader, path);
+    let inode = reader.inode(nid).unwrap();
+    assert_eq!(inode.size(), expected.len() as u64);
+    assert_eq!(
+        reader
+            .read_file_data(nid, &inode, 0, expected.len() as u32)
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn incremental_writer_capture_encodes_exact_cache_layout_without_rewrite() {
+    use std::os::unix::fs::MetadataExt;
+    for compressor in [
+        BlobMetadataCompressor::Zstd,
+        BlobMetadataCompressor::Lz4Block,
+        BlobMetadataCompressor::None,
+    ] {
+        for digester in [None, Some(BlobMetadataDigester::Blake3)] {
+            let temp = tempfile::tempdir().unwrap();
+            let output = temp.path();
+            let mut options = capture_options(output);
+            options.compressor = compressor;
+            options.digester = digester;
+            let mut writer = IncrementalWriter::create(options).unwrap();
+            let mut memory = vec![0; 4096];
+            memory.extend(vec![b'M'; 4096]);
+            memory.extend_from_slice(b"unaligned-tail");
+            writer
+                .replace_file(Path::new("memory.bin"), memory.clone())
+                .unwrap();
+            writer
+                .replace_file(Path::new("state.json"), b"state".to_vec())
+                .unwrap();
+            let cache = Arc::new(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(output.join("decoded"))
+                    .unwrap(),
+            );
+            writer.commit_capture(CaptureCache(cache.clone())).unwrap();
+            cache.sync_all().unwrap();
+            assert!(!output.join("image.boot").exists());
+            let plan: serde_json::Value =
+                serde_json::from_slice(&fs::read(output.join("capture.json")).unwrap()).unwrap();
+            assert!(plan["device_index"].is_number());
+            assert_eq!(plan["compressor"], compressor.to_string());
+            let before = fs::read(output.join("decoded")).unwrap();
+            let inode_before = cache.metadata().unwrap().ino();
+            let original_bootstrap = fs::read(output.join("capture.boot")).unwrap();
+            let result = finalize_test_capture(output, &cache);
+            assert_eq!(
+                fs::read(output.join("capture.boot")).unwrap(),
+                original_bootstrap
+            );
+            assert_eq!(
+                result["groups"].as_u64().unwrap() as usize,
+                plan["groups"].as_array().unwrap().len()
+            );
+            assert_eq!(fs::read(output.join("decoded")).unwrap(), before);
+            assert_eq!(cache.metadata().unwrap().ino(), inode_before);
+            assert_capture_file(output, "memory.bin", &memory);
+            assert_capture_file(output, "state.json", b"state");
+        }
+    }
+}
+
+#[test]
+fn incremental_writer_capture_borrows_full_memory_chunks() {
+    struct MemoryCapture {
+        cache: CaptureCache,
+        address: usize,
+    }
+    impl nydus_core::ChunkGroupCache for MemoryCapture {
+        fn write_group(
+            &mut self,
+            first_block: u64,
+            lengths: &[u32],
+            payload: &[u8],
+        ) -> io::Result<()> {
+            assert_eq!(payload.as_ptr() as usize, self.address);
+            nydus_core::ChunkGroupCache::write_group(&mut self.cache, first_block, lengths, payload)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path();
+    let mut options = writer_options(output.to_path_buf());
+    options.chunk_size = 2 * 1024 * 1024;
+    options.chunk_group_min_size = options.chunk_size;
+    let memory = vec![42; options.chunk_size as usize];
+    let mut writer = IncrementalWriter::create(options).unwrap();
+    writer
+        .create_file(
+            Path::new("memory"),
+            memory.len() as u64,
+            CreateFileOptions::default(),
+        )
+        .unwrap();
+    // SAFETY: memory remains immutable and live until capture returns.
+    unsafe {
+        writer
+            .write_memory_range(
+                Path::new("memory"),
+                0,
+                NonNull::new(memory.as_ptr() as *mut u8).unwrap(),
+                memory.len(),
+            )
+            .unwrap();
+    }
+    let cache = Arc::new(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(output.join("decoded"))
+            .unwrap(),
+    );
+    writer
+        .commit_capture(MemoryCapture {
+            cache: CaptureCache(cache.clone()),
+            address: memory.as_ptr() as usize,
+        })
+        .unwrap();
+    finalize_test_capture(output, &cache);
+    assert_capture_file(output, "memory", &memory);
+}
+
+#[test]
+fn incremental_writer_capture_parent_zero_partial_and_new_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path();
+    let mut parent = IncrementalWriter::create(capture_options(output)).unwrap();
+    parent
+        .replace_file(Path::new("memory.bin"), vec![b'P'; 8192])
+        .unwrap();
+    parent
+        .replace_file(Path::new("keep"), b"parent-kept".to_vec())
+        .unwrap();
+    parent.commit().unwrap();
+    let core = NydusCore::new(
+        &output.join("image.boot"),
+        local_config(output, &output.join("cache")),
+        None,
+    )
+    .unwrap();
+    let mut child = core.writer(capture_options(output)).unwrap();
+    child
+        .write_at(Path::new("memory.bin"), 0, &vec![0; 4096])
+        .unwrap();
+    child
+        .write_at(Path::new("memory.bin"), 4096 + 5, b"patch")
+        .unwrap();
+    child
+        .replace_file(Path::new("new"), b"new-file".to_vec())
+        .unwrap();
+    let cache = Arc::new(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(output.join("decoded"))
+            .unwrap(),
+    );
+    child.commit_capture(CaptureCache(cache.clone())).unwrap();
+    finalize_test_capture(output, &cache);
+    let mut expected = vec![0; 4096];
+    expected.extend(vec![b'P'; 4096]);
+    expected[4101..4106].copy_from_slice(b"patch");
+    assert_capture_file(output, "memory.bin", &expected);
+    assert_capture_file(output, "keep", b"parent-kept");
+    assert_capture_file(output, "new", b"new-file");
+}
+
+#[test]
+fn incremental_writer_capture_empty_upper_and_parent_only() {
+    for has_parent in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path();
+        let mut writer = IncrementalWriter::create(capture_options(output)).unwrap();
+        if has_parent {
+            writer
+                .replace_file(Path::new("keep"), b"keep".to_vec())
+                .unwrap();
+            writer.commit().unwrap();
+            writer = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                capture_options(output),
+            )
+            .unwrap();
+        }
+        writer
+            .replace_file(Path::new("zero"), vec![0; 4096])
+            .unwrap();
+        let cache = Arc::new(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(output.join("decoded"))
+                .unwrap(),
+        );
+        writer.commit_capture(CaptureCache(cache.clone())).unwrap();
+        let stream = Arc::new(Mutex::new(Vec::new()));
+        nydus_core::encode_cache(
+            &output.join("capture.json"),
+            (!has_parent).then_some(cache.as_ref()),
+            TestStreamSink(stream.clone()),
+            Default::default(),
+        )
+        .unwrap();
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(output.join("cache-result.json")).unwrap()).unwrap();
+        assert_eq!(result["data_size"], 0);
+        assert_eq!(result["groups"], 0);
+        assert_eq!(stream.lock().unwrap().is_empty(), has_parent);
+        if !has_parent {
+            let digest = result["digest"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap();
+            fs::write(output.join(digest), stream.lock().unwrap().as_slice()).unwrap();
+        }
+        assert_capture_file(output, "zero", &vec![0; 4096]);
+    }
+}
+
+#[test]
+fn incremental_writer_capture_accepts_large_bootstrap() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path();
+    let mut writer = IncrementalWriter::create(capture_options(output)).unwrap();
+    writer
+        .replace_file(Path::new("zero"), vec![0; 4096])
+        .unwrap();
+    let cache = Arc::new(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(output.join("decoded"))
+            .unwrap(),
+    );
+    writer.commit_capture(CaptureCache(cache.clone())).unwrap();
+    let bootstrap = output.join("capture.boot");
+    let original = fs::read(&bootstrap).unwrap();
+    // Padding keeps this valid EROFS metadata larger than the JSON plan limit.
+    let size = 64 * 1024 * 1024 + u64::from(EROFS_BLOCK_SIZE);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&bootstrap)
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    finalize_test_capture(output, &cache);
+    let finalized = fs::read(output.join("image.boot")).unwrap();
+    assert_eq!(finalized.len() as u64, size);
+    assert!(finalized[original.len()..].iter().all(|byte| *byte == 0));
+    assert_capture_file(output, "zero", &vec![0; 4096]);
+}
+
+#[test]
+fn incremental_writer_capture_rejects_truncated_cache_and_invalid_plan_before_streaming() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path();
+    let mut writer = IncrementalWriter::create(capture_options(output)).unwrap();
+    writer
+        .replace_file(Path::new("data"), vec![b'D'; 4096])
+        .unwrap();
+    let cache = Arc::new(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(output.join("decoded"))
+            .unwrap(),
+    );
+    writer.commit_capture(CaptureCache(cache.clone())).unwrap();
+    let path = output.join("capture.json");
+    let plan = fs::read(&path).unwrap();
+    for field in ["version", "chunk_size", "device_index", "compressor"] {
+        let mut invalid: serde_json::Value = serde_json::from_slice(&plan).unwrap();
+        invalid[field] = serde_json::json!(99);
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let stream = Arc::new(Mutex::new(Vec::new()));
+        assert!(nydus_core::encode_cache(
+            &path,
+            Some(&cache),
+            TestStreamSink(stream.clone()),
+            Default::default()
+        )
+        .is_err());
+        assert!(stream.lock().unwrap().is_empty());
+        assert!(!output.join("image.boot").exists());
+    }
+    for (pointer, value) in [
+        ("/digester", serde_json::json!("unknown")),
+        ("/groups/0/first_block", serde_json::json!(1)),
+        ("/groups/0/lengths", serde_json::json!([])),
+        ("/groups/0/lengths", serde_json::json!([0])),
+        ("/groups/0/lengths", serde_json::json!([8192])),
+        ("/groups/0/lengths", serde_json::json!(vec![4096; 9])),
+        ("/device_index", serde_json::Value::Null),
+        ("/chunk_group_minimum_size", serde_json::json!(4095)),
+    ] {
+        let mut invalid: serde_json::Value = serde_json::from_slice(&plan).unwrap();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let mut stream = Vec::new();
+        assert!(
+            nydus_core::encode_cache(&path, Some(&cache), &mut stream, Default::default(),)
+                .is_err(),
+            "accepted invalid {pointer}"
+        );
+        assert!(stream.is_empty());
+        assert!(!output.join("cache-result.json").exists());
+    }
+    fs::write(&path, &plan).unwrap();
+    let mut stream = Vec::new();
+    assert!(nydus_core::encode_cache(&path, None, &mut stream, Default::default(),).is_err());
+    assert!(stream.is_empty());
+    for compressor in ["lz4hc", "deflate", "zlib", "unknown"] {
+        let mut invalid: serde_json::Value = serde_json::from_slice(&plan).unwrap();
+        invalid["compressor"] = serde_json::json!(compressor);
+        fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let mut stream = Vec::new();
+        assert!(nydus_core::encode_cache(
+            &path,
+            Some(&cache),
+            &mut stream,
+            nydus_core::EncodeCacheOptions {
+                compressor: Some(BlobMetadataCompressor::Zstd),
+                ..Default::default()
+            },
+        )
+        .is_err());
+        assert!(stream.is_empty());
+        assert!(!output.join("image.boot").exists());
+    }
+    fs::write(&path, plan).unwrap();
+    let bootstrap = output.join("capture.boot");
+    let valid = fs::read(&bootstrap).unwrap();
+    for truncated in [true, false] {
+        let mut invalid = valid.clone();
+        if truncated {
+            invalid.truncate(1024);
+        } else {
+            invalid[1024] ^= 1;
+        }
+        fs::write(&bootstrap, invalid).unwrap();
+        let stream = Arc::new(Mutex::new(Vec::new()));
+        assert!(nydus_core::encode_cache(
+            &path,
+            Some(&cache),
+            TestStreamSink(stream.clone()),
+            Default::default()
+        )
+        .is_err());
+        assert!(stream.lock().unwrap().is_empty());
+        assert!(!output.join("image.boot").exists());
+    }
+    fs::write(&bootstrap, valid).unwrap();
+    cache.set_len(4095).unwrap();
+    assert!(nydus_core::encode_cache(&path, Some(&cache), io::sink(), Default::default()).is_err());
+    assert!(!output.join("cache-result.json").exists());
+}
+
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::{self, Write};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use nydus::build::{build_image, BuildImageOptions, DEFAULT_CHUNK_GROUP_MIN_SIZE};
 use nydus_config::Config;
@@ -1971,6 +3133,19 @@ fn incremental_writer_write_at_truncates_at_eof() {
     let mut expected = parent_data;
     expected[chunk_size - 2..chunk_size].copy_from_slice(b"AB");
     assert_eq!(data, expected);
+}
+
+struct TestStreamSink(Arc<Mutex<Vec<u8>>>);
+
+impl Write for TestStreamSink {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]

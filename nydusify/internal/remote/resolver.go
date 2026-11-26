@@ -163,12 +163,17 @@ func NewDockerConfigCredFunc() CredentialFunc {
 func NewResolver(insecure, plainHTTP bool, credFunc CredentialFunc) remotes.Resolver {
 	return newResolver(insecure, plainHTTP, credFunc, newRegistryClient(insecure))
 }
-
 func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) remotes.Resolver {
+	return docker.NewResolver(docker.ResolverOptions{Hosts: registryHosts(insecure, plainHTTP, credFunc, client)})
+}
+func newRegistryHosts(insecure, plainHTTP bool, credFunc CredentialFunc) docker.RegistryHosts {
+	return registryHosts(insecure, plainHTTP, credFunc, newRegistryClient(insecure))
+}
+func registryHosts(insecure, plainHTTP bool, credFunc CredentialFunc, client *http.Client) docker.RegistryHosts {
 	// A token request is small whatever its method, so all of them are watched.
 	authClient := newHTTPClient(insecure)
 	authClient.Transport = stallTransport{base: authClient.Transport, timeout: stallTimeout, everyMethod: true}
-	registryHosts := docker.ConfigureDefaultRegistries(
+	return docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
 				docker.WithAuthClient(authClient),
@@ -180,7 +185,4 @@ func newResolver(insecure, plainHTTP bool, credFunc CredentialFunc, client *http
 			return plainHTTP, nil
 		}),
 	)
-	return docker.NewResolver(docker.ResolverOptions{
-		Hosts: registryHosts,
-	})
 }

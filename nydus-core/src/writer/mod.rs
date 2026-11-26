@@ -1,4 +1,6 @@
+mod capture;
 mod compact;
+pub use capture::{encode_cache, EncodeCacheOptions};
 
 pub(crate) use compact::RepackBackend;
 pub use compact::RepackResult;
@@ -10,7 +12,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::build::blob_chunk::{
     is_zero, validate_chunk_group_min_size, validate_chunk_size, BlobLayout, BlobWriter,
@@ -50,6 +52,16 @@ struct FinishedUpperBlob {
     full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     blob_metadata: BlobMetadata,
     blob_blocks: u64,
+    blob_size: u64,
+}
+/// Receives frozen decoded groups during capture. Publication is a separate step.
+pub trait ChunkGroupCache: Send {
+    fn write_group(
+        &mut self,
+        first_block: u64,
+        lengths: &[u32],
+        payload: &[u8],
+    ) -> std::io::Result<()>;
 }
 
 pub struct IncrementalWriterOptions {
@@ -239,7 +251,7 @@ pub struct IncrementalWriter {
     overlay: BTreeMap<usize, FileOverlay>,
     device_slots: Vec<ErofsDeviceSlot>,
     has_changes: bool,
-    blob_writer: Option<BlobWriter<File>>,
+    blob_writer: Option<BlobWriter<Box<dyn Write + Send>>>,
     // Inode/chunk indexes whose small packed group is still open. Full-slot
     // chunks are resolved immediately and never enter this list.
     pending_blob_chunks: Vec<(usize, usize)>,
@@ -247,6 +259,7 @@ pub struct IncrementalWriter {
     upper_blob_temp_path: Option<PathBuf>,
     compact_artifacts: Option<compact::CompactArtifacts>,
     chunk_size: u32,
+    capture: Option<Arc<Mutex<capture::CaptureState>>>,
     chunk_group_min_size: u32,
     compressor: BlobMetadataCompressor,
     digester: Option<BlobMetadataDigester>,
@@ -361,6 +374,7 @@ impl IncrementalWriter {
             upper_blob_temp_path: None,
             compact_artifacts: None,
             chunk_size: options.chunk_size,
+            capture: None,
             chunk_group_min_size: options.chunk_group_min_size,
             compressor: options.compressor,
             digester: options.digester,
@@ -447,6 +461,7 @@ impl IncrementalWriter {
             compact_artifacts: matches!(mode, ParentMode::Compact)
                 .then(compact::CompactArtifacts::default),
             chunk_size: options.chunk_size,
+            capture: None,
             chunk_group_min_size: options.chunk_group_min_size,
             compressor: options.compressor,
             digester: options.digester,
@@ -974,25 +989,15 @@ impl IncrementalWriter {
     // Publish only after all output bytes are ready. Renaming a new inode keeps
     // any open source reader's mmap valid during an in-place compact.
     fn save_bootstrap(&mut self, data: &[u8]) -> Result<()> {
-        let path = self.output_dir.join("image.boot");
-        let (temp_path, mut file) = self.create_temp_file("bootstrap")?;
-        let result = (|| -> Result<()> {
-            match fs::metadata(&path) {
-                Ok(metadata) => file.set_permissions(metadata.permissions())?,
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
-            }
-            file.write_all(data).context("write temporary bootstrap")?;
-            fs::rename(&temp_path, &path)
-                .with_context(|| format!("failed to publish bootstrap: {}", path.display()))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temp_path);
-        } else if let Some(artifacts) = &mut self.compact_artifacts {
+        self.save_bootstrap_file("image.boot", data, false)
+    }
+
+    fn save_bootstrap_file(&mut self, name: &str, data: &[u8], sync: bool) -> Result<()> {
+        save_output_file(&self.output_dir, name, data, sync)?;
+        if let Some(artifacts) = &mut self.compact_artifacts {
             artifacts.keep();
         }
-        result
+        Ok(())
     }
 
     fn publish_blob_artifact(
@@ -1186,6 +1191,13 @@ impl IncrementalWriter {
             })?;
             blob_writer.resolve_chunk_addr_for_device(entry, device_id)?;
         }
+        if self.capture.is_some() {
+            self.device_slots.push(ErofsDeviceSlot::with_blob_id(
+                blob_writer.total_block_count(),
+                &capture::CAPTURE_BLOB_ID,
+            )?);
+            return Ok(());
+        }
         let finished = finish_upper_blob(blob_writer)?;
         let temp_path = self
             .upper_blob_temp_path
@@ -1286,15 +1298,21 @@ impl IncrementalWriter {
         if self.blob_writer.is_some() {
             return Ok(());
         }
-        fs::create_dir_all(&self.output_dir).with_context(|| {
-            format!(
-                "failed to create incremental output directory: {}",
-                self.output_dir.display()
-            )
-        })?;
-        let (blob_path, blob_file) = self.create_temp_file("incremental")?;
-        self.blob_writer = Some(BlobWriter::new(
-            blob_file,
+        let (blob_path, output): (Option<PathBuf>, Box<dyn Write + Send>) =
+            if self.capture.is_some() {
+                (None, Box::new(std::io::sink()))
+            } else {
+                fs::create_dir_all(&self.output_dir).with_context(|| {
+                    format!(
+                        "failed to create incremental output directory: {}",
+                        self.output_dir.display()
+                    )
+                })?;
+                let (path, file) = self.create_temp_file("incremental")?;
+                (Some(path), Box::new(file))
+            };
+        let mut blob_writer = BlobWriter::new(
+            output,
             self.chunk_size,
             self.compressor,
             self.digester,
@@ -1302,34 +1320,22 @@ impl IncrementalWriter {
             BlobLayout::ChunkGroups {
                 chunk_group_min_size: self.chunk_group_min_size,
             },
-        )?);
-        self.upper_blob_temp_path = Some(blob_path);
+        )?;
+        if let Some(capture) = self.capture.as_ref().cloned() {
+            blob_writer.set_capture_only(move |first_block, lengths, payload| {
+                let mut state = capture
+                    .lock()
+                    .map_err(|_| Error::Runtime("capture state lock poisoned".to_string()))?;
+                state.write_group(first_block, lengths, payload)
+            });
+        }
+        self.blob_writer = Some(blob_writer);
+        self.upper_blob_temp_path = blob_path;
         Ok(())
     }
 
     fn create_temp_file(&self, kind: &str) -> Result<(PathBuf, File)> {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|err| Error::InvalidParameter(format!("system time before epoch: {err}")))?
-            .as_nanos();
-        for attempt in 0..1024u16 {
-            let path = self.output_dir.join(format!(
-                ".nydus-{kind}-{}-{seed}-{attempt}.tmp",
-                std::process::id(),
-            ));
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => return Ok((path, file)),
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
-                Err(err) => {
-                    return Err(err).with_context(|| {
-                        format!("failed to create temporary {kind} file: {}", path.display())
-                    })
-                }
-            }
-        }
-        Err(Error::InvalidParameter(format!(
-            "failed to allocate a unique temporary {kind} path"
-        )))
+        create_temp_file(&self.output_dir, kind)
     }
 
     fn write_upper_chunk_addr(&mut self, data: &[u8]) -> Result<ErofsChunkAddr> {
@@ -1359,6 +1365,9 @@ impl IncrementalWriter {
                         blkaddr: EROFS_NULL_ADDR,
                         device_id: 0,
                     });
+                }
+                if self.capture.is_some() {
+                    return self.write_nonzero_upper_chunk(source);
                 }
                 self.write_upper_chunk_addr_from_source(len, false, |data| {
                     data.copy_from_slice(source);
@@ -1834,6 +1843,71 @@ fn finalize_digest_named_blob(
     Ok(full_blob_path)
 }
 
+fn save_output_file(output_dir: &Path, name: &str, data: &[u8], sync: bool) -> Result<()> {
+    save_output_file_with(output_dir, name, sync, |file| {
+        file.write_all(data).context("write temporary output")?;
+        Ok(())
+    })
+}
+
+fn save_output_file_with(
+    output_dir: &Path,
+    name: &str,
+    sync: bool,
+    write: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
+    let path = output_dir.join(name);
+    let kind = if name.ends_with(".boot") {
+        "bootstrap"
+    } else {
+        "metadata"
+    };
+    let (temp_path, mut file) = create_temp_file(output_dir, kind)?;
+    let result = (|| -> Result<()> {
+        match fs::metadata(&path) {
+            Ok(metadata) => file.set_permissions(metadata.permissions())?,
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        write(&mut file)?;
+        if sync {
+            file.sync_all()?;
+        }
+        fs::rename(&temp_path, &path)
+            .with_context(|| format!("failed to publish {kind}: {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn create_temp_file(output_dir: &Path, kind: &str) -> Result<(PathBuf, File)> {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|err| Error::InvalidParameter(format!("system time before epoch: {err}")))?
+        .as_nanos();
+    for attempt in 0..1024u16 {
+        let path = output_dir.join(format!(
+            ".nydus-{kind}-{}-{seed}-{attempt}.tmp",
+            std::process::id(),
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to create temporary {kind} file: {}", path.display())
+                })
+            }
+        }
+    }
+    Err(Error::InvalidParameter(format!(
+        "failed to allocate a unique temporary {kind} path"
+    )))
+}
+
 fn finish_upper_blob<W: Write>(blob_writer: BlobWriter<W>) -> Result<FinishedUpperBlob> {
     let blob_blocks = blob_writer.total_block_count();
     let compressed_data_size = blob_writer.data_size();
@@ -1842,12 +1916,16 @@ fn finish_upper_blob<W: Write>(blob_writer: BlobWriter<W>) -> Result<FinishedUpp
         .ok_or_else(|| Error::InvalidImage("upper blob data hashing is disabled".to_string()))?;
     let mut blob_writer_stream =
         HashingWriter::new(BufWriter::new(blob_file), Some(full_blob_hasher));
-    blob::finish_full_blob(
+    let footer = blob::finish_full_blob(
         &mut blob_writer_stream,
         compressed_data_size,
         None,
         Some(&blob_metadata),
     )?;
+    let blob_size = footer
+        .offset()?
+        .checked_add(blob::BlobFooter::SIZE as u64)
+        .ok_or_else(|| Error::Overflow("full blob size overflow".to_string()))?;
     let full_blob_digest = blob_writer_stream
         .finish()
         .context("failed to flush upper blob")?
@@ -1857,6 +1935,7 @@ fn finish_upper_blob<W: Write>(blob_writer: BlobWriter<W>) -> Result<FinishedUpp
         full_blob_digest,
         blob_metadata,
         blob_blocks,
+        blob_size,
     })
 }
 
@@ -2051,6 +2130,86 @@ fn normalize_relative_path(path: &Path) -> Result<PathBuf> {
         }
     }
     Ok(normalized)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_commit_does_not_sync_but_durable_outputs_do() {
+        const CHILD: &str = "NYDUS_TEST_BOOTSTRAP_SYNC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "writer::publication_tests::ordinary_commit_does_not_sync_but_durable_outputs_do",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut writer =
+            IncrementalWriter::create(IncrementalWriterOptions::new(root.path().to_path_buf()))
+                .unwrap();
+        writer
+            .replace_file(Path::new("data"), b"payload".to_vec())
+            .unwrap();
+        // Reject syncs only in this subprocess, leaving the test runner and
+        // its other tests unaffected. No privileges are needed for this filter.
+        let statement = |code, k| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: 0,
+            k,
+        };
+        let jump = |k, jt, jf| libc::sock_filter {
+            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+            jt,
+            jf,
+            k,
+        };
+        let mut filter = [
+            statement((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0),
+            jump(libc::SYS_fsync as u32, 1, 0),
+            jump(libc::SYS_fdatasync as u32, 0, 1),
+            statement(
+                (libc::BPF_RET | libc::BPF_K) as u16,
+                libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            ),
+            statement(
+                (libc::BPF_RET | libc::BPF_K) as u16,
+                libc::SECCOMP_RET_ALLOW,
+            ),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: these prctl operations use integer flags and a valid filter
+        // that the kernel copies before returning; they affect only this child.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                0,
+            );
+        }
+        let error = File::open(root.path()).unwrap().sync_all().unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        writer.commit().unwrap();
+        let bootstrap = fs::read(root.path().join("image.boot")).unwrap();
+        assert!(save_output_file(root.path(), "image.boot", b"replacement", true).is_err());
+        assert_eq!(fs::read(root.path().join("image.boot")).unwrap(), bootstrap);
+    }
 }
 
 #[cfg(test)]
