@@ -86,7 +86,7 @@ requests by itself; nothing is called from `ci.yml`.
   The image-tools job checks that the real GA CLI includes all required
   commands; registry/Dragonfly E2E exercise their compiled backends. Arbitrary
   reduced-feature binaries are no longer a PR matrix. The main Rust job
-  includes ublk, the ptrace cross-process test and real netns HTTP tests once;
+  includes ublk and the ptrace cross-process test once;
   ublk E2E shares the experimental build. If the runner lacks `ublk_drv`,
   its job installs `linux-modules-extra-$(uname -r)` before loading the driver;
   an unavailable package or driver remains a failure, never a skipped suite.
@@ -221,8 +221,8 @@ requires a rerun and cannot be inferred from a local CLI smoke test.
 Runners are GitHub-hosted Ubuntu (arm64 for arm64 release validation).
 GitHub Actions sets `CI=true`, and that one variable makes every suite
 strict: missing kernel capabilities/tools fail, they do not skip. Rust tests
-also require netns/setns and ptrace, and run privileged test executables
-without compiling as root; netns tests are `#[ignore]` and run with
+also require ptrace, and run privileged test executables
+without compiling as root; userfaultfd tests are `#[ignore]` and run with
 `--include-ignored`. The Go suites carry no known-issue markers: a
 reproduced bug is a red check until it is fixed.
 
@@ -437,8 +437,8 @@ Fanotify requires Linux >=6.15 with FAN_PRE_ACCESS and ext4 cache storage;
 UFFD needs permitted userfaultfd; ublk/NBD need their devices/modules.
 Under CI every lane is strict; capability labels do not replace runtime
 checks. Use isolated, ephemeral runners for untrusted PRs. The main Rust test
-job needs x86_64 Linux, sudo, permitted ptrace, and network namespace
-creation/setns, so an EPERM cannot pass as absent coverage.
+job needs x86_64 Linux, sudo and permitted ptrace, so an EPERM cannot pass
+as absent coverage.
 
 ublk shares the experimental binary build and has one E2E matrix job.
 Its Rust tests run in the main Rust test job; neither suite is compiled

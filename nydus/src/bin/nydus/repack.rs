@@ -8,6 +8,7 @@ use nydus_core::{IncrementalWriterOptions, NydusCore, RepackResult};
 use nydus_format::blob::BlobMetadataCompressor;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use tokio::runtime::Runtime;
 
 #[derive(Debug, Clone, Parser)]
 pub struct RepackCommand {
@@ -33,9 +34,18 @@ pub struct RepackCommand {
 
 impl RepackCommand {
     pub fn execute(&self) -> Result<()> {
+        let runtime;
         let core = if let Some(path) = &self.config {
             let config = nydus_config::Config::load(path)?;
-            nydus_core::NydusCore::new(&self.bootstrap, config, None)?
+            runtime = match &config.backend {
+                BackendConfig::Registry(_) => Some(Runtime::new()?),
+                BackendConfig::Local(_) => None,
+            };
+            nydus_core::NydusCore::new(
+                &self.bootstrap,
+                config,
+                runtime.as_ref().map(Runtime::handle).cloned(),
+            )?
         } else {
             local_core(&self.bootstrap, &self.blob_dir, &self.output_dir)?
         };

@@ -14,15 +14,17 @@ mod range;
 mod reader;
 mod redirect;
 mod response;
-mod rt;
 mod transport;
 
+use std::future::Future;
 use std::io::{self, BufRead};
+use std::panic;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::{TryFutureExt, TryStreamExt};
+use tokio::runtime::{Handle, Runtime, RuntimeFlavor};
 use tracing::debug;
 
 use nydus_config::{Config, RedactedString, RegistryConfig};
@@ -30,24 +32,58 @@ use nydus_format::blob::{BlobFooter, BlobMetadata};
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 use nydus_telemetry::metrics::Metrics;
 
-use crate::{Backend, Netns, ReadKind, Source};
+use crate::{Backend, ReadKind, Source};
 
 use self::auth::Authorizer;
 use self::client::Client;
 use self::range::Range;
 use self::reader::StreamReader;
 use self::redirect::RedirectCache;
-pub use self::rt::Runtime;
 #[cfg(feature = "dragonfly")]
 use self::transport::Dragonfly;
 use self::transport::{Fetcher, Http, RateLimit, Transport};
 
+/// The tokio runtime a registry backend runs its requests on.
+enum RuntimeOrHandle {
+    /// The default runtime.
+    Runtime(Runtime),
+
+    /// The runtime of the caller.
+    Handle(Handle),
+}
+
+/// Implements the runtime or handle.
+impl RuntimeOrHandle {
+    /// Returns the handle of the runtime.
+    fn handle(&self) -> &Handle {
+        match self {
+            Self::Runtime(runtime) => runtime.handle(),
+            Self::Handle(handle) => handle,
+        }
+    }
+
+    /// Spawns `future` onto the runtime and blocks until it completes, an
+    /// error once the runtime is shut down, its panic resumed on the caller.
+    fn spawn_block<F, T>(&self, future: F) -> io::Result<T>
+    where
+        F: Future<Output = io::Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let handle = self.handle();
+        match handle.block_on(handle.spawn(future)) {
+            Ok(result) => result,
+            Err(err) if err.is_panic() => panic::resume_unwind(err.into_panic()),
+            Err(err) => Err(err.into()),
+        }
+    }
+}
+
 /// The blob backend over an OCI registry, running the reads of [`Client`] on
-/// [`Runtime`] and streaming each range to a [`StreamReader`].
+/// [`RuntimeOrHandle`] and streaming each range to a [`StreamReader`].
 ///
 /// ```text
 /// Registry
-///   ├─ Runtime              the tokio runtime of every read
+///   ├─ RuntimeOrHandle      the tokio runtime of every read
 ///   ├─ Metrics              the metrics of the image
 ///   └─ Client
 ///        ├─ Authorizer      the challenge and the token that answers it
@@ -65,7 +101,7 @@ pub(crate) struct Registry {
     client: Arc<Client>,
 
     /// The runtime every read runs on.
-    runtime: Arc<Runtime>,
+    runtime: RuntimeOrHandle,
 
     /// The metrics of the image the backend serves.
     metrics: Arc<Metrics>,
@@ -77,10 +113,20 @@ impl Registry {
     pub(crate) fn new(
         config: &Config,
         registry: &RegistryConfig,
-        netns: Option<Netns>,
         metrics: Arc<Metrics>,
+        runtime: Option<Handle>,
     ) -> io::Result<Self> {
-        let runtime = Arc::new(Runtime::new(netns)?);
+        // Reject a current-thread runtime: it runs tasks, I/O and timers only in `Runtime::block_on`.
+        let runtime = match runtime {
+            Some(handle) if handle.runtime_flavor() == RuntimeFlavor::CurrentThread => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "registry backend requires a multi-thread tokio runtime",
+                ));
+            }
+            Some(handle) => RuntimeOrHandle::Handle(handle),
+            None => RuntimeOrHandle::Runtime(Runtime::new()?),
+        };
 
         // Read through Dragonfly when configured, else through the proxy when
         // configured, both falling back to the origin, else from the origin.
@@ -109,7 +155,7 @@ impl Registry {
                         )),
                     )?;
 
-                    let dragonfly = Dragonfly::new(config, dragonfly, &runtime)?;
+                    let dragonfly = Dragonfly::new(config, dragonfly, runtime.handle())?;
                     let auth_transport = Transport::Direct {
                         fetcher: Box::new(http_client),
                     };
@@ -207,7 +253,7 @@ impl Backend for Registry {
     fn get_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime.block_on_worker(async move {
+        self.runtime.spawn_block(async move {
             let response = client
                 .get(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
                 .await?;
@@ -256,7 +302,7 @@ impl Backend for Registry {
     ) -> io::Result<BlobMetadata> {
         let client = self.client.clone();
         let blob_id = *blob_id;
-        self.runtime.block_on_worker(async move {
+        self.runtime.spawn_block(async move {
             let response = client
                 .prefetch(&blob_id, &Range::Suffix(BlobFooter::SIZE as u64))
                 .await?;
@@ -308,7 +354,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let response = self
             .runtime
-            .block_on_worker(async move { client.get(&blob_id, &range).await })
+            .spawn_block(async move { client.get(&blob_id, &range).await })
             .inspect_err(|_| {
                 self.metrics.backend.collect_read_failure_metrics(
                     ReadKind::Ondemand,
@@ -329,14 +375,14 @@ impl Backend for Registry {
                 .collect_read_failure_metrics(ReadKind::Ondemand, source);
             return self
                 .runtime
-                .block_on_worker(async move { Err(response.into_io_error().await) });
+                .spawn_block(async move { Err(response.into_io_error().await) });
         }
 
         let source = self.client.transport.source();
         let fallback = response.fallback.clone();
         let metrics = self.metrics.clone();
         let (tx, reader) = StreamReader::channel();
-        self.runtime.spawn(async move {
+        self.runtime.handle().spawn(async move {
             // Stream the range until it ends or the reader is dropped.
             let result = tokio::select! {
                 result = response.bytes_stream(len).try_for_each(|chunk| {
@@ -389,7 +435,7 @@ impl Backend for Registry {
         let blob_id = *blob_id;
         let response = self
             .runtime
-            .block_on_worker(async move { client.prefetch(&blob_id, &range).await })
+            .spawn_block(async move { client.prefetch(&blob_id, &range).await })
             .inspect_err(|_| {
                 self.metrics.backend.collect_read_failure_metrics(
                     ReadKind::Prefetch,
@@ -400,7 +446,7 @@ impl Backend for Registry {
         let source = self.client.transport.source();
         let metrics = self.metrics.clone();
         let (tx, reader) = StreamReader::channel();
-        self.runtime.spawn(async move {
+        self.runtime.handle().spawn(async move {
             // Stream the range until it ends or the reader is dropped.
             let result = tokio::select! {
                 result = response.bytes_stream(len).try_for_each(|chunk| {
@@ -455,6 +501,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+    use tokio::runtime::Builder;
     use url::Url;
 
     const TEST_BLOB_ID: [u8; SHA256_DIGEST_SIZE] = [7u8; SHA256_DIGEST_SIZE];
@@ -751,7 +798,7 @@ mod tests {
             origin.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let blob_metadata = match kind {
@@ -774,67 +821,127 @@ mod tests {
         assert_eq!(origin.hits(), 6);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    #[ignore = "requires CAP_SYS_ADMIN, CAP_NET_ADMIN and iproute2 to create a netns"]
-    fn reads_reach_the_origin_only_inside_the_configured_netns() {
-        let escaped = TcpListener::bind("127.0.0.1:0").unwrap();
-        escaped.set_nonblocking(true).unwrap();
-        let port = escaped.local_addr().unwrap().port();
-        let (netns, listener) = thread::spawn(move || {
-            // SAFETY: unshare only affects this short-lived thread.
-            assert_eq!(unsafe { libc::unshare(libc::CLONE_NEWNET) }, 0);
-            assert!(std::process::Command::new("ip")
-                .args(["link", "set", "lo", "up"])
-                .status()
+    fn reads_run_on_the_runtime_of_the_caller_or_on_a_default_one() {
+        let runtime = Runtime::new().unwrap();
+        let test_cases = vec![(Some(runtime.handle().clone()), false), (None, true)];
+
+        for (runtime, expected) in test_cases {
+            let dir = tempdir().unwrap();
+            let payload = vec![0x9au8; 4096];
+            let blob_metadata = single_chunk_group(&payload);
+            let full_blob_id = FullBlob::new(&payload)
+                .with_blob_metadata(&blob_metadata)
+                .save_in(dir.path());
+            let blob = fs::read(dir.path().join(hex::encode(full_blob_id))).unwrap();
+            let origin = OriginStub::serve(&["206 Partial Content"], blob);
+            let config: Config = serde_yaml::from_str(&format!(
+                "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+                origin.addr
+            ))
+            .unwrap();
+            let BackendConfig::Registry(registry_config) = &config.backend else {
+                unreachable!()
+            };
+            let registry =
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), runtime).unwrap();
+
+            let mut data = vec![0u8; 16];
+            registry
+                .get(&full_blob_id, 17, data.len())
                 .unwrap()
-                .success());
-            let file = fs::File::open("/proc/thread-self/ns/net").unwrap();
-            (
-                Netns::new(file.into()).unwrap(),
-                TcpListener::bind(("127.0.0.1", port)).unwrap(),
-            )
-        })
-        .join()
+                .read_exact(&mut data)
+                .unwrap();
+
+            assert_eq!(
+                matches!(registry.runtime, RuntimeOrHandle::Runtime(_)),
+                expected
+            );
+            assert_eq!(data, payload[17..33]);
+        }
+    }
+
+    #[test]
+    fn new_rejects_the_handle_of_a_current_thread_runtime() {
+        let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+        let config: Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:1\n    repository: library/ubuntu\n",
+        )
         .unwrap();
-        let dir = tempdir().unwrap();
-        let payload = vec![0x9au8; 4096];
-        let blob_metadata = single_chunk_group(&payload);
-        let full_blob_id = FullBlob::new(&payload)
-            .with_blob_metadata(&blob_metadata)
-            .save_in(dir.path());
-        let blob = fs::read(dir.path().join(hex::encode(full_blob_id))).unwrap();
-        let origin = OriginStub::serve_on(listener, &["206 Partial Content"], blob);
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+
+        let err = Registry::new(
+            &config,
+            registry_config,
+            Arc::new(Metrics::new()),
+            Some(runtime.handle().clone()),
+        )
+        .err()
+        .unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn reads_fail_once_the_runtime_of_the_caller_is_shut_down() {
+        let origin = OriginStub::serve(&["503 Service Unavailable"], b"abcd".to_vec());
         let config: Config = serde_yaml::from_str(&format!(
-            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n",
+            "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 1h\n",
             origin.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, Some(netns), Arc::new(Metrics::new())).unwrap();
-
-        for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
-            let blob_metadata = match kind {
-                ReadKind::Ondemand => registry.get_blob_metadata(&full_blob_id),
-                ReadKind::Prefetch => registry.prefetch_blob_metadata(&full_blob_id),
-            }
-            .unwrap();
-            let mut data = vec![0u8; 16];
-            match kind {
-                ReadKind::Ondemand => registry.get(&full_blob_id, 17, data.len()),
-                ReadKind::Prefetch => registry.prefetch(&full_blob_id, 17, data.len()),
-            }
-            .unwrap()
-            .read_exact(&mut data)
-            .unwrap();
-
-            assert_eq!(blob_metadata.chunk_group_count(), 1);
-            assert_eq!(data, payload[17..33]);
-        }
-        assert_eq!(origin.hits(), 6);
-        assert_eq!(
-            escaped.accept().unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let runtime = Runtime::new().unwrap();
+        let registry = Arc::new(
+            Registry::new(
+                &config,
+                registry_config,
+                Arc::new(Metrics::new()),
+                Some(runtime.handle().clone()),
+            )
+            .unwrap(),
         );
+
+        let prefetch = thread::spawn({
+            let registry = registry.clone();
+            move || registry.prefetch(&TEST_BLOB_ID, 0, 4).map(drop)
+        });
+        let now = Instant::now();
+        while origin.hits() < 1 && now.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(100));
+        drop(runtime);
+
+        assert!(prefetch.join().unwrap().is_err());
+        assert!(registry.get_blob_metadata(&TEST_BLOB_ID).is_err());
+        assert!(registry.prefetch_blob_metadata(&TEST_BLOB_ID).is_err());
+        assert!(registry.get(&TEST_BLOB_ID, 0, 4).is_err());
+        assert!(registry.prefetch(&TEST_BLOB_ID, 0, 4).is_err());
+        assert_eq!(origin.hits(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "transport called more times than scripted")]
+    fn panic_of_a_read_is_resumed_on_the_caller() {
+        let config: Config = serde_yaml::from_str(
+            "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:1\n    repository: library/ubuntu\n",
+        )
+        .unwrap();
+        let BackendConfig::Registry(registry_config) = &config.backend else {
+            unreachable!()
+        };
+        let mut registry =
+            Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
+        Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+            fetcher: Box::new(ScriptedTransport::new(vec![])),
+        };
+
+        let _ = registry.get(&TEST_BLOB_ID, 0, 4);
     }
 
     #[test]
@@ -848,7 +955,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let read = registry.get(&TEST_BLOB_ID, offset, len);
             let prefetch = registry.prefetch(&TEST_BLOB_ID, offset, len);
@@ -876,7 +983,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
             let mut head = [0u8; 1];
@@ -913,7 +1020,7 @@ mod tests {
                 "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_read_timeout: 1s\n      max_retries: 0\n"
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let mut buf = [0u8; 4];
             let now = Instant::now();
@@ -935,7 +1042,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let mut buf = [0u8; 4];
             let result = match kind {
@@ -988,7 +1095,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let mut reader = registry.get(&TEST_BLOB_ID, 0, blob.len()).unwrap();
             let mut head = [0u8; 1];
@@ -1056,7 +1163,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let now = Instant::now();
             let mut data = Vec::new();
@@ -1160,7 +1267,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
             let reads = || -> f64 {
                 registry
                     .metrics()
@@ -1297,7 +1404,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let result = match kind {
                 ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, 4),
@@ -1336,7 +1443,7 @@ mod tests {
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
             let counter = |name: &str| -> f64 {
                 registry
                     .metrics()
@@ -1387,7 +1494,7 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      request_timeout: 60s\n      request_read_timeout: 60s\n"
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
         let counter = |name: &str| -> f64 {
             registry
                 .metrics()
@@ -1423,7 +1530,7 @@ mod tests {
             origin.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
             let err = match kind {
@@ -1453,7 +1560,7 @@ mod tests {
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };
@@ -1491,7 +1598,7 @@ mod tests {
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };
@@ -1529,7 +1636,7 @@ mod tests {
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };
@@ -1562,7 +1669,7 @@ mod tests {
             origin.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         let mut buf = [0u8; 4];
         registry
@@ -1603,7 +1710,7 @@ mod tests {
                 unreachable!()
             };
             let registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             let sources = || -> Vec<String> {
                 registry
                     .metrics()
@@ -1650,7 +1757,7 @@ mod tests {
             scheduler.local_addr().unwrap()
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         let now = Instant::now();
         let mut buf = [0u8; 4];
@@ -1694,7 +1801,7 @@ mod tests {
                 unreachable!()
             };
             let registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             assert_eq!(
                 registry.client.blob_url("abc123").unwrap().as_str(),
                 expected
@@ -1718,7 +1825,7 @@ backend:
             unreachable!()
         };
         let registry =
-            Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
         assert_eq!(
             registry.client.addr.as_str(),
             "https://registry.example.com/"
@@ -1797,7 +1904,7 @@ backend:
                 origin.addr, proxy.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
             let reads = || -> f64 {
                 registry
                     .metrics()
@@ -1839,7 +1946,7 @@ backend:
             proxy.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
         let failures = || -> Vec<String> {
             registry
                 .metrics()
@@ -1876,7 +1983,7 @@ backend:
             origin.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         let mut buf = [0u8; 4];
         registry
@@ -1909,7 +2016,7 @@ backend:
                 unreachable!()
             };
             let registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             assert_eq!(registry.client.transport.source(), source);
         }
     }
@@ -1933,7 +2040,7 @@ backend:
                 unreachable!()
             };
             let registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
 
             assert_eq!(registry.client.transport.source(), Source::Dragonfly);
             assert!(runtime_dir.path().join("dragonfly").is_dir());
@@ -1977,7 +2084,7 @@ backend:
                 panic!("expected a registry backend, got {:?}", config.backend);
             };
 
-            let err = Registry::new(&config, registry, None, Arc::new(Metrics::new()))
+            let err = Registry::new(&config, registry, Arc::new(Metrics::new()), None)
                 .err()
                 .unwrap();
 
@@ -1999,7 +2106,7 @@ backend:
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let err = registry
                 .get(&TEST_BLOB_ID, 0, 4)
@@ -2030,7 +2137,7 @@ backend:
             .unwrap();
 
             let now = Instant::now();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
             for _ in 0..2 {
                 let mut buf = [0u8; 4];
                 registry
@@ -2065,7 +2172,7 @@ backend:
                     unreachable!()
                 };
                 let mut registry =
-                    Registry::new(&config, registry_config, None, Arc::new(Metrics::new()))
+                    Registry::new(&config, registry_config, Arc::new(Metrics::new()), None)
                         .unwrap();
                 Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                     fetcher: Box::new(transport.clone()),
@@ -2094,7 +2201,7 @@ backend:
             origin.addr
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         let mut buf = vec![0u8; 4];
         let err = registry
@@ -2128,7 +2235,7 @@ backend:
                 origin.addr
             ))
             .unwrap();
-            let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+            let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
             let mut buf = [0u8; 4];
             let result = registry
@@ -2149,7 +2256,7 @@ backend:
             "backend:\n  type: registry\n  config:\n    addr: http://{addr}\n    repository: library/ubuntu\n    http:\n      max_retries: 0\nprefetch:\n  retry_interval: 2s\n"
         ))
         .unwrap();
-        let registry = <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap();
+        let registry = <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap();
 
         let now = Instant::now();
         let mut buf = [0u8; 4];
@@ -2184,7 +2291,7 @@ backend:
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };
@@ -2221,7 +2328,7 @@ backend:
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };
@@ -2278,7 +2385,7 @@ backend:
                     unreachable!()
                 };
                 let mut registry =
-                    Registry::new(&config, registry_config, None, Arc::new(Metrics::new()))
+                    Registry::new(&config, registry_config, Arc::new(Metrics::new()), None)
                         .unwrap();
                 Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                     fetcher: Box::new(transport.clone()),
@@ -2320,7 +2427,7 @@ backend:
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };
@@ -2352,7 +2459,7 @@ backend:
             unreachable!()
         };
         let mut registry =
-            Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
         Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
             fetcher: Box::new(gate.clone()),
         };
@@ -2393,7 +2500,7 @@ backend:
             unreachable!()
         };
         let mut registry =
-            Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+            Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
         Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
             fetcher: Box::new(transport.clone()),
         };
@@ -2450,7 +2557,7 @@ backend:
                     unreachable!()
                 };
                 let mut registry =
-                    Registry::new(&config, registry_config, None, Arc::new(Metrics::new()))
+                    Registry::new(&config, registry_config, Arc::new(Metrics::new()), None)
                         .unwrap();
                 Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                     fetcher: Box::new(transport.clone()),
@@ -2559,7 +2666,7 @@ backend:
                 unreachable!()
             };
             let mut registry =
-                Registry::new(&config, registry_config, None, Arc::new(Metrics::new())).unwrap();
+                Registry::new(&config, registry_config, Arc::new(Metrics::new()), None).unwrap();
             Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
                 fetcher: Box::new(transport.clone()),
             };

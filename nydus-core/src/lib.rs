@@ -41,7 +41,6 @@ pub use blob::{BlobId, BlobInfo, Blobs};
 pub use entry::FileType;
 pub use extent::{Extent, ResolveMode};
 pub use flat::FlatImage;
-pub use nydus_backend::Netns;
 pub use nydus_storage::cache::CacheOptions;
 pub use nydus_storage::ondemand::OndemandRecorder;
 pub use nydus_telemetry::metrics::Metrics;
@@ -56,6 +55,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use nydus_config::Config;
 use nydus_error::{Context, Error, Result};
+use tokio::runtime::Handle;
 
 use entry::ImageFs;
 use extent::{BlobRangeSpec, ExtentResolver};
@@ -114,10 +114,9 @@ impl NydusCore {
     /// Dropping the core raises the worker's stop flag so it winds down
     /// instead of retrying throttled prefetches forever.
     ///
-    /// A registry backend reaches the registry from `netns` when one is
-    /// given, the caller's network namespace otherwise: every thread of the
-    /// backend's runtime enters it, so the prefetch worker and the callers
-    /// need not (e.g. a virtio-pmem backend passes the guest's namespace).
+    /// A registry backend runs its requests on `runtime`, or on a default one.
+    /// It needs `runtime` to be multi-thread with I/O and timers enabled, and
+    /// rejects a current-thread one.
     /// Every read, cache fill and prefetch of the core records into
     /// [`Metrics`] of its own, see [`metrics`], and every on-demand chunk
     /// group access into an [`OndemandRecorder`] of its own.
@@ -125,7 +124,7 @@ impl NydusCore {
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Blobs::fetch
     /// [`metrics`]: Self::metrics
-    pub fn new(bootstrap: &Path, config: Config, netns: Option<Netns>) -> Result<Self> {
+    pub fn new(bootstrap: &Path, config: Config, runtime: Option<Handle>) -> Result<Self> {
         let bootstrap_file = Arc::new(
             OpenOptions::new()
                 .read(true)
@@ -146,7 +145,7 @@ impl NydusCore {
         let prefetch_scope = config.prefetch.scope;
         let prefetch_timeout = config.prefetch.request_timeout;
         let cache_options = CacheOptions::from(&config.storage);
-        let backend = <dyn Backend>::new(&config, netns, Arc::new(Metrics::new()))
+        let backend = <dyn Backend>::new(&config, Arc::new(Metrics::new()), runtime)
             .context("failed to build blob backend")?;
         let cache_dir = config.storage.dir.clone();
         if let Some(cache_dir) = &cache_dir {

@@ -52,7 +52,7 @@ fn build_nbd_core() -> (TempDir, Arc<NbdCore>, Vec<u8>) {
         dir.path().display(),
     ))
     .unwrap();
-    let core = Arc::new(NbdCore::new(&path, config).unwrap());
+    let core = Arc::new(NbdCore::new(&path, config, None).unwrap());
     (dir, core, bootstrap)
 }
 

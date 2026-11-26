@@ -5,7 +5,7 @@ use nydus::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file, ChunkGroupRef,
 };
 use nydus_backend::Backend;
-use nydus_config::{Config, StorageConfig};
+use nydus_config::{BackendConfig, Config, StorageConfig};
 use nydus_core::CacheOptions;
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_telemetry::logging::init_command_tracing;
@@ -15,6 +15,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tabled::{settings::Style, Table, Tabled};
+use tokio::runtime::{Handle, Runtime};
 use tracing::{info, Level};
 
 /// The artifact optimize builds.
@@ -112,9 +113,17 @@ impl OptimizeCommand {
         // Validates the flag combination before any expensive work.
         self.validate()?;
 
+        // Load the storage config.
+        let config = Config::load(&self.config)?;
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+
         // Prepares the access patterns, blob backend, cache directory and
         // cache options from the raw CLI flags.
-        let (patterns, backend, storage) = self.prepare()?;
+        let (patterns, backend, storage) =
+            self.prepare(config, runtime.as_ref().map(Runtime::handle).cloned())?;
 
         // Runs the pipeline of the requested artifact, persisting its
         // artifacts and printing the summary.
@@ -138,7 +147,11 @@ impl OptimizeCommand {
     /// Lowers the raw CLI flags into the optimize inputs: the access patterns
     /// from the ondemand record (file or apiserver), the blob backend, and the storage section the
     /// source blobs' caches are opened with.
-    fn prepare(&self) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
+    fn prepare(
+        &self,
+        config: Config,
+        runtime: Option<Handle>,
+    ) -> Result<(Vec<ChunkGroupRef>, Arc<dyn Backend>, StorageConfig)> {
         let patterns = match (&self.trace_file, &self.apiserver) {
             (Some(path), _) => load_patterns_from_file(path)?,
             (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
@@ -151,12 +164,10 @@ impl OptimizeCommand {
             ));
         }
 
-        // Load the storage config.
-        let storage_config = Config::load(&self.config)?;
-        let backend = <dyn Backend>::new(&storage_config, None, Arc::new(Metrics::new()))
+        let backend = <dyn Backend>::new(&config, Arc::new(Metrics::new()), runtime)
             .context("failed to build blob backend")?;
 
-        Ok((patterns, backend, storage_config.storage))
+        Ok((patterns, backend, config.storage))
     }
 
     /// Runs the ondemand blob pipeline: builds the ondemand blob, persists the

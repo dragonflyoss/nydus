@@ -19,11 +19,12 @@ image:
 For microVM virtio-pmem use cases, `NydusCore` exposes the device table
 needed to wire up pmem devices backed by the host-side cache data files, and
 a `Blobs::fetch` entry point that guarantees a block-aligned range is decoded
-and resident before the guest touches it. A core reaches a registry from the
-network namespace it is given (`NydusCore::new(bootstrap, config, netns)`)
+and resident before the guest touches it. A core runs its registry requests on the
+Tokio runtime whose handle it is given (`NydusCore::new(bootstrap, config, runtime)`),
+or on a default runtime of its own without one,
 and records into `Metrics` and an `OndemandRecorder` of its own (`core.metrics()`,
 `core.ondemand_recorder()`), so one process can serve several sandboxes without
-mixing their namespaces, counters or ondemand records; an embedder gathers the values
+mixing their counters or ondemand records; an embedder gathers the values
 from `core.metrics().registry()`.
 
 For fault handlers, `NydusCore::fetch_flat_chunk_group_ranges(offset, len)` returns

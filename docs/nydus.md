@@ -220,16 +220,20 @@ their sockets:
 
 | Pool | Size | Lifetime and work |
 | ---- | ---- | ----------------- |
-| Async workers | Tokio's default, one per CPU | Created with the registry backend and retained for its lifetime. Each request future is spawned onto the runtime, so DNS and TCP connect happen on a runtime thread; they also drive HTTP sockets, timers, and connection-pool futures while the synchronous frontend caller waits for the result. |
+| Async workers | Tokio's default, one per CPU | Those of the runtime whose handle the registry backend is given, else of a default runtime created with the backend and retained for its lifetime. Each request future is spawned onto the runtime; the workers drive it, HTTP sockets, timers, connection-pool futures and the task that streams a range to its reader while the synchronous frontend caller waits for the result. Once the runtime is shut down, a read fails with an error. |
 | Blocking workers | Tokio's default | Created by Tokio on demand for blocking DNS resolution (`getaddrinfo`) and released when idle. Blob reads, decompression, verification, and cache writes do not run in this pool. |
 
-Every registry backend runs on a runtime of its own with tokio's default
-thread counts, the way dragonfly-client builds its runtimes.
-`nydus_backend::Backend::new(config, prefetch, netns, metrics)` takes an
-optional network namespace every runtime thread enters, so an embedder's
-registry sockets are created in it regardless of the caller's, and the
-`Metrics` every read records into. A process using only local blobs never
-creates a Tokio runtime.
+`nydus_backend::Backend::new(config, metrics, runtime)` takes the
+`tokio::runtime::Handle` a registry backend runs its requests on and the
+`Metrics` every read records into. Without a handle the registry backend
+builds a default runtime of its own with tokio's default thread counts. A
+`nydus` command builds one runtime when its backend is a registry, a daemon
+only after it registered its termination signals, and passes the handle
+down; with a local backend it builds none. An embedder passes the handle of
+its own runtime to `NydusCore::new`, so its cores share one runtime. That
+runtime must be multi-thread with I/O and timers enabled: a current-thread
+runtime drives its sockets and timers only inside `Runtime::block_on`, so
+the registry backend rejects its handle. A local backend uses no runtime.
 
 ### `nydus-core` API
 
@@ -2832,16 +2836,13 @@ through `ublk_drv` over `io_uring`; see
 	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),
 	which mirrors the padded kernel-visible block address space — a guest read of block
 	`N` lands at byte `N * 4096` of the backing file.
-- `NydusCore::new(bootstrap, Config, Option<Netns>)` parses the bootstrap and
+- `NydusCore::new(bootstrap, Config, Option<Handle>)` parses the bootstrap and
 	an already loaded `nydus_config::Config` (same structure as
 	`nydus fuse --config`) lazily; per-blob work (blob meta download/validation,
 	sparse cache file creation) happens on first touch through
-	`blobs.prepare_all()` or `blobs.fetch`. A registry backend reaches the
-	registry from the given `nydus_core::Netns`, a descriptor on a
-	`/proc/<pid>/ns/net` file, when one is passed: every thread of the
-	backend's runtime enters it, so a core built for a guest-facing backend
-	needs no namespace switch on the caller's side. `None` keeps the caller's
-	namespace.
+	`blobs.prepare_all()` or `blobs.fetch`. A registry backend runs its
+	requests on the given `tokio::runtime::Handle`, a runtime the caller
+	owns; with `None` it builds a default runtime of its own.
 - Unless `config.prefetch.scope` is `none`, `new` spawns a background prefetch
 	worker before returning — the same two-phase workflow as `nydus fuse`
 	(ondemand blob first, then the rest only under `prefetch.scope: all`, or

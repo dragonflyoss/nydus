@@ -2,11 +2,12 @@ use clap::Parser;
 use nydus::error::{Context, Result};
 use nydus::signal;
 use nydus::uffd::{UffdCore, UffdService};
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tracing::{error, Level};
 
 use super::*;
@@ -105,7 +106,16 @@ impl UffdCommand {
     /// thread, and blocks on the tokio runtime until a termination signal or
     /// a fatal error stops it.
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
-        let core = Arc::new(UffdCore::new(&self.bootstrap, config)?);
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+        let core = Arc::new(UffdCore::new(
+            &self.bootstrap,
+            config,
+            runtime.as_ref().map(Runtime::handle).cloned(),
+        )?);
         let service = Arc::new(UffdService::new(core, self.socket.clone()));
         let signal_service = service.clone();
         let signal_thread = signal::spawn_signal_thread("uffd", signals, move || {

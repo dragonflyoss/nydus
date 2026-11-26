@@ -3,12 +3,13 @@ use nydus::error::{Context, Error, Result};
 use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifyService, FetchPool};
 use nydus::mount::unmount;
 use nydus::signal;
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_telemetry::logging::init_tracing;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -146,8 +147,19 @@ impl FanotifyCommand {
     /// again on shutdown before releasing the fanotify group fd.
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
         raise_nofile_limit();
+
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
         let core = std::sync::Arc::new(
-            FanotifyCore::new(&self.bootstrap, config).context("failed to build fanotify core")?,
+            FanotifyCore::new(
+                &self.bootstrap,
+                config,
+                runtime.as_ref().map(Runtime::handle).cloned(),
+            )
+            .context("failed to build fanotify core")?,
         );
 
         let service = FanotifyService::new(core.clone())?;
