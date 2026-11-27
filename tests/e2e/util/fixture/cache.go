@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 	"sync"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/dragonflyoss/nydus/tests/e2e/util/corpus"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
 )
@@ -134,22 +133,9 @@ func fileHash(t testing.TB, path string) string {
 // edit to a generator invalidates the cached trees without a manual bump.
 func sourceHash(t testing.TB) string {
 	t.Helper()
-	root, err := env.RepoRoot()
+	key, err := corpus.SourceHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	files, err := filepath.Glob(filepath.Join(root, "tests", "e2e", "util", "corpus", "*.go"))
-	if err != nil || len(files) == 0 {
-		t.Fatalf("no corpus sources found: %v", err)
-	}
-
-	slices.Sort(files)
-	var b strings.Builder
-
-	for _, f := range files {
-		b.WriteString(fileHash(t, f))
-	}
-
-	return b.String()
+	return key
 }

@@ -4,16 +4,42 @@
 package corpus
 
 import (
+	"crypto/sha256"
+	"embed"
 	"encoding/binary"
+	"fmt"
 	"hash/fnv"
 	randv2 "math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/sys/unix"
 )
+
+//go:embed *.go
+var sources embed.FS
+
+// SourceHash fingerprints the generators compiled into the test binary,
+// including when the binary runs outside the checkout.
+var SourceHash = sync.OnceValues(func() (string, error) {
+	files, err := sources.ReadDir(".")
+	if err != nil {
+		return "", err
+	}
+	var key strings.Builder
+	for _, f := range files {
+		data, err := sources.ReadFile(f.Name())
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&key, "%x", sha256.Sum256(data))
+	}
+	return key.String(), nil
+})
 
 // Bytes returns n pseudo-random bytes derived from seed, the same on every
 // run, so a test can know a file's content without keeping it.

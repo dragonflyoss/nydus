@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dragonflyoss/nydus/tests/e2e/util/fixture"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/fstest"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/mount"
 	"github.com/stretchr/testify/assert"
@@ -14,8 +15,12 @@ import (
 )
 
 func testLifecycle(t *testing.T, a mount.Adapter) {
-	img := semanticImage(t)
-	ownsMount := mount.TraitsOf(a).OwnsMount
+	traits := mount.TraitsOf(a)
+	layout := semanticLayout
+	if traits.Daemonless {
+		layout = "erofs-lz4"
+	}
+	img := fixture.Build(t, fixture.Stress, fixture.MustLayout(t, layout))
 
 	t.Run("RemountStability", func(t *testing.T) {
 		t.Parallel()
@@ -29,7 +34,7 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 			if !assert.False(t, mount.IsMountpoint(m.Root)) {
 				t.FailNow()
 			}
-			if !assert.Zero(t, m.Daemon.ExitCode()) {
+			if !traits.Daemonless && !assert.Zero(t, m.Daemon.ExitCode()) {
 				t.FailNow()
 			}
 
@@ -42,26 +47,28 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 		}
 	})
 
-	t.Run("SIGTERM", func(t *testing.T) {
-		t.Parallel()
-		m := mount.Mount(t, a, img, mount.Options{})
-		mount.ReadAll(t, m.Path("files"))
+	if !traits.Daemonless {
+		t.Run("SIGTERM", func(t *testing.T) {
+			t.Parallel()
+			m := mount.Mount(t, a, img, mount.Options{})
+			mount.ReadAll(t, m.Path("files"))
 
-		if !ownsMount {
-			mount.Unmount(m.Root)
-		}
+			if !traits.OwnsMount {
+				mount.Unmount(m.Root)
+			}
 
-		m.Daemon.Signal(unix.SIGTERM)
+			m.Daemon.Signal(unix.SIGTERM)
 
-		if !assert.True(t, m.Daemon.WaitExit(exitTimeout)) {
-			t.FailNow()
-		}
-		if !assert.Zero(t, m.Daemon.ExitCode()) {
-			t.FailNow()
-		}
+			if !assert.True(t, m.Daemon.WaitExit(exitTimeout)) {
+				t.FailNow()
+			}
+			if !assert.Zero(t, m.Daemon.ExitCode()) {
+				t.FailNow()
+			}
 
-		mount.ExpectNoMounts(t, m.Dir)
-	})
+			mount.ExpectNoMounts(t, m.Dir)
+		})
+	}
 
 	t.Run("UnmountWithOpenFile", func(t *testing.T) {
 		t.Parallel()
@@ -101,7 +108,7 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 		if !assert.False(t, mount.IsMountpoint(m.Root)) {
 			t.FailNow()
 		}
-		if !assert.True(t, m.Daemon.Alive()) {
+		if !traits.Daemonless && !assert.True(t, m.Daemon.Alive()) {
 			t.FailNow()
 		}
 		if !assert.NoError(t, unix.Fadvise(fd, 0, 0, unix.FADV_DONTNEED)) {
@@ -113,11 +120,14 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 			t.FailNow()
 		}
 
-		assert.True(t, bytes.Equal(want, buf[:n]))
+		assert.Equal(t, want, buf[:n])
 		open = false
 		assert.NoError(t, unix.Close(fd))
 
-		if !ownsMount {
+		if traits.Daemonless {
+			return
+		}
+		if !traits.OwnsMount {
 			assert.True(t, m.Daemon.Alive())
 		}
 
@@ -183,11 +193,13 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 			t.FailNow()
 		}
 
-		select {
-		case <-m.Daemon.Exited():
-			t.Fatal("the daemon exited while a mapping still referenced the detached mount")
+		if !traits.Daemonless {
+			select {
+			case <-m.Daemon.Exited():
+				t.Fatal("the daemon exited while a mapping still referenced the detached mount")
 
-		case <-time.After(time.Second):
+			case <-time.After(time.Second):
+			}
 		}
 
 		fstest.ReadMapped(t, func() {
@@ -196,13 +208,16 @@ func testLifecycle(t *testing.T, a mount.Adapter) {
 			}
 		})
 
-		if !assert.True(t, m.Daemon.Alive()) {
+		if !traits.Daemonless && !assert.True(t, m.Daemon.Alive()) {
 			t.FailNow()
 		}
 
 		assert.NoError(t, unix.Munmap(data))
 		mapped = false
 
+		if traits.Daemonless {
+			return
+		}
 		m.Daemon.Signal(unix.SIGTERM)
 
 		if !assert.True(t, m.Daemon.WaitExit(exitTimeout)) {
