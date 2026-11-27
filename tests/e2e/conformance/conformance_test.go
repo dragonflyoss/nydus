@@ -83,7 +83,6 @@ var ownCases = []struct {
 	test func(t *testing.T, a mount.Adapter)
 }{
 	{name: "BackendFailure", test: testBackendFailure},
-	{name: "Lifecycle", test: testLifecycle},
 	{name: "FileHandle", test: testFileHandle},
 }
 
@@ -108,6 +107,11 @@ func testAdapter(t *testing.T, a mount.Adapter) {
 			runCases(t, semanticCases, &mounted{Mounted: mount.Mount(t, a, img, mount.Options{Mode: mount.Cold}), adapter: a})
 		})
 	}
+
+	t.Run("Lifecycle", func(t *testing.T) {
+		t.Parallel()
+		testLifecycle(t, a)
+	})
 
 	if !daemonless {
 		for _, c := range ownCases {

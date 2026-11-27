@@ -16,6 +16,31 @@ The targets build `nydus` with `--profile ci` and point the tests at it
 through `NYDUS_BIN`/`NYDUSIFY_BIN`; the test binaries are compiled as you
 and run through `sudo -E`.
 
+### Running kernel conformance in a guest
+
+From `tests/e2e`, build the standalone runner for the guest architecture:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o conformance.test ./conformance
+```
+
+Copy `conformance.test` and a guest-compatible `nydus` executable into the
+same directory in a disposable guest. No checkout or Go installation is
+needed there. Run as root with mount privileges, `losetup`, loop devices
+and a writable fixture cache on a filesystem supporting xattrs and device
+nodes:
+
+```sh
+export CI=1 NYDUS_BIN="$PWD/nydus" NYDUS_E2E_CACHE="$PWD/cache"
+# Only for a vendor kernel with backported extra devices and LZ4 fragments:
+export NYDUS_E2E_EROFS_BACKPORTED=1
+./conformance.test -test.v -test.run='^TestKernel$/^Lifecycle$'
+./conformance.test -test.v -test.run='^TestKernel$/^(Semantic|Data)$/^erofs-lz4$'
+```
+
+The kernel and FUSE suites share remount, open-file and mmap lifetime checks.
+Only adapters with a daemon check its signal and exit behavior.
+
 ## Layout
 
 | Package                     | What it proves                                                                                                                          |
