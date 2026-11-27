@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/containerd/containerd/v2 v2.0.13
-	github.com/containerd/continuity v0.4.4
+	github.com/containerd/continuity v0.5.0
 	github.com/google/go-containerregistry v0.20.1
 	github.com/moby/sys/mountinfo v0.7.2
 	github.com/opencontainers/image-spec v1.1.1
