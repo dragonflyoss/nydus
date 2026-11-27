@@ -55,7 +55,7 @@ jobs:
           cache-on-failure: true
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: tests/e2e/go.mod
           cache-dependency-path: |
