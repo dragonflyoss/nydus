@@ -2,7 +2,7 @@ use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
 use nydus::build::{
     blob_metadata_sidecar_path, build_image, build_image_from_tar_layer,
-    save_blob_metadata_sidecar, BuildImageOptions, Image, NativeLayout,
+    save_blob_metadata_sidecar, BuildImageOptions, ChunkDedup, Image, NativeLayout,
 };
 use nydus::error::{Context, Error, Result};
 use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BlobMetadataDigester};
@@ -458,6 +458,9 @@ impl BuildCommand {
             blob_metadata_path: blob_metadata_path.as_deref(),
             bootstrap_path: self.bootstrap.as_deref(),
             native: options.native(),
+            chunk_dedup: image.chunk_dedup,
+            chunk_dedup_hits: image.chunk_dedup_hits,
+            chunk_dedup_bytes_saved: image.chunk_dedup_bytes_saved,
         })
     }
 
@@ -724,6 +727,9 @@ struct BlobBuildSummary<'a> {
     blob_metadata_path: Option<&'a Path>,
     bootstrap_path: Option<&'a Path>,
     native: Option<NativeLayout>,
+    chunk_dedup: ChunkDedup,
+    chunk_dedup_hits: u64,
+    chunk_dedup_bytes_saved: u64,
 }
 
 fn print_blob_build_summary(summary: BlobBuildSummary<'_>) -> Result<()> {
@@ -750,6 +756,12 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) -> Result<()> {
         chunk_digester: String,
         #[tabled(rename = "CHUNK COMPRESSOR")]
         chunk_compressor: String,
+        #[tabled(rename = "CHUNK DEDUP")]
+        chunk_dedup: String,
+        #[tabled(rename = "DEDUPED CHUNK COUNT")]
+        deduped_chunk_count: String,
+        #[tabled(rename = "DEDUPED CHUNK BYTES")]
+        deduped_chunk_bytes: String,
         #[tabled(rename = "BLOB PAYLOAD SIZE")]
         blob_payload_size: String,
         #[tabled(rename = "BLOB COMPRESSED SIZE")]
@@ -802,6 +814,12 @@ fn print_blob_build_summary(summary: BlobBuildSummary<'_>) -> Result<()> {
             Err(err) => err.to_string(),
         }),
         chunk_compressor: meta(|meta| meta.compressor().to_string()),
+        chunk_dedup: match summary.chunk_dedup {
+            ChunkDedup::Off => "off".to_string(),
+            ChunkDedup::LoneChunk => "lone-chunk".to_string(),
+        },
+        deduped_chunk_count: summary.chunk_dedup_hits.to_string(),
+        deduped_chunk_bytes: summary.chunk_dedup_bytes_saved.to_string(),
         blob_payload_size: meta(|meta| meta.uncompressed_size().to_string()),
         blob_compressed_size: meta(|meta| meta.compressed_size().to_string()),
         blob_uncompressed_size: meta(|meta| meta.logical_size().to_string()),
@@ -1435,6 +1453,32 @@ mod tests {
                 .to_string()
                 .contains("power of two between"));
         }
+    }
+
+    #[test]
+    fn chunk_dedup_is_the_default_and_never_blocks_the_build() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["build", source.to_str().unwrap(), "--blob", "/tmp/out.blob"];
+            args.extend_from_slice(extra);
+            BuildCommand::try_parse_from(args)
+                .unwrap()
+                .prepare()
+                .unwrap()
+        };
+        assert_eq!(parse(&[]).chunk_dedup(), ChunkDedup::LoneChunk);
+        // Layouts and digesters that cannot deduplicate still build: the
+        // writer falls back to storing every chunk.
+        assert_eq!(
+            parse(&["--compressor", "erofs-lz4"]).chunk_dedup(),
+            ChunkDedup::LoneChunk
+        );
+        assert_eq!(
+            parse(&["--digester", "none"]).chunk_dedup(),
+            ChunkDedup::LoneChunk
+        );
     }
 
     #[test]

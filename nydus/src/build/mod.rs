@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use nydus_core::build::blob_chunk::{BlobLayout, BlobWriter};
-pub use nydus_core::build::blob_chunk::{DEFAULT_CHUNK_GROUP_MIN_SIZE, MAX_CHUNK_GROUP_MIN_SIZE};
+pub use nydus_core::build::blob_chunk::{
+    ChunkDedup, DEFAULT_CHUNK_GROUP_MIN_SIZE, MAX_CHUNK_GROUP_MIN_SIZE,
+};
 use nydus_core::build::bootstrap::render_bootstrap;
 use nydus_core::build::inode::{build_tree, choose_epoch, set_root_prefetch_blobs_xattr};
 use nydus_core::build::{bootstrap, inode, HashingWriter};
@@ -92,6 +94,10 @@ pub struct BuildImageOptions {
     /// boundary of the layer data (0 disables alignment) so fixed-offset
     /// block dedup sees stable blocks.
     z_data_alignment: u32,
+    /// Alias identical chunks within the blob instead of storing each
+    /// occurrence (see [`ChunkDedup`]); on by default, skipped when the
+    /// layout or the digester cannot support it.
+    chunk_dedup: ChunkDedup,
 }
 
 /// The built image as the caller sees it: the digests, blob meta and footer
@@ -107,6 +113,12 @@ pub struct Image {
     pub blob_footer: BlobFooter,
     /// Rendered when requested, for the caller to persist.
     pub standalone_bootstrap: Option<Vec<u8>>,
+    /// The chunk dedup level the build applied.
+    pub chunk_dedup: ChunkDedup,
+    /// How many chunks were aliased to an earlier copy.
+    pub chunk_dedup_hits: u64,
+    /// The un-compressed bytes those chunks would have occupied.
+    pub chunk_dedup_bytes_saved: u64,
 }
 
 /// Implement BuildImageOptions.
@@ -151,6 +163,7 @@ impl BuildImageOptions {
             render_standalone_bootstrap,
             native: None,
             z_data_alignment: 0,
+            chunk_dedup: ChunkDedup::LoneChunk,
         })
     }
 
@@ -182,6 +195,20 @@ impl BuildImageOptions {
     pub fn with_digester(mut self, digester: Option<BlobMetadataDigester>) -> Self {
         self.digester = digester;
         self
+    }
+
+    /// Aliases identical chunks at `level` within the blob instead of storing
+    /// each occurrence (see [`ChunkDedup`]). Lone-chunk dedup is the default;
+    /// a layout or digester that cannot support it falls back to
+    /// [`ChunkDedup::Off`] when the writer is created.
+    pub fn with_chunk_dedup(mut self, level: ChunkDedup) -> Self {
+        self.chunk_dedup = level;
+        self
+    }
+
+    /// The chunk dedup level the build applies.
+    pub fn chunk_dedup(&self) -> ChunkDedup {
+        self.chunk_dedup
     }
 
     /// Names the blob up front instead of by its sha256, skipping both
@@ -334,14 +361,15 @@ impl BuildImageOptions {
                 chunk_group_min_size: self.chunk_group_min_size,
             }
         };
-        BlobWriter::new(
+        Ok(BlobWriter::new(
             writer,
             self.chunk_size,
             self.compressor,
             self.digester,
             self.blob_id.is_none(),
             layout,
-        )
+        )?
+        .with_chunk_dedup(self.chunk_dedup))
     }
 }
 
@@ -435,6 +463,9 @@ fn finish_z_image<W: Write>(
         blob_metadata: None,
         blob_footer: footer,
         standalone_bootstrap,
+        chunk_dedup: ChunkDedup::Off,
+        chunk_dedup_hits: 0,
+        chunk_dedup_bytes_saved: 0,
     })
 }
 
@@ -543,6 +574,8 @@ fn finish_image<W: Write>(
     drop(inodes);
 
     let compressed_data_size = blob_writer.data_size();
+    let chunk_dedup = blob_writer.chunk_dedup();
+    let (chunk_dedup_hits, chunk_dedup_bytes_saved) = blob_writer.chunk_dedup_stats();
     let (writer, full_blob_hasher, blob_metadata) = blob_writer.into_parts_with_metadata()?;
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(writer), full_blob_hasher);
 
@@ -580,6 +613,9 @@ fn finish_image<W: Write>(
         blob_metadata,
         blob_footer: footer,
         standalone_bootstrap,
+        chunk_dedup,
+        chunk_dedup_hits,
+        chunk_dedup_bytes_saved,
     })
 }
 
@@ -872,5 +908,230 @@ mod tests {
             root.size(),
             "root dirents inline"
         );
+    }
+
+    /// Two identical files: with the default 2 MiB geometry each file is one
+    /// lone chunk plus a packed tail. The default lone dedup aliases only
+    /// the lone one, and the blob shrinks by the aliased bytes.
+    #[test]
+    fn build_image_dedups_chunks_within_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        let data: Vec<u8> = (0..(2 << 20) + 12345u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+            .collect();
+        std::fs::write(source.join("a"), &data).unwrap();
+        std::fs::write(source.join("b"), &data).unwrap();
+
+        let build = |level: ChunkDedup| {
+            let options = BuildImageOptions::new(
+                source.clone(),
+                BlobMetadata::DEFAULT_CHUNK_SIZE,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                false,
+            )
+            .unwrap()
+            .with_chunk_dedup(level);
+            let mut blob = Vec::new();
+            let image = build_image(&options, &mut blob).unwrap();
+            (image, blob.len())
+        };
+
+        let (off_image, off_len) = build(ChunkDedup::Off);
+        assert_eq!(off_image.chunk_dedup, ChunkDedup::Off);
+        assert_eq!(
+            (
+                off_image.chunk_dedup_hits,
+                off_image.chunk_dedup_bytes_saved
+            ),
+            (0, 0)
+        );
+
+        let (lone_image, lone_len) = build(ChunkDedup::LoneChunk);
+        assert_eq!(lone_image.chunk_dedup, ChunkDedup::LoneChunk);
+        assert_eq!(
+            (
+                lone_image.chunk_dedup_hits,
+                lone_image.chunk_dedup_bytes_saved
+            ),
+            (1, u64::from(BlobMetadata::DEFAULT_CHUNK_SIZE))
+        );
+        // The data region shrinks by exactly the aliased chunk bytes; the
+        // chunk indexes may encode differently, so the whole blob does not
+        // have to shrink by that amount.
+        let data_region = |image: &Image| image.blob_footer.compressed_data_size();
+        assert_eq!(
+            data_region(&off_image) - data_region(&lone_image),
+            u64::from(BlobMetadata::DEFAULT_CHUNK_SIZE)
+        );
+        assert!(lone_len < off_len, "off={off_len} lone={lone_len}");
+    }
+
+    /// The aliased chunks stay readable end to end: both copies round-trip
+    /// through the real EROFS reader, and their chunk indexes point at the
+    /// same blocks exactly where dedup applied — while the undeduped build
+    /// gives each copy its own blocks.
+    #[test]
+    fn build_image_deduped_chunks_read_back_through_the_erofs_reader() {
+        use nydus_core::ErofsReader;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        let data: Vec<u8> = (0..(2 << 20) + 12345u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+            .collect();
+        std::fs::write(source.join("a"), &data).unwrap();
+        std::fs::write(source.join("b"), &data).unwrap();
+
+        let read_back = |level: ChunkDedup| {
+            let options = BuildImageOptions::new(
+                source.clone(),
+                BlobMetadata::DEFAULT_CHUNK_SIZE,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                false,
+            )
+            .unwrap()
+            .with_chunk_dedup(level);
+            let mut blob = Vec::new();
+            build_image(&options, &mut blob).unwrap();
+            let blob_path = dir.path().join(format!("{level:?}.blob"));
+            std::fs::write(&blob_path, &blob).unwrap();
+            let reader = ErofsReader::open_blob(
+                &blob_path,
+                None,
+                None,
+                std::sync::Arc::new(nydus_core::Metrics::new()),
+                nydus_core::CacheOptions::default(),
+            )
+            .unwrap();
+            let root_nid = reader.superblock().root_nid();
+            let root = reader.inode(root_nid).unwrap();
+            ["a", "b"].map(|name| {
+                let nid = reader
+                    .lookup_dir_entry(root_nid, &root, name.as_bytes())
+                    .unwrap()
+                    .unwrap();
+                let inode = reader.inode(nid).unwrap();
+                let mut out = Vec::new();
+                reader
+                    .write_file_data_to(nid, &inode, 0, data.len() as u32, &mut out)
+                    .unwrap();
+                assert_eq!(out, data, "{level:?} {name}");
+                reader.read_chunk_index_entries(nid, &inode).unwrap()
+            })
+        };
+
+        let [off_a, off_b] = read_back(ChunkDedup::Off);
+        assert_eq!(off_a.len(), off_b.len());
+        assert!(
+            off_a.iter().zip(&off_b).all(|(a, b)| a != b),
+            "an undeduped blob stores each copy in its own blocks"
+        );
+
+        let [a, b] = read_back(ChunkDedup::LoneChunk);
+        assert_eq!(a.len(), b.len());
+        // The lone chunk aliases; the packed tail keeps its own copy.
+        assert_eq!(a[0], b[0], "shares the lone chunk");
+        assert_ne!(a, b, "keeps the packed tail separate");
+    }
+
+    /// A duplicate's chunk index enters an earlier *compressed* chunk group:
+    /// the group is decoded once and both files see the same bytes.
+    #[test]
+    fn build_image_dedups_chunks_in_compressed_groups() {
+        use nydus_core::ErofsReader;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        // Long runs so the zstd groups are stored compressed.
+        let data: Vec<u8> = (0..(2 << 20) + 12345u32)
+            .map(|i| ((i >> 12) % 5) as u8)
+            .collect();
+        std::fs::write(source.join("a"), &data).unwrap();
+        std::fs::write(source.join("b"), &data).unwrap();
+
+        let options = BuildImageOptions::new(
+            source.clone(),
+            BlobMetadata::DEFAULT_CHUNK_SIZE,
+            BlobMetadataCompressor::Zstd,
+            HashSet::new(),
+            false,
+        )
+        .unwrap()
+        .with_chunk_dedup(ChunkDedup::LoneChunk);
+        let mut blob = Vec::new();
+        let image = build_image(&options, &mut blob).unwrap();
+        assert_eq!(
+            (image.chunk_dedup_hits, image.chunk_dedup_bytes_saved),
+            (1, u64::from(BlobMetadata::DEFAULT_CHUNK_SIZE))
+        );
+        let meta = image.blob_metadata.as_ref().expect("chunk groups");
+        assert!(
+            meta.compressed_size() < meta.uncompressed_size(),
+            "groups are stored compressed"
+        );
+
+        let blob_path = dir.path().join("dedup-zstd.blob");
+        std::fs::write(&blob_path, &blob).unwrap();
+        let reader = ErofsReader::open_blob(
+            &blob_path,
+            None,
+            None,
+            std::sync::Arc::new(nydus_core::Metrics::new()),
+            nydus_core::CacheOptions::default(),
+        )
+        .unwrap();
+        let root_nid = reader.superblock().root_nid();
+        let root = reader.inode(root_nid).unwrap();
+        for name in ["a", "b"] {
+            let nid = reader
+                .lookup_dir_entry(root_nid, &root, name.as_bytes())
+                .unwrap()
+                .unwrap();
+            let inode = reader.inode(nid).unwrap();
+            let mut out = Vec::new();
+            reader
+                .write_file_data_to(nid, &inode, 0, data.len() as u32, &mut out)
+                .unwrap();
+            assert_eq!(out, data, "{name}");
+        }
+    }
+
+    /// A layout or digester that cannot deduplicate does not fail the build:
+    /// the writer falls back to storing every chunk and the summary says so.
+    #[test]
+    fn build_image_skips_chunk_dedup_where_it_cannot_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("a"), vec![7u8; 9000]).unwrap();
+        let new = || {
+            BuildImageOptions::new(
+                source.clone(),
+                EROFS_BLOCK_SIZE,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                false,
+            )
+            .unwrap()
+        };
+
+        // The default is lone dedup, enabled by the default BLAKE3 digester.
+        assert_eq!(new().chunk_dedup(), ChunkDedup::LoneChunk);
+
+        let mut blob = Vec::new();
+        let image = build_image(&new().with_digester(None), &mut blob).unwrap();
+        assert_eq!(image.chunk_dedup, ChunkDedup::Off);
+        assert_eq!(image.chunk_dedup_hits, 0);
+
+        let mut blob = Vec::new();
+        let native = new().with_native(NativeLayout::Plain, 0).unwrap();
+        let image = build_image(&native, &mut blob).unwrap();
+        assert_eq!(image.chunk_dedup, ChunkDedup::Off);
     }
 }

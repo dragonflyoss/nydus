@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use nydus_core::build::bootstrap::{
@@ -13,13 +15,15 @@ use nydus_core::build::inode::{
 use nydus_core::reader::RawDirEntry;
 use nydus_core::{BlobId, ErofsReader};
 use nydus_error::{Context, Error, Result};
-use nydus_format::blob::BlobFooter;
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataChunkGroupExtent};
 use nydus_format::erofs::{
     ErofsChunkAddr, ErofsDeviceSlot, ZErofsComprCfgs, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
     EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
     EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPRESSED_FULL,
     EROFS_NULL_ADDR, Z_EROFS_MAP_HEADER_SIZE,
 };
+
+use crate::build::ChunkDedup;
 
 const OCI_WHITEOUT_PREFIX: &[u8] = b".wh.";
 const OCI_OPAQUE_MARKER: &[u8] = b".wh..wh..opq";
@@ -57,8 +61,78 @@ struct MergeLayer {
     epoch: u64,
     fixed_nsec: u32,
     local_to_global: HashMap<u16, u16>,
+    /// The layer's blob in the merged device table, where its aliased groups
+    /// live (see [`LayerDedup`]).
+    global_device: u16,
+    /// Set for chunk-based layers merged with chunk dedup: the layer's blob
+    /// meta and, per chunk group, the lower-layer group it aliases.
+    dedup: Option<LayerDedup>,
     /// Set for z_erofs layers: how their compressed data moves.
     z: Option<ZRelocation>,
+}
+
+/// A lower layer's chunk group that an upper layer's identical group reuses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GroupAlias {
+    /// Device slot of the group in the merged device table.
+    device_id: u16,
+    /// The group's first block within that device's blob, the same unit as a
+    /// chunk index entry's `blkaddr`.
+    blkaddr: u64,
+}
+
+/// One chunk-based layer's cross-layer dedup state: its blob meta, the
+/// oracle for group digests and chunk layouts, and one alias per group.
+struct LayerDedup {
+    metadata: BlobMetadata,
+    /// Alias of every chunk group, `None` when the group keeps its own copy.
+    aliases: Vec<Option<GroupAlias>>,
+}
+
+impl LayerDedup {
+    /// Map one chunk index entry of this layer into the merged address space:
+    /// the entry follows its group's cross-layer alias when it has one, and
+    /// stays put on its own device otherwise.
+    fn relocate(&self, blkaddr: u64, mapped_device: u16) -> Result<ErofsChunkAddr> {
+        let logical_offset = blkaddr
+            .checked_mul(EROFS_BLOCK_SIZE as u64)
+            .ok_or_else(|| {
+                Error::InvalidImage(format!(
+                    "chunk address {blkaddr} overflows the blob address space"
+                ))
+            })?;
+        let group_index = self
+            .metadata
+            .chunk_group_index(logical_offset)
+            .ok_or_else(|| {
+                Error::InvalidImage(format!(
+                    "chunk address {blkaddr} is past the source blob's {} blocks",
+                    self.metadata.logical_block_count()
+                ))
+            })?;
+        let Some(alias) = self.aliases[group_index] else {
+            return Ok(ErofsChunkAddr {
+                blkaddr,
+                device_id: mapped_device,
+            });
+        };
+        let group = self
+            .metadata
+            .chunk_group(group_index)
+            .expect("a resolved group index is within the table");
+        let offset = blkaddr
+            .checked_sub(group.logical_block_offset())
+            .ok_or_else(|| {
+                Error::InvalidImage(format!(
+                    "chunk address {blkaddr} precedes its group {group_index} at block {}",
+                    group.logical_block_offset()
+                ))
+            })?;
+        Ok(ErofsChunkAddr {
+            blkaddr: alias.blkaddr + offset,
+            device_id: alias.device_id,
+        })
+    }
 }
 
 /// The (layer, nid) variants of one merged path, in lower..upper order.
@@ -216,10 +290,13 @@ impl TreeNode<()> for KWayNode<'_> {
                                         index.device_id
                                     ))
                                 })?;
-                            Ok(ErofsChunkAddr {
-                                blkaddr: index.blkaddr,
-                                device_id: mapped,
-                            })
+                            match &layer.dedup {
+                                Some(dedup) => dedup.relocate(index.blkaddr, mapped),
+                                None => Ok(ErofsChunkAddr {
+                                    blkaddr: index.blkaddr,
+                                    device_id: mapped,
+                                }),
+                            }
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -291,6 +368,25 @@ fn merge_layer_entries(
     }
 }
 
+/// What a merge with chunk dedup aliased across layers, as planned before
+/// flattening.
+///
+/// Merge only rewrites metadata: every source blob is still mounted whole, so
+/// aliasing does not shrink the blobs themselves. It saves fetching and
+/// caching a duplicated group twice. A group chosen for aliasing is counted
+/// even when a higher layer shadows the file that owns it, since the plan
+/// runs on the blobs, not on the merged tree.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MergeDedupStats {
+    /// Chunk groups whose chunk indexes follow a lower layer's identical
+    /// group.
+    pub aliased_groups: u64,
+    /// Logical bytes those groups cover, padding included: an upper bound on
+    /// the bytes the runtime no longer fetches twice, since a compressed
+    /// group is fetched smaller than the bytes it decodes to.
+    pub aliased_bytes: u64,
+}
+
 pub fn merge_sources_to_bootstrap_bytes(
     sources: &[PathBuf],
     whiteout_spec: WhiteoutSpec,
@@ -300,15 +396,48 @@ pub fn merge_sources_to_bootstrap_bytes(
     Ok(bootstrap)
 }
 
-/// Merge the sources and stream the flattened bootstrap into `writer`. The
-/// merged tree is never materialised (children are k-way merged on demand
-/// during flattening) and the bootstrap is stream-rendered, so peak memory
-/// is the flat inode table plus one directory's entries.
+/// Merge the sources and stream the flattened bootstrap into `writer`,
+/// returning what the cross-layer chunk dedup aliased. The merged tree is
+/// never materialised (children are k-way merged on demand during
+/// flattening) and the bootstrap is stream-rendered, so peak memory is the
+/// flat inode table plus one directory's entries.
 pub fn merge_sources_to_bootstrap_writer(
     sources: &[PathBuf],
     whiteout_spec: WhiteoutSpec,
     writer: &mut impl std::io::Write,
-) -> Result<()> {
+) -> Result<MergeDedupStats> {
+    merge_sources_to_bootstrap_writer_with_chunk_dedup(
+        sources,
+        whiteout_spec,
+        ChunkDedup::LoneChunk,
+        writer,
+    )
+}
+
+/// Merge the sources at a chunk dedup `level`, streaming the flattened
+/// bootstrap into `writer`.
+///
+/// Chunk-based layers are deduplicated across layers by rewriting a
+/// duplicate group's chunk indexes to the lowest layer's copy: a chunk group
+/// whose digest and per-chunk length layout match an earlier layer's group
+/// reuses that group's device and blocks. The layout check is required
+/// because a group digest covers the payload bytes only, not the chunks'
+/// boundaries, so equal content cut differently (say one 8 KiB chunk versus
+/// two 4 KiB chunks) must not be aliased. The lowest layer holding a group
+/// with the same content and chunk layout is the target, so the result is
+/// deterministic.
+///
+/// `ChunkDedup::LoneChunk` aliases only groups of one chunk that is at least
+/// the blob's group minimum, matching the build's rule, so packing is left
+/// alone. Sources that cannot take part (z_erofs layers, blobs without chunk
+/// group digests, raw devices) are merged with every copy kept instead of
+/// failing. The sources' blobs are never modified.
+fn merge_sources_to_bootstrap_writer_with_chunk_dedup(
+    sources: &[PathBuf],
+    whiteout_spec: WhiteoutSpec,
+    chunk_dedup: ChunkDedup,
+    writer: &mut impl std::io::Write,
+) -> Result<MergeDedupStats> {
     if sources.is_empty() {
         return Err(Error::InvalidParameter(
             "merge requires at least one source".to_string(),
@@ -332,7 +461,8 @@ pub fn merge_sources_to_bootstrap_writer(
         readers.push(reader);
     }
     if is_z {
-        return merge_z_sources_to_bootstrap_writer(sources, readers, whiteout_spec, writer);
+        merge_z_sources_to_bootstrap_writer(sources, readers, whiteout_spec, writer)?;
+        return Ok(MergeDedupStats::default());
     }
 
     let mut device_slots = Vec::new();
@@ -349,15 +479,32 @@ pub fn merge_sources_to_bootstrap_writer(
             &mut device_slots,
             &mut blob_indexes,
         )?;
+        // A chunk-based source has exactly one external blob, registered above.
+        let &global_device = local_to_global
+            .values()
+            .next()
+            .expect("a chunk-based layer maps its single blob");
+        let dedup = match chunk_dedup {
+            ChunkDedup::Off => None,
+            ChunkDedup::LoneChunk => {
+                load_source_blob_metadata(source)?.map(|metadata| LayerDedup {
+                    metadata,
+                    aliases: Vec::new(),
+                })
+            }
+        };
         layers.push(MergeLayer {
             layer_id: layer_id as u32,
             epoch: reader.superblock().epoch(),
             fixed_nsec: reader.superblock().fixed_nsec(),
+            global_device,
+            dedup,
             local_to_global,
             reader,
             z: None,
         });
     }
+    let stats = plan_cross_layer_chunk_dedup(&mut layers, chunk_dedup)?;
 
     let root = KWayNode {
         layers: &layers,
@@ -386,7 +533,7 @@ pub fn merge_sources_to_bootstrap_writer(
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_blob_indexes)?;
 
     render_flattened_bootstrap_to(writer, &mut inodes, epoch, &device_slots, &uuid)?;
-    Ok(())
+    Ok(stats)
 }
 
 /// Merge z_erofs layers into one multi-device bootstrap: layer `i`'s blob
@@ -499,6 +646,8 @@ fn merge_z_sources_to_bootstrap_writer(
             layer_id: layer_id as u32,
             epoch: reader.superblock().epoch(),
             fixed_nsec: reader.superblock().fixed_nsec(),
+            global_device: 0,
+            dedup: None,
             local_to_global: HashMap::new(),
             reader,
             z: Some(z),
@@ -593,6 +742,8 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         layer_id: 0,
         epoch: reader.superblock().epoch(),
         fixed_nsec: reader.superblock().fixed_nsec(),
+        global_device: 0,
+        dedup: None,
         local_to_global: identity,
         reader,
         z: z_cfgs.map(|_| ZRelocation {
@@ -727,6 +878,146 @@ fn register_blobs(
     Ok(local_to_global)
 }
 
+/// Load the blob meta a full blob carries, the chunk group digest and
+/// layout oracle for cross-layer chunk dedup. A source that cannot be
+/// deduplicated returns `None`: raw device blobs (native `erofs-*` layers)
+/// carry no blob meta, and a blob built without a digester has no group
+/// digests to match on.
+fn load_source_blob_metadata(path: &Path) -> Result<Option<BlobMetadata>> {
+    let footer = BlobFooter::from_blob_path(path)
+        .with_context(|| format!("merge source must be a full blob file: {}", path.display()))?;
+    if footer.is_raw_device() {
+        return Ok(None);
+    }
+    let offset = footer.blob_metadata_offset();
+    let size = usize::try_from(footer.blob_metadata_size())
+        .map_err(|err| Error::Overflow(format!("blob meta size too large: {err}")))?;
+    let mut bytes = vec![0u8; size];
+    File::open(path)
+        .with_context(|| format!("failed to open blob: {}", path.display()))?
+        .read_exact_at(&mut bytes, offset)
+        .with_context(|| format!("failed to read blob meta: {}", path.display()))?;
+    let metadata = BlobMetadata::from_bytes(bytes)
+        .with_context(|| format!("failed to parse blob meta: {}", path.display()))?;
+    if (0..metadata.chunk_group_count()).any(|index| metadata.chunk_group_digest(index).is_none()) {
+        return Ok(None);
+    }
+    Ok(Some(metadata))
+}
+
+/// Decide which chunk groups of every layer above the lowest alias a lower
+/// layer's group, and report what was aliased.
+///
+/// Groups are keyed by digest, and one digest may be cut into several chunk
+/// layouts (one 8 KiB chunk versus two 4 KiB chunks). A group aliases only
+/// when its chunk count and per-chunk lengths also match a lower layer's
+/// group with that digest: a group digest covers the payload bytes alone, so
+/// equal content cut differently resolves the chunk's address against the
+/// wrong layout. The lowest group with a matching layout is the target, so
+/// the plan is deterministic; a layer's group whose layout no lower layer
+/// holds becomes a target for the layers above. Duplicates inside one layer
+/// keep their copies: within-layer dedup belongs to build time, and the
+/// layer's first group of a layout already represents that layout for the
+/// layers above.
+fn plan_cross_layer_chunk_dedup(
+    layers: &mut [MergeLayer],
+    level: ChunkDedup,
+) -> Result<MergeDedupStats> {
+    // Group digest -> the lowest (layer, group) of every chunk layout seen
+    // for that content, in source order.
+    let mut targets: HashMap<[u8; 32], Vec<(usize, usize)>> = HashMap::new();
+    let mut stats = MergeDedupStats::default();
+    for index in 0..layers.len() {
+        let (below, rest) = layers.split_at_mut(index);
+        let Some(dedup) = rest[0].dedup.as_mut() else {
+            continue;
+        };
+        let metadata = &dedup.metadata;
+        // A blob meta's index stride is the writer's chunk group minimum, so
+        // a standalone chunk is one of at least this many bytes.
+        let min_group_bytes = u64::from(metadata.bytes_per_chunk_group_index());
+        let mut aliases = vec![None; metadata.chunk_group_count()];
+        for (group_index, group) in metadata.chunk_groups().enumerate() {
+            let Some(digest) = metadata.chunk_group_digest(group_index) else {
+                continue;
+            };
+            let lone =
+                group.chunk_count() == 1 && u64::from(group.uncompressed_size()) >= min_group_bytes;
+            // The lowest lower-layer group with this content cut the same way.
+            let mut matched = None;
+            let mut layout_represented = false;
+            for &(target_layer, target_group) in targets.get(&digest.get()).into_iter().flatten() {
+                // A representative of this very layer is in `metadata`.
+                let target_metadata = if target_layer == index {
+                    metadata
+                } else {
+                    &below[target_layer]
+                        .dedup
+                        .as_ref()
+                        .expect("only deduplicated layers enter the target map")
+                        .metadata
+                };
+                let target = target_metadata
+                    .chunk_group(target_group)
+                    .expect("a recorded group index is within its layer's table");
+                if !groups_share_chunk_layout(metadata, &group, target_metadata, &target) {
+                    continue;
+                }
+                layout_represented = true;
+                // A duplicate inside one layer keeps its copy, and one
+                // representative per layout is enough for the layers above.
+                if target_layer != index {
+                    matched = Some((target_layer, target));
+                    break;
+                }
+            }
+            let Some((target_layer, target)) = matched else {
+                if !layout_represented {
+                    targets
+                        .entry(digest.get())
+                        .or_default()
+                        .push((index, group_index));
+                }
+                continue;
+            };
+            let aliased = match level {
+                ChunkDedup::Off => false,
+                ChunkDedup::LoneChunk => lone,
+            };
+            if aliased {
+                aliases[group_index] = Some(GroupAlias {
+                    device_id: below[target_layer].global_device,
+                    blkaddr: target.logical_block_offset(),
+                });
+                stats.aliased_groups += 1;
+                stats.aliased_bytes += group.logical_size();
+            }
+        }
+        dedup.aliases = aliases;
+    }
+    Ok(stats)
+}
+
+/// Whether two groups cut equal content into the same chunks: equal chunk
+/// count and equal per-chunk lengths. With equal digests too, every chunk's
+/// bytes are identical, so a block address into one group maps onto the
+/// other at the same offset within the group.
+fn groups_share_chunk_layout(
+    source: &BlobMetadata,
+    source_group: &BlobMetadataChunkGroupExtent,
+    target: &BlobMetadata,
+    target_group: &BlobMetadataChunkGroupExtent,
+) -> bool {
+    let source_chunks = source_group.chunk_range();
+    let target_chunks = target_group.chunk_range();
+    source_chunks.len() == target_chunks.len()
+        && source_chunks
+            .zip(target_chunks)
+            .all(|(source_chunk, target_chunk)| {
+                source.chunk_length(source_chunk) == target.chunk_length(target_chunk)
+            })
+}
+
 fn parse_source_blob_id(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
     let file_name = path
         .file_name()
@@ -789,8 +1080,45 @@ mod tests {
         algorithm: Option<nydus_format::erofs::ZErofsCompressor>,
         files: &[(&str, &[u8])],
     ) -> PathBuf {
+        build_merge_layer_with(directory, name, algorithm, EROFS_BLOCK_SIZE, None, files)
+    }
+
+    /// Build one merge layer over `files`, with an explicit chunk size and an
+    /// optional chunk group minimum instead of the build defaults.
+    fn build_merge_layer_with(
+        directory: &Path,
+        name: &str,
+        algorithm: Option<nydus_format::erofs::ZErofsCompressor>,
+        chunk_size: u32,
+        chunk_group_min_size: Option<u32>,
+        files: &[(&str, &[u8])],
+    ) -> PathBuf {
+        build_merge_layer_with_compressor(
+            directory,
+            name,
+            algorithm,
+            nydus_format::blob::BlobMetadataCompressor::None,
+            chunk_size,
+            chunk_group_min_size,
+            files,
+            ChunkDedup::LoneChunk,
+        )
+    }
+
+    /// As [`build_merge_layer_with`], with an explicit chunk group compressor
+    /// and build-time chunk dedup level.
+    #[allow(clippy::too_many_arguments)]
+    fn build_merge_layer_with_compressor(
+        directory: &Path,
+        name: &str,
+        algorithm: Option<nydus_format::erofs::ZErofsCompressor>,
+        compressor: nydus_format::blob::BlobMetadataCompressor,
+        chunk_size: u32,
+        chunk_group_min_size: Option<u32>,
+        files: &[(&str, &[u8])],
+        chunk_dedup: ChunkDedup,
+    ) -> PathBuf {
         use crate::build::{build_image, BuildImageOptions, NativeLayout};
-        use nydus_format::blob::BlobMetadataCompressor;
         use std::collections::HashSet;
 
         let source = directory.join(name);
@@ -798,21 +1126,54 @@ mod tests {
         for (name, contents) in files {
             fs::write(source.join(name), contents).unwrap();
         }
-        let mut options = BuildImageOptions::new(
-            source,
-            EROFS_BLOCK_SIZE,
-            BlobMetadataCompressor::None,
-            HashSet::new(),
-            true,
-        )
-        .unwrap();
+        let mut options =
+            BuildImageOptions::new(source, chunk_size, compressor, HashSet::new(), true).unwrap();
+        if let Some(minimum) = chunk_group_min_size {
+            options = options.with_chunk_group_min_size(minimum).unwrap();
+        }
         if let Some(algorithm) = algorithm {
             options = options
                 .with_native(NativeLayout::Compressed(algorithm), 0)
                 .unwrap();
         }
+        options = options.with_chunk_dedup(chunk_dedup);
         let blob = directory.join(format!("{name}.blob"));
         let image = build_image(&options, fs::File::create(&blob).unwrap()).unwrap();
+        let path = directory.join(hex::encode(image.full_blob_digest));
+        fs::rename(blob, &path).unwrap();
+        path
+    }
+
+    /// Build one plain `erofs-none` layer: the blob holds the padded chunks
+    /// raw, with no chunk groups and no blob meta.
+    fn build_raw_device_merge_layer(
+        directory: &Path,
+        name: &str,
+        file: &str,
+        data: &[u8],
+    ) -> PathBuf {
+        use crate::build::{build_image, BuildImageOptions, NativeLayout};
+        use std::collections::HashSet;
+
+        let source = directory.join(name);
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join(file), data).unwrap();
+        let options = BuildImageOptions::new(
+            source,
+            EROFS_BLOCK_SIZE,
+            nydus_format::blob::BlobMetadataCompressor::None,
+            HashSet::new(),
+            true,
+        )
+        .unwrap()
+        .with_native(NativeLayout::Plain, 0)
+        .unwrap();
+        let blob = directory.join(format!("{name}.blob"));
+        let image = build_image(&options, fs::File::create(&blob).unwrap()).unwrap();
+        assert!(
+            image.blob_metadata.is_none(),
+            "a raw device carries no blob meta"
+        );
         let path = directory.join(hex::encode(image.full_blob_digest));
         fs::rename(blob, &path).unwrap();
         path
@@ -1834,6 +2195,8 @@ mod tests {
             layer_id: 0,
             epoch,
             fixed_nsec,
+            global_device: 0,
+            dedup: None,
             local_to_global,
             reader,
             z: None,
@@ -1999,6 +2362,8 @@ mod tests {
             layer_id: 0,
             epoch: optimized.superblock().epoch(),
             fixed_nsec: optimized.superblock().fixed_nsec(),
+            global_device: 0,
+            dedup: None,
             local_to_global: [(1, 1), (2, 2)].into_iter().collect(),
             reader: optimized,
             z: None,
@@ -2090,6 +2455,8 @@ mod tests {
                 layer_id: layer_id as u32,
                 epoch: reader.superblock().epoch(),
                 fixed_nsec: reader.superblock().fixed_nsec(),
+                global_device: 0,
+                dedup: None,
                 local_to_global,
                 reader,
                 z: None,
@@ -2369,5 +2736,496 @@ mod tests {
         assert!(head_addrs.iter().any(
             |a| *a >= infos[1].mapped_blkaddr && *a < infos[1].mapped_blkaddr + infos[1].blocks
         ));
+    }
+
+    /// Deterministic high-entropy content, so repeated builds hash alike and
+    /// identical payloads cannot be coincidences.
+    fn chunk_test_data(len: usize, seed: u32) -> Vec<u8> {
+        (0..len as u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761).wrapping_add(seed) >> 11) as u8)
+            .collect()
+    }
+
+    fn merge_chunk_layers(
+        directory: &Path,
+        sources: &[PathBuf],
+        level: ChunkDedup,
+        name: &str,
+    ) -> (PathBuf, MergeDedupStats) {
+        let bootstrap = directory.join(name);
+        let mut output = fs::File::create(&bootstrap).unwrap();
+        let stats = merge_sources_to_bootstrap_writer_with_chunk_dedup(
+            sources,
+            WhiteoutSpec::Oci,
+            level,
+            &mut output,
+        )
+        .unwrap();
+        (bootstrap, stats)
+    }
+
+    fn open_merged(directory: &Path, bootstrap: &Path, cache: &str) -> ErofsReader {
+        use nydus_backend::Local;
+        use std::sync::Arc;
+
+        ErofsReader::open_bootstrap(
+            bootstrap,
+            Arc::new(Local::new(
+                directory.to_path_buf(),
+                Arc::new(nydus_core::Metrics::new()),
+            )),
+            Some(&directory.join(cache)),
+            None,
+            nydus_core::CacheOptions::default(),
+        )
+        .unwrap()
+    }
+
+    /// The merged file's chunk indexes and contents, read back through the
+    /// real reader and the local backend serving both source blobs.
+    fn merged_file(reader: &ErofsReader, name: &[u8]) -> (Vec<ErofsChunkAddr>, Vec<u8>) {
+        let root_nid = reader.superblock().root_nid();
+        let root = reader.inode(root_nid).unwrap();
+        let nid = reader
+            .lookup_dir_entry(root_nid, &root, name)
+            .unwrap()
+            .unwrap();
+        let inode = reader.inode(nid).unwrap();
+        let entries = reader.read_chunk_index_entries(nid, &inode).unwrap();
+        let mut contents = Vec::new();
+        reader
+            .write_file_data_to(nid, &inode, 0, inode.size() as u32, &mut contents)
+            .unwrap();
+        (entries, contents)
+    }
+
+    /// Builds two layers holding the same 2 MiB + 12345-byte file. The lone
+    /// 2 MiB chunk forms a group of its own; the 12345-byte tail is a pack
+    /// of one chunk, below the group minimum.
+    fn build_two_equal_chunk_layers(directory: &Path) -> (Vec<PathBuf>, Vec<u8>) {
+        let data = chunk_test_data((2 << 20) + 12345, 7);
+        let mut sources = Vec::new();
+        for (name, file) in [("lower", "lower-copy"), ("upper", "upper-copy")] {
+            sources.push(build_merge_layer_with(
+                directory,
+                name,
+                None,
+                2 << 20,
+                None,
+                &[(file, data.as_slice())],
+            ));
+        }
+        (sources, data)
+    }
+
+    /// `lone-chunk` aliases every duplicate group of an upper layer to the
+    /// lowest layer's copy when the group stands alone (one chunk of at least
+    /// the group minimum): both files' chunk indexes come out identical, the
+    /// data reads back through the real reader, and the result is
+    /// deterministic across runs.
+    #[test]
+    fn merge_lone_chunk_aliases_duplicate_groups_across_layers() {
+        let directory = tempfile::tempdir().unwrap();
+        let (sources, data) = build_two_equal_chunk_layers(directory.path());
+
+        let (bootstrap, stats) =
+            merge_chunk_layers(directory.path(), &sources, ChunkDedup::LoneChunk, "lone-1");
+        assert_eq!(stats.aliased_groups, 1, "the 2 MiB lone chunk");
+        assert_eq!(stats.aliased_bytes, 2 << 20);
+        let (again, stats_again) =
+            merge_chunk_layers(directory.path(), &sources, ChunkDedup::LoneChunk, "lone-2");
+        assert_eq!(stats, stats_again);
+        assert_eq!(
+            fs::read(&bootstrap).unwrap(),
+            fs::read(&again).unwrap(),
+            "the alias plan is deterministic"
+        );
+
+        let reader = open_merged(directory.path(), &bootstrap, "cache-lone");
+        let (lower_entries, lower_contents) = merged_file(&reader, b"lower-copy");
+        let (upper_entries, upper_contents) = merged_file(&reader, b"upper-copy");
+        assert_eq!(lower_contents, data);
+        assert_eq!(upper_contents, data);
+        assert_eq!(upper_entries[0], lower_entries[0], "the lone chunk aliases");
+        assert_ne!(
+            upper_entries[1], lower_entries[1],
+            "the packed tail keeps its own copy"
+        );
+    }
+
+    /// Compressed groups alias like uncompressed ones: the digest covers the
+    /// payload and the logical layout does not depend on the compressor.
+    #[test]
+    fn merge_aliases_compressed_groups() {
+        use nydus_format::blob::BlobMetadataCompressor;
+
+        let directory = tempfile::tempdir().unwrap();
+        // Compressible, non-zero data so the groups really are stored zstd.
+        let data = vec![b'q'; (2 << 20) + 12345];
+        let mut sources = Vec::new();
+        for (name, file) in [("lower", "lower-copy"), ("upper", "upper-copy")] {
+            sources.push(build_merge_layer_with_compressor(
+                directory.path(),
+                name,
+                None,
+                BlobMetadataCompressor::Zstd,
+                2 << 20,
+                None,
+                &[(file, data.as_slice())],
+                ChunkDedup::LoneChunk,
+            ));
+        }
+        let (bootstrap, stats) = merge_chunk_layers(
+            directory.path(),
+            &sources,
+            ChunkDedup::LoneChunk,
+            "compressed",
+        );
+        assert_eq!(stats.aliased_groups, 1);
+
+        let reader = open_merged(directory.path(), &bootstrap, "cache-compressed");
+        let (lower_entries, lower_contents) = merged_file(&reader, b"lower-copy");
+        let (upper_entries, upper_contents) = merged_file(&reader, b"upper-copy");
+        assert_eq!(lower_contents, data);
+        assert_eq!(upper_contents, data);
+        assert_eq!(upper_entries[0], lower_entries[0]);
+    }
+
+    /// A chunk size above the group minimum leaves lone groups whose block
+    /// count is not an index-stride multiple, so the next group starts inside
+    /// a stride and an alias into it resolves through the group lookup's
+    /// forward correction.
+    #[test]
+    fn merge_aliases_a_group_starting_inside_a_stride() {
+        let directory = tempfile::tempdir().unwrap();
+        let lone = chunk_test_data(12288, 13);
+        let packed = chunk_test_data(4096, 17);
+        let mut sources = Vec::new();
+        for (name, lone_name, packed_name) in [
+            ("lower", "lower-lone", "lower-packed"),
+            ("upper", "upper-lone", "upper-packed"),
+        ] {
+            sources.push(build_merge_layer_with(
+                directory.path(),
+                name,
+                None,
+                16384,
+                Some(8192),
+                &[
+                    (lone_name, lone.as_slice()),
+                    (packed_name, packed.as_slice()),
+                ],
+            ));
+        }
+        // The premise: a 3-block lone group at 0..3, the 1-block pack at
+        // 3..4, and a 2-block index stride, so group 1 starts mid-stride.
+        let metadata = load_source_blob_metadata(&sources[1]).unwrap().unwrap();
+        assert_eq!(metadata.blocks_per_chunk_group_index(), 2);
+        assert_eq!(metadata.chunk_group_count(), 2);
+        assert_eq!(metadata.chunk_group(1).unwrap().logical_block_offset(), 3);
+
+        let (bootstrap, stats) = merge_chunk_layers(
+            directory.path(),
+            &sources,
+            ChunkDedup::LoneChunk,
+            "stride-lone",
+        );
+        assert_eq!(stats.aliased_groups, 1);
+        assert_eq!(stats.aliased_bytes, 3 * u64::from(EROFS_BLOCK_SIZE));
+        let reader = open_merged(directory.path(), &bootstrap, "cache-stride-lone");
+        let (lower_entries, lower_contents) = merged_file(&reader, b"lower-lone");
+        let (upper_entries, upper_contents) = merged_file(&reader, b"upper-lone");
+        assert_eq!(lower_contents, lone);
+        assert_eq!(upper_contents, lone);
+        assert_eq!(upper_entries, lower_entries);
+    }
+
+    /// The first occurrence is the target for every layer above it: with
+    /// three identical layers both upper ones alias the lowest copy, not the
+    /// middle one, and both are counted.
+    #[test]
+    fn merge_aliases_through_a_chain_of_three_layers() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = chunk_test_data((2 << 20) + 12345, 21);
+        let mut sources = Vec::new();
+        for (name, file) in [
+            ("lower", "lower-copy"),
+            ("middle", "middle-copy"),
+            ("upper", "upper-copy"),
+        ] {
+            sources.push(build_merge_layer_with(
+                directory.path(),
+                name,
+                None,
+                2 << 20,
+                None,
+                &[(file, data.as_slice())],
+            ));
+        }
+
+        let (bootstrap, stats) =
+            merge_chunk_layers(directory.path(), &sources, ChunkDedup::LoneChunk, "chain");
+        assert_eq!(stats.aliased_groups, 2, "one lone group per upper layer");
+        assert_eq!(stats.aliased_bytes, 2 * (2 << 20));
+
+        let reader = open_merged(directory.path(), &bootstrap, "cache-chain");
+        let (lower_entries, lower_contents) = merged_file(&reader, b"lower-copy");
+        let (middle_entries, middle_contents) = merged_file(&reader, b"middle-copy");
+        let (upper_entries, upper_contents) = merged_file(&reader, b"upper-copy");
+        assert_eq!(lower_contents, data);
+        assert_eq!(middle_contents, data);
+        assert_eq!(upper_contents, data);
+        assert_eq!(middle_entries[0], lower_entries[0]);
+        assert_eq!(
+            upper_entries[0], lower_entries[0],
+            "the top layer follows the lowest copy, not the middle one"
+        );
+        assert_ne!(upper_entries[1], lower_entries[1], "the tail keeps a copy");
+    }
+
+    /// Equal group digests alone do not alias: the same 2 MiB payload is one
+    /// lone chunk in the upper layer and two 1 MiB chunks packed into one
+    /// group in the lower layer. A chunk address must resolve against the same
+    /// chunk layout, so the upper copy keeps its own group.
+    #[test]
+    fn merge_does_not_alias_groups_cut_into_different_chunks() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = chunk_test_data(2 << 20, 31);
+        let lone = build_merge_layer_with(
+            directory.path(),
+            "lone",
+            None,
+            2 << 20,
+            None,
+            &[("lone-copy", data.as_slice())],
+        );
+        let packed = build_merge_layer_with(
+            directory.path(),
+            "packed",
+            None,
+            1 << 20,
+            None,
+            &[("packed-copy", data.as_slice())],
+        );
+
+        let lone_metadata = load_source_blob_metadata(&lone).unwrap().unwrap();
+        let packed_metadata = load_source_blob_metadata(&packed).unwrap().unwrap();
+        assert_eq!(
+            lone_metadata.chunk_group_digest(0).unwrap(),
+            packed_metadata.chunk_group_digest(0).unwrap(),
+            "the payloads hash alike"
+        );
+        assert_eq!(
+            (
+                lone_metadata.chunk_group(0).unwrap().chunk_count(),
+                packed_metadata.chunk_group(0).unwrap().chunk_count()
+            ),
+            (1, 2),
+            "but the chunk boundaries differ"
+        );
+
+        let sources = [packed, lone];
+        let (bootstrap, stats) = merge_chunk_layers(
+            directory.path(),
+            &sources,
+            ChunkDedup::LoneChunk,
+            "mismatch",
+        );
+        assert_eq!(stats, MergeDedupStats::default());
+
+        let reader = open_merged(directory.path(), &bootstrap, "cache-mismatch");
+        let (packed_entries, packed_contents) = merged_file(&reader, b"packed-copy");
+        let (lone_entries, lone_contents) = merged_file(&reader, b"lone-copy");
+        assert_eq!(packed_contents, data);
+        assert_eq!(lone_contents, data);
+        assert_eq!((packed_entries.len(), lone_entries.len()), (2, 1));
+        assert_ne!(lone_entries[0].device_id, packed_entries[0].device_id);
+    }
+
+    /// Duplicate groups inside one layer are left alone: within-layer dedup
+    /// belongs to build time, and the layer's first group (not its second
+    /// copy) is what the layers above alias to. The lower layer is built
+    /// with build-time dedup off, since a default build would already have
+    /// collapsed its two identical files onto one group.
+    #[test]
+    fn merge_leaves_duplicate_groups_within_one_layer() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = chunk_test_data(2 << 20, 11);
+        let lower = build_merge_layer_with_compressor(
+            directory.path(),
+            "lower",
+            None,
+            nydus_format::blob::BlobMetadataCompressor::None,
+            2 << 20,
+            None,
+            &[("a", data.as_slice()), ("b", data.as_slice())],
+            ChunkDedup::Off,
+        );
+        let upper = build_merge_layer_with(
+            directory.path(),
+            "upper",
+            None,
+            2 << 20,
+            None,
+            &[("c", data.as_slice())],
+        );
+        let lower_metadata = load_source_blob_metadata(&lower).unwrap().unwrap();
+        assert_eq!(
+            lower_metadata.chunk_group_digest(0),
+            lower_metadata.chunk_group_digest(1),
+            "the lower layer really holds two identical groups"
+        );
+        assert_eq!(lower_metadata.chunk_group_count(), 2);
+        let sources = [lower, upper];
+        let (bootstrap, stats) = merge_chunk_layers(
+            directory.path(),
+            &sources,
+            ChunkDedup::LoneChunk,
+            "dup-lone",
+        );
+        assert_eq!(stats.aliased_groups, 1);
+        assert_eq!(stats.aliased_bytes, 2 << 20);
+
+        let reader = open_merged(directory.path(), &bootstrap, "dup-lone-cache");
+        let (a_entries, a_contents) = merged_file(&reader, b"a");
+        let (b_entries, b_contents) = merged_file(&reader, b"b");
+        let (c_entries, c_contents) = merged_file(&reader, b"c");
+        assert_eq!(a_contents, data);
+        assert_eq!(b_contents, data);
+        assert_eq!(c_contents, data);
+        assert_eq!(
+            c_entries, a_entries,
+            "the upper group aliases the first copy"
+        );
+        assert_ne!(
+            b_entries, a_entries,
+            "the layer's own duplicate keeps its copy"
+        );
+    }
+
+    /// A source blob built without group digests cannot be deduplicated: the
+    /// merge goes ahead and keeps every copy instead of failing.
+    #[test]
+    fn merge_skips_dedup_without_chunk_group_digests() {
+        use crate::build::{build_image, BuildImageOptions};
+        use nydus_format::blob::BlobMetadataCompressor;
+        use std::collections::HashSet;
+
+        let directory = tempfile::tempdir().unwrap();
+        let no_digests = |name: &str| {
+            let source = directory.path().join(name);
+            fs::create_dir(&source).unwrap();
+            fs::write(source.join("file"), chunk_test_data(9000, 9)).unwrap();
+            let options = BuildImageOptions::new(
+                source,
+                4096,
+                BlobMetadataCompressor::None,
+                HashSet::new(),
+                true,
+            )
+            .unwrap()
+            .with_digester(None);
+            let blob = directory.path().join(format!("{name}.blob"));
+            let image = build_image(&options, fs::File::create(&blob).unwrap()).unwrap();
+            let path = directory.path().join(hex::encode(image.full_blob_digest));
+            fs::rename(blob, &path).unwrap();
+            path
+        };
+        let sources = [no_digests("lower"), no_digests("upper")];
+        assert!(load_source_blob_metadata(&sources[0]).unwrap().is_none());
+        let stats = merge_sources_to_bootstrap_writer_with_chunk_dedup(
+            &sources,
+            WhiteoutSpec::Oci,
+            ChunkDedup::LoneChunk,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(stats, MergeDedupStats::default());
+    }
+
+    #[test]
+    fn merge_skips_dedup_for_z_layers() {
+        use nydus_format::erofs::ZErofsCompressor;
+
+        let directory = tempfile::tempdir().unwrap();
+        let lower = build_merge_layer(
+            directory.path(),
+            "lower",
+            Some(ZErofsCompressor::Lz4),
+            &[("a", &b"lower"[..])],
+        );
+        let upper = build_merge_layer(
+            directory.path(),
+            "upper",
+            Some(ZErofsCompressor::Lz4),
+            &[("b", &b"upper"[..])],
+        );
+        let sources = [lower, upper];
+        let stats = merge_sources_to_bootstrap_writer_with_chunk_dedup(
+            &sources,
+            WhiteoutSpec::Oci,
+            ChunkDedup::LoneChunk,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(stats, MergeDedupStats::default());
+    }
+
+    /// A plain `erofs-none` source is a raw device: it carries no blob meta at
+    /// all, so there is nothing to alias. It differs from a chunk layer whose
+    /// blob meta is present but digest-less (that skip is covered by
+    /// `merge_skips_dedup_without_chunk_group_digests`) and from a z layer,
+    /// which returns before the dedup loader; this raw-device skip is asserted
+    /// here through the reader.
+    #[test]
+    fn merge_skips_dedup_for_raw_device_layers() {
+        let directory = tempfile::tempdir().unwrap();
+        let data = chunk_test_data(9000, 41);
+        let sources = [
+            build_raw_device_merge_layer(directory.path(), "lower", "lower-copy", &data),
+            build_raw_device_merge_layer(directory.path(), "upper", "upper-copy", &data),
+        ];
+        // The premise: there is no blob meta to deduplicate.
+        assert!(load_source_blob_metadata(&sources[0]).unwrap().is_none());
+
+        let (bootstrap, stats) = merge_chunk_layers(
+            directory.path(),
+            &sources,
+            ChunkDedup::LoneChunk,
+            "raw-device",
+        );
+        assert_eq!(stats, MergeDedupStats::default());
+
+        let reader = open_merged(directory.path(), &bootstrap, "cache-raw-device");
+        let (lower_entries, lower_contents) = merged_file(&reader, b"lower-copy");
+        let (upper_entries, upper_contents) = merged_file(&reader, b"upper-copy");
+        assert_eq!(lower_contents, data);
+        assert_eq!(upper_contents, data);
+        assert_ne!(
+            lower_entries[0].device_id, upper_entries[0].device_id,
+            "each raw-device layer keeps its own copy"
+        );
+    }
+
+    /// Merge-level `Off` stores the duplicate lone chunk instead of aliasing
+    /// it, even though the same layers under `lone-chunk` share one group.
+    #[test]
+    fn merge_chunk_dedup_off_keeps_every_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let (sources, data) = build_two_equal_chunk_layers(directory.path());
+
+        let (bootstrap, stats) =
+            merge_chunk_layers(directory.path(), &sources, ChunkDedup::Off, "dedup-off");
+        assert_eq!(stats, MergeDedupStats::default());
+
+        let reader = open_merged(directory.path(), &bootstrap, "cache-dedup-off");
+        let (lower_entries, lower_contents) = merged_file(&reader, b"lower-copy");
+        let (upper_entries, upper_contents) = merged_file(&reader, b"upper-copy");
+        assert_eq!(lower_contents, data);
+        assert_eq!(upper_contents, data);
+        assert_ne!(
+            upper_entries[0], lower_entries[0],
+            "off keeps the duplicate lone chunk instead of aliasing it"
+        );
     }
 }

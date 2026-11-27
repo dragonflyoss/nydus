@@ -9,6 +9,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/dragonflyoss/nydus/tests/e2e/util/corpus"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/env"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/erofs"
 	"github.com/dragonflyoss/nydus/tests/e2e/util/fixture"
@@ -272,6 +273,186 @@ func TestOptimizeReject(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOptimizeDedup builds a tree whose two identical 2 MiB files share one
+// lone chunk, records what reading them touches and optimizes that record.
+// The aliased file's chunk index names the surviving group, so the record
+// and the ondemand blob see one copy. The same tree built without a digester
+// cannot deduplicate and records both groups.
+func TestOptimizeDedup(t *testing.T) {
+	t.Parallel()
+	mount.FUSE{}.Require(t)
+
+	dir := env.WorkDir(t)
+	source := filepath.Join(dir, "source")
+	if !assert.NoError(t, os.MkdirAll(filepath.Join(source, "nested"), 0o755)) {
+		t.FailNow()
+	}
+
+	// a.bin and nested/b.bin are one lone chunk each, so the second
+	// deduplicates into the first; c.bin differs and keeps its group.
+	shared := corpus.Bytes(1, 2<<20)
+	files := map[string][]byte{
+		"a.bin":        shared,
+		"nested/b.bin": shared,
+		"c.bin":        corpus.Bytes(2, 2<<20),
+	}
+	for name, data := range files {
+		if !assert.NoError(t, os.WriteFile(filepath.Join(source, name), data, 0o644)) {
+			t.FailNow()
+		}
+	}
+
+	layout := fixture.MustLayout(t, "zstd")
+	blobDir := filepath.Join(dir, "blobs")
+	bootstrap := filepath.Join(dir, "image.boot")
+	blob, _ := fixture.BuildInto(t, blobDir, bootstrap, source, layout)
+	img := fixture.Image{Layout: layout, Bootstrap: bootstrap, BlobDir: blobDir, Blobs: []string{blob}}
+
+	// The aliased file resolves to the same group as the file it aliases.
+	canonical, _ := traceRead(t, img, "a.bin")
+	aliased, raw := traceRead(t, img, "nested/b.bin")
+	if !assert.Len(t, canonical.Patterns, 1) || !assert.Len(t, aliased.Patterns, 1) {
+		t.FailNow()
+	}
+	assert.Equal(t, canonical.Patterns, aliased.Patterns)
+
+	// Reading both still records the shared group once.
+	both, _ := traceRead(t, img, "a.bin", "nested/b.bin")
+	assert.Len(t, both.Patterns, 1)
+
+	// Without a digester the build cannot deduplicate: both copies are
+	// stored and reading both files records both groups.
+	plain := fixture.MustLayout(t, "zstd-no-digest")
+	plainDir := filepath.Join(dir, "plain-blobs")
+	plainBoot := filepath.Join(dir, "plain.boot")
+	plainBlob, _ := fixture.BuildInto(t, plainDir, plainBoot, source, plain)
+	plainImg := fixture.Image{Layout: plain, Bootstrap: plainBoot, BlobDir: plainDir, Blobs: []string{plainBlob}}
+	plainBoth, _ := traceRead(t, plainImg, "a.bin", "nested/b.bin")
+	assert.Len(t, plainBoth.Patterns, 2)
+
+	// Optimizing the aliased file's record copies the group once.
+	traceFile := filepath.Join(dir, "trace.json")
+	if !assert.NoError(t, os.WriteFile(traceFile, raw, 0o644)) {
+		t.FailNow()
+	}
+	config := mount.LocalConfig(blobDir, filepath.Join(dir, "optimize-cache")).Write(t, dir, "storage.json")
+	optimized := filepath.Join(dir, "optimized.boot")
+	before := fixture.ListDir(t, blobDir)
+	env.Run(t, env.Nydus(t), "optimize", "--parent-bootstrap", bootstrap, "--bootstrap", optimized,
+		"--blob-dir", blobDir, "--config", config, "--trace-file", traceFile)
+	ondemand := requireOndemandBlob(t, blobDir, before, 1)
+
+	opt := img
+	opt.Bootstrap = optimized
+	opt.Blobs = append(append([]string(nil), img.Blobs...), ondemand)
+	m := mount.Mount(t, mount.FUSE{}, opt, mount.Options{Config: func(c *mount.Config) {
+		c.Prefetch = &mount.PrefetchConfig{Scope: "ondemand"}
+	}})
+	for name := range files {
+		assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, name)), fstest.FileSHA256(t, m.Path(name)))
+	}
+}
+
+// TestOptimizeMergedAlias merges two layers carrying the same 2 MiB file,
+// reads only the upper layer's copy and optimizes that record. Merge
+// rewrote the copy's chunk index to the lower layer, so the record names
+// the lower blob and the ondemand blob holds the group once.
+func TestOptimizeMergedAlias(t *testing.T) {
+	t.Parallel()
+	mount.FUSE{}.Require(t)
+
+	dir := env.WorkDir(t)
+	layout := fixture.MustLayout(t, "zstd")
+	shared := corpus.Bytes(3, 2<<20)
+
+	lower := filepath.Join(dir, "lower")
+	upper := filepath.Join(dir, "upper")
+	if !assert.NoError(t, os.MkdirAll(filepath.Join(lower, "keep"), 0o755)) ||
+		!assert.NoError(t, os.MkdirAll(filepath.Join(upper, "dup"), 0o755)) {
+		t.FailNow()
+	}
+	if !assert.NoError(t, os.WriteFile(filepath.Join(lower, "keep/a.bin"), shared, 0o644)) ||
+		!assert.NoError(t, os.WriteFile(filepath.Join(upper, "dup/b.bin"), shared, 0o644)) {
+		t.FailNow()
+	}
+
+	blobDir := filepath.Join(dir, "blobs")
+	lowerBlob, _ := fixture.BuildInto(t, blobDir, filepath.Join(dir, "lower.boot"), lower, layout)
+	upperBlob, _ := fixture.BuildInto(t, blobDir, filepath.Join(dir, "upper.boot"), upper, layout)
+
+	merged := filepath.Join(dir, "merged.boot")
+	env.Run(t, env.Nydus(t), "merge", "--bootstrap", merged, lowerBlob, upperBlob)
+	img := fixture.Image{Layout: layout, Bootstrap: merged, BlobDir: blobDir,
+		Blobs: []string{lowerBlob, upperBlob}, Merged: true}
+
+	// Only the upper layer's file is read; the record names the lower
+	// layer's group because merge rewrote the chunk index.
+	tr, raw := traceRead(t, img, "dup/b.bin")
+	if !assert.Len(t, tr.Patterns, 1) {
+		t.FailNow()
+	}
+	if !assert.Equal(t, 1, tr.Patterns[0].BlobIndex) {
+		t.FailNow()
+	}
+
+	traceFile := filepath.Join(dir, "trace.json")
+	if !assert.NoError(t, os.WriteFile(traceFile, raw, 0o644)) {
+		t.FailNow()
+	}
+	config := mount.LocalConfig(blobDir, filepath.Join(dir, "optimize-cache")).Write(t, dir, "storage.json")
+	optimized := filepath.Join(dir, "optimized.boot")
+	before := fixture.ListDir(t, blobDir)
+	env.Run(t, env.Nydus(t), "optimize", "--parent-bootstrap", merged, "--bootstrap", optimized,
+		"--blob-dir", blobDir, "--config", config, "--trace-file", traceFile)
+	ondemand := requireOndemandBlob(t, blobDir, before, 1)
+
+	opt := img
+	opt.Bootstrap = optimized
+	opt.Blobs = append(append([]string(nil), img.Blobs...), ondemand)
+	m := mount.Mount(t, mount.FUSE{}, opt, mount.Options{Config: func(c *mount.Config) {
+		c.Prefetch = &mount.PrefetchConfig{Scope: "ondemand"}
+	}})
+	assert.Equal(t, fstest.FileSHA256(t, filepath.Join(lower, "keep/a.bin")), fstest.FileSHA256(t, m.Path("keep/a.bin")))
+	assert.Equal(t, fstest.FileSHA256(t, filepath.Join(upper, "dup/b.bin")), fstest.FileSHA256(t, m.Path("dup/b.bin")))
+}
+
+// traceRead mounts img cold, reads paths, and returns the /trace document
+// and its raw JSON before unmounting.
+func traceRead(t testing.TB, img fixture.Image, paths ...string) (mount.Trace, []byte) {
+	t.Helper()
+	m := mount.Mount(t, mount.FUSE{}, img, mount.Options{})
+	for _, path := range paths {
+		if _, err := os.ReadFile(m.Path(path)); !assert.NoError(t, err) {
+			t.FailNow()
+		}
+	}
+	raw, err := m.API.Get("/trace")
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	tr := m.API.Trace(t)
+	m.Unmount()
+	return tr, raw
+}
+
+// requireOndemandBlob checks optimize appended a blob and its meta to
+// blobDir, that the blob holds `groups` chunk groups, and returns its path.
+func requireOndemandBlob(t testing.TB, blobDir string, before map[string]bool, groups int) string {
+	t.Helper()
+	added := newFiles(t, blobDir, before)
+	slices.Sort(added)
+	if !assert.Len(t, added, 2) {
+		t.FailNow()
+	}
+	ondemand := filepath.Join(blobDir, added[0])
+	assert.Equal(t, added[0]+mount.CacheMetaSuffix, added[1])
+	assert.Equal(t, added[0], fstest.FileSHA256(t, ondemand))
+	if !assert.Len(t, blobFile(ondemand).chunkGroupOffsets(t), groups+1) {
+		t.FailNow()
+	}
+	return ondemand
 }
 
 func newFiles(t testing.TB, dir string, before map[string]bool) []string {

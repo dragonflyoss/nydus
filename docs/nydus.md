@@ -45,7 +45,6 @@ encoded ranges in the stored data region.
 ## Non-goals
 
 - Preserve on-disk compatibility with earlier Nydus image formats (RAFS v5/v6).
-- Introduce chunk-content or cross-layer global deduplication.
 - Lazily load native `erofs-*` layers through the nydus daemons: they are
 	block-device artifacts the kernel mounts directly.
 - Rework the full EROFS on-disk layout to match every upstream variant.
@@ -398,6 +397,14 @@ Current implementation notes:
 	chunk size. Build records it as `bytes_per_chunk_group_index`; the file format does
 	not store the writer's lone-chunk threshold. Readers validate group spans
 	against the index span.
+- Deduplication is on by default and needs no option: a chunk of at least
+	the group minimum that repeats an earlier chunk of the same blob hands its
+	chunk index the first copy's placement, so the payload is stored once.
+	Packed chunks are left alone, which keeps the content-defined group
+	boundaries of similar images aligned for deduplication by group digest.
+	A build without a digester, or with an erofs-* compressor, cannot
+	deduplicate and simply stores every chunk; it does not fail. A build that
+	does deduplicate is smaller but not byte-identical to one that does not.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
@@ -511,6 +518,33 @@ chunks' bytes back to back, without the tail-block padding after each file
 	groups in the same backend read.
 - An all-zero chunk-sized chunk (a hole) is not stored at all and gets the
 	EROFS null chunk index.
+- By default identical lone chunks are stored once: a duplicate's EROFS
+	chunk index points at the first copy's blocks instead of taking a group of
+	its own, so the blob holds fewer chunks and groups (and the same input no
+	longer builds byte-identically to a build that does not deduplicate).
+	Packed chunks keep their copies, so grouping and group digests of small
+	chunks are unchanged.
+
+- At runtime, deduplication changes what is fetched, not the layer blobs. An
+	on-demand read fetches the chunk group its chunk index names, so a repeated
+	chunk is fetched and cached once. Prefetch, when enabled, never follows
+	chunk indexes, and what it pulls depends on the image. Without an ondemand
+	blob, `prefetch.scope=auto` resolves to `all`, every blob is streamed
+	whole, and each copy a merge left in a layer is pulled even though no chunk
+	index names it. An optimized image lists the ondemand blob first (see
+	[Optimize](#optimize)) and resolves `auto` to `ondemand`: prefetch streams
+	just that blob — the recorded working set, one copy per recorded source
+	group in first-access order (see [Blob prefetch](#blob-prefetch)) — decodes
+	it, and writes the groups into the source blobs' caches without pulling the
+	source blobs' data. Merge aliasing already rewrote duplicate chunk indexes
+	to the lower copy, so the record names that copy only; an explicit
+	`prefetch.scope=all` still pulls the source blobs afterwards, skipping the
+	groups the redirects filled. A deduplicated build already stores a repeated
+	lone chunk once, so prefetching that blob pulls it once too. The merged
+	blobs keep every duplicate group, so `nydus_cache_bytes` counts the copies:
+	`nydus_cache_bytes{status="uncached"}` can stay above zero for groups
+	(copied or not) neither a read nor a prefetch has fetched yet.
+
 - On fill the daemon writes a decoded group back onto its blocks of the
 	padded address space (gathering the chunks into `pwritev` runs), so the
 	cache file, `read_at` and the pmem/DAX extents are a mirror of the address
@@ -660,6 +694,14 @@ Current implementation notes:
 	metadata tree, applying OCI whiteout rules, and emitting a new device table.
 - Merge records each source full-blob SHA256, rather than the data-region
 	digest stored in its embedded bootstrap, so the store/backend can resolve it.
+- Merge deduplicates chunk groups across layers by default: a duplicate lone
+	chunk group's chunk indexes are rewritten to the lowest layer holding an
+	identical group, matched by group digest and per-chunk lengths. Packed
+	groups are left alone, which keeps the content-defined packing of similar
+	layers aligned. A layer whose blob is a raw device, or lacks chunk group
+	digests, is merged with its copies kept, and a z_erofs merge is not
+	deduplicated at all; neither fails. The source blobs are not modified: they
+	keep every copy, and only fetching and caching are shared.
 - Chunk-based merges preserve each file's original chunkbits. Native-z layers
 	use the separate relocation path described below.
 - When the first source is a z_erofs layer (`nydus build --compressor erofs-*`),
@@ -2216,7 +2258,10 @@ command refuses it). See [Optimize](#optimize) for the CLI and
 ### Merge output
 
 The merge command emits an overlaid standalone bootstrap that references one or
-more previously built full blobs.
+more previously built full blobs. By default a duplicate lone chunk group whose
+digest and per-chunk lengths match an earlier layer's group has its chunk
+indexes point at that layer's copy; the referenced blobs are left unchanged.
+Packed groups keep their copies so the layers' packing stays aligned.
 
 ## z_erofs Layers
 
@@ -2660,8 +2705,9 @@ way a classic nydusd mount would. The resolution is logged.
 	block-device frontend's probe of many blobs right after the device appears
 	pays the round trips serially.
 
-The ondemand blob (produced by `nydus optimize`, listed first in the xattr)
-is an ondemand blob (its blob meta has a ChunkGroupRedirectTable): it is streamed in the order it was packed — the
+The ondemand blob (produced by `nydus optimize`, listed first in the xattr,
+its blob meta carrying a `ChunkGroupRedirectTable`) is streamed in the order
+it was packed — the
 workload's first-access order — and every decoded group is written into its
 **source** blob's cache at the source group's blocks (after the length and
 CRC32C checks) and marked ready there, so the earliest reads find their
@@ -3137,6 +3183,15 @@ The current merge pipeline is:
 4. Reassign merged NIDs.
 5. Emit an overlaid bootstrap referencing the merged blob set.
 
+Chunk dedup is part of the default pipeline. A plan over the source blobs' blob
+meta runs before step 5: a duplicate lone chunk group whose digest and
+per-chunk lengths match an earlier layer's group is aliased to that layer's
+device and blocks, while packed groups are left in place. A source blob that is
+a raw device or lacks chunk group digests takes part with its copies kept, and
+a z_erofs merge is not deduplicated, so neither aborts the merge. The step only
+changes the emitted bootstrap, never a source blob, and a group is counted
+even when the merged tree ends up shadowing the file that owns it.
+
 ## OCI Whiteout Rules
 
 The merge implementation will follow OCI whiteout semantics:
@@ -3152,6 +3207,12 @@ The nydus v3 format described here is self-consistent and does not preserve
 on-disk compatibility with earlier Nydus image formats (RAFS v5/v6): bootstraps
 are native EROFS images rather than RAFS metadata. Nydus v2 (RAFS) lives on the
 [`master`](https://github.com/dragonflyoss/nydus/tree/master) branch.
+
+A chunk-group build with the default BLAKE3 digester whose input repeats a
+chunk of 2 MiB or more now produces a different blob and bootstrap than the
+previous release did, since lone-chunk deduplication is on by default: the blob
+is smaller and its chunk indexes point at the first copy. Inputs without such
+repeats, `--digester none` builds and `erofs-*` layers build as before.
 
 EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Nydus runtime

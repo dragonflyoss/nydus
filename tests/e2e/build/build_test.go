@@ -122,6 +122,62 @@ func TestBuildExclude(t *testing.T) {
 	assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, "keep/a.bin")), fstest.FileSHA256(t, filepath.Join(m.Root, "keep/a.bin")))
 }
 
+// TestDedup mounts an image whose build aliased a repeated lone chunk and
+// reads it back: the duplicate's chunk index resolves through the shared copy
+// and every file matches its source.
+func TestDedup(t *testing.T) {
+	t.Parallel()
+	mount.FUSE{}.Require(t)
+
+	dir := env.WorkDir(t)
+	source := filepath.Join(dir, "source")
+	if !assert.NoError(t, os.MkdirAll(filepath.Join(source, "nested"), 0o755)) {
+		t.FailNow()
+	}
+
+	// Two identical 2 MiB files are one lone chunk each, so the second
+	// deduplicates into the first; the third differs and keeps its group.
+	shared := corpus.Bytes(1, 2<<20)
+	files := map[string][]byte{
+		"a.bin":        shared,
+		"c.bin":        corpus.Bytes(2, 2<<20),
+		"nested/b.bin": shared,
+	}
+	for name, data := range files {
+		if !assert.NoError(t, os.WriteFile(filepath.Join(source, name), data, 0o644)) {
+			t.FailNow()
+		}
+	}
+
+	// A digestless build cannot deduplicate and carries both copies of the
+	// shared chunk, so the size gap proves the mount below reads an image
+	// that does deduplicate.
+	plain := fixture.MustLayout(t, "zstd-no-digest")
+	plainBlob, _ := fixture.BuildInto(t, filepath.Join(dir, "plain-blobs"), filepath.Join(dir, "plain.boot"), source, plain)
+
+	layout := fixture.MustLayout(t, "zstd")
+	blobDir, bootstrap := filepath.Join(dir, "blobs"), filepath.Join(dir, "image.boot")
+	blob, _ := fixture.BuildInto(t, blobDir, bootstrap, source, layout)
+
+	plainInfo, err := os.Stat(plainBlob)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	dedupInfo, err := os.Stat(blob)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	assert.Less(t, dedupInfo.Size()+(1<<20), plainInfo.Size(), "the deduplicated blob holds the shared chunk once")
+
+	m := mount.Mount(t, mount.FUSE{}, fixture.Image{Layout: layout, Bootstrap: bootstrap, BlobDir: blobDir, Blobs: []string{blob}}, mount.Options{})
+	for name := range files {
+		if !assert.Equal(t, fstest.FileSHA256(t, filepath.Join(source, name)), fstest.FileSHA256(t, m.Path(name))) {
+			t.FailNow()
+		}
+	}
+	assert.Equal(t, fstest.FileSHA256(t, m.Path("a.bin")), fstest.FileSHA256(t, m.Path("nested/b.bin")))
+}
+
 func TestDataAlignment(t *testing.T) {
 	t.Parallel()
 	mount.FUSE{}.Require(t)

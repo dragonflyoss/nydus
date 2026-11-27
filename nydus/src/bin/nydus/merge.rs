@@ -5,7 +5,7 @@ use nydus_telemetry::logging::init_command_tracing;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tracing::Level;
+use tracing::{info, Level};
 
 /// The whiteout specification to apply while merging layers.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -80,10 +80,16 @@ impl MergeCommand {
         let output = File::create(&self.bootstrap)
             .with_context(|| format!("failed to create bootstrap: {}", self.bootstrap.display()))?;
         let mut writer = BufWriter::new(output);
-        merge_sources_to_bootstrap_writer(&self.sources, whiteout_spec, &mut writer)?;
+        let stats = merge_sources_to_bootstrap_writer(&self.sources, whiteout_spec, &mut writer)?;
         writer
             .flush()
             .with_context(|| format!("failed to flush bootstrap: {}", self.bootstrap.display()))?;
+        if stats.aliased_groups > 0 {
+            info!(
+                "aliased {} duplicate lone chunk groups: {} bytes of logical space now resolve to earlier layers",
+                stats.aliased_groups, stats.aliased_bytes
+            );
+        }
 
         Ok(())
     }
