@@ -10,7 +10,7 @@ use nydus_format::erofs::{
 };
 use nydus_storage::io::write_zeros;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
@@ -47,6 +47,30 @@ pub(crate) fn validate_chunk_group_min_size(chunk_group_min_size: u32) -> Result
         )));
     }
     Ok(())
+}
+
+/// Which chunks the writer may alias to an earlier copy instead of storing
+/// again, identified by their BLAKE3 chunk digest.
+///
+/// Dedup applies to chunk-group builds that have a digester and is on by
+/// default; it is skipped quietly where it cannot apply (no digester, raw
+/// device, z_erofs). A hit hands the chunk index the earlier copy's
+/// placement, so the file reads the same blocks; zero chunks are holes in
+/// the chunk index and never take part. Duplicate detection trusts the
+/// 32-byte digest alone: a hit is not verified byte for byte, since that
+/// would mean retaining every stored chunk or re-reading the blob on each
+/// hit instead of streaming it once.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChunkDedup {
+    /// Store every chunk.
+    #[default]
+    Off,
+    /// Alias chunks that form a group of their own, that is chunks of at
+    /// least `chunk_group_min_size` bytes. Their chunk digest is also their
+    /// group digest, so deduplication by group digest alone applies the same
+    /// rule. Packing is left alone, so the chunk-group boundaries of similar
+    /// images still line up for deduplication by group digest.
+    LoneChunk,
 }
 
 /// Manages writing chunk data to a separate blob device. Every file is cut
@@ -101,6 +125,13 @@ pub struct BlobWriter<W> {
     members: Vec<u32>,
     digests: Vec<BlobMetadataChunkGroupDigest>,
     blob_metadata_chunk_groups: Vec<BlobMetadataChunkGroup>,
+    // Chunk dedup: the requested level, the chunk digest -> placement index
+    // of every eligible chunk stored so far, and the hits and un-compressed
+    // bytes it saved (for the build summary). The map is empty when off.
+    chunk_dedup: ChunkDedup,
+    dedup_index: HashMap<[u8; BlobMetadataChunkGroupDigest::SIZE], u32>,
+    dedup_hits: u64,
+    dedup_bytes_saved: u64,
     // Reused per-file read buffer: a fresh 1 MiB Vec per file costs an
     // mmap/munmap plus page faults for every source file.
     chunk_buf: Vec<u8>,
@@ -1018,6 +1049,10 @@ impl<W: Write> BlobWriter<W> {
             members: Vec::new(),
             digests: Vec::new(),
             blob_metadata_chunk_groups: Vec::new(),
+            chunk_dedup: ChunkDedup::Off,
+            dedup_index: HashMap::new(),
+            dedup_hits: 0,
+            dedup_bytes_saved: 0,
             chunk_buf: vec![0u8; chunk_size as usize],
             encoder: None,
             raw_device: false,
@@ -1085,6 +1120,30 @@ impl<W: Write> BlobWriter<W> {
             }
         }
         Ok(writer)
+    }
+
+    /// Alias identical chunks at `level` (see [`ChunkDedup`]) instead of
+    /// storing each occurrence. A digester identifies the chunks and only
+    /// chunk-group layouts take part: a raw device or z_erofs writer, or one
+    /// without a digester, silently stays at [`ChunkDedup::Off`].
+    pub fn with_chunk_dedup(mut self, level: ChunkDedup) -> Self {
+        self.chunk_dedup = if self.raw_device || self.z_erofs_enabled() || self.digester.is_none() {
+            ChunkDedup::Off
+        } else {
+            level
+        };
+        self
+    }
+
+    /// The chunk dedup level the writer applies.
+    pub fn chunk_dedup(&self) -> ChunkDedup {
+        self.chunk_dedup
+    }
+
+    /// Deduplicated chunks and the un-compressed bytes they would have
+    /// occupied, for the build summary.
+    pub fn chunk_dedup_stats(&self) -> (u64, u64) {
+        (self.dedup_hits, self.dedup_bytes_saved)
     }
 
     /// Whether the writer is in raw device mode (see [`BlobLayout::RawDevice`]).
@@ -1807,10 +1866,31 @@ impl<W: Write> BlobWriter<W> {
         let digest = self.digester.map(|digester| match digester {
             BlobMetadataDigester::Blake3 => BlobMetadataChunkGroupDigest::from_chunks([data]),
         });
+        let lone = len >= self.chunk_group_min_size;
+        // Only a lone chunk is deduplicated, and a lone chunk is sealed as its
+        // own group before this call returns, so the earlier placement a
+        // duplicate points at is already resolved when it is handed out.
+        let dedup_key = match (self.chunk_dedup, digest) {
+            (ChunkDedup::LoneChunk, Some(digest)) if lone => Some(digest.get()),
+            _ => None,
+        };
+        if let Some(key) = dedup_key {
+            if let Some(&placement) = self.dedup_index.get(&key) {
+                self.dedup_hits += 1;
+                self.dedup_bytes_saved += u64::from(len);
+                return Ok(u64::from(placement));
+            }
+        }
         let placement = self.placements.len();
         self.placements.push(PENDING);
+        if let Some(key) = dedup_key {
+            let index = u32::try_from(placement).map_err(|_| {
+                Error::Overflow("blob holds more chunks than dedup can index".to_string())
+            })?;
+            self.dedup_index.insert(key, index);
+        }
 
-        if len >= self.chunk_group_min_size {
+        if lone {
             let data = match input {
                 ChunkInput::Borrowed(data) => data.to_vec(),
                 ChunkInput::Owned(data) => data,
@@ -3436,5 +3516,186 @@ mod tests {
             file[..8].copy_from_slice(&(index as u64).to_le_bytes());
             assert_eq!(chunk, &file);
         }
+    }
+
+    /// A writer over the test geometry applying `level` dedup.
+    fn dedup_writer(level: ChunkDedup) -> BlobWriter<Vec<u8>> {
+        writer(
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
+        )
+        .with_chunk_dedup(level)
+    }
+
+    #[test]
+    fn chunk_dedup_off_stores_every_occurrence() {
+        let mut writer = dedup_writer(ChunkDedup::Off);
+        let data = filled(TEST_CHUNK_SIZE as usize, 3, Mark::Plain);
+        let mut first = write(&mut writer, &data);
+        let mut second = write(&mut writer, &data);
+        writer.finish().unwrap();
+        assert_ne!(
+            resolve(&writer, &mut first),
+            resolve(&writer, &mut second),
+            "off keeps both copies"
+        );
+        assert_eq!(writer.chunk_dedup_stats(), (0, 0));
+        assert_eq!(writer.blob_metadata().unwrap().chunk_count(), 2);
+    }
+
+    #[test]
+    fn chunk_dedup_lone_level_aliases_a_chunk_at_the_group_minimum() {
+        let mut writer = dedup_writer(ChunkDedup::LoneChunk);
+        // Exactly the minimum size still forms a group of its own.
+        let exact = filled(TEST_GROUP_MIN_SIZE as usize, 29, Mark::Plain);
+        let mut first = write(&mut writer, &exact);
+        let mut duplicate = write(&mut writer, &exact);
+        writer.finish().unwrap();
+
+        assert_eq!(
+            resolve(&writer, &mut first),
+            resolve(&writer, &mut duplicate)
+        );
+        let meta = writer.blob_metadata().unwrap();
+        assert_eq!(meta.chunk_count(), 1);
+        assert_eq!(meta.chunk_group_count(), 1);
+        assert_eq!(
+            writer.chunk_dedup_stats(),
+            (1, u64::from(TEST_GROUP_MIN_SIZE))
+        );
+    }
+
+    #[test]
+    fn chunk_dedup_lone_level_is_empty_when_full_chunks_are_packed() {
+        // A chunk size below the group minimum packs even full chunks, so
+        // the lone level has nothing to alias.
+        let mut writer = writer(
+            TEST_GROUP_MIN_SIZE,
+            BlobMetadataCompressor::None,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_CHUNK_SIZE,
+            },
+        )
+        .with_chunk_dedup(ChunkDedup::LoneChunk);
+        let data = filled(TEST_GROUP_MIN_SIZE as usize, 31, Mark::Plain);
+        let mut first = write(&mut writer, &data);
+        let mut duplicate = write(&mut writer, &data);
+        writer.finish().unwrap();
+        assert_eq!(writer.chunk_dedup_stats(), (0, 0));
+        assert_ne!(
+            resolve(&writer, &mut first),
+            resolve(&writer, &mut duplicate)
+        );
+    }
+
+    #[test]
+    fn chunk_dedup_lone_level_leaves_packed_copies_alone() {
+        let mut writer = dedup_writer(ChunkDedup::LoneChunk);
+        let small = filled(TEST_GROUP_MIN_SIZE as usize / 2, 11, Mark::Plain);
+        let mut small_a = write(&mut writer, &small);
+        let mut small_b = write(&mut writer, &small);
+        let lone = filled(TEST_CHUNK_SIZE as usize, 13, Mark::Plain);
+        let mut lone_a = write(&mut writer, &lone);
+        let mut lone_b = write(&mut writer, &lone);
+        writer.finish().unwrap();
+
+        assert_ne!(
+            resolve(&writer, &mut small_a),
+            resolve(&writer, &mut small_b),
+            "packed chunks are outside the lone level"
+        );
+        assert_eq!(resolve(&writer, &mut lone_a), resolve(&writer, &mut lone_b));
+        assert_eq!(writer.chunk_dedup_stats(), (1, u64::from(TEST_CHUNK_SIZE)));
+        assert_eq!(writer.blob_metadata().unwrap().chunk_count(), 3);
+    }
+
+    #[test]
+    fn chunk_dedup_ignores_zero_chunks() {
+        let mut writer = dedup_writer(ChunkDedup::LoneChunk);
+        let data = filled(TEST_CHUNK_SIZE as usize, 23, Mark::Plain);
+        write(&mut writer, &data);
+        let zeros = vec![0u8; TEST_CHUNK_SIZE as usize];
+        let first = write(&mut writer, &zeros);
+        let second = write(&mut writer, &zeros);
+        writer.finish().unwrap();
+
+        assert_eq!(first[0].blkaddr, EROFS_NULL_ADDR);
+        assert_eq!(second[0].blkaddr, EROFS_NULL_ADDR);
+        assert_eq!(writer.chunk_dedup_stats(), (0, 0));
+        assert_eq!(writer.blob_metadata().unwrap().chunk_count(), 1);
+    }
+
+    #[test]
+    fn chunk_dedup_is_deterministic() {
+        let build = || {
+            let mut writer = dedup_writer(ChunkDedup::LoneChunk);
+            let mut data = filled(TEST_CHUNK_SIZE as usize, 17, Mark::Plain);
+            for _ in 0..3 {
+                write(&mut writer, &data);
+            }
+            data[0] ^= 0xff;
+            write(&mut writer, &data);
+            writer.finish().unwrap();
+            let stats = writer.chunk_dedup_stats();
+            (writer.writer, stats)
+        };
+        let (blob, stats) = build();
+        // Three identical chunks alias; the one differing byte does not.
+        assert_eq!(stats, (2, 2 * u64::from(TEST_CHUNK_SIZE)));
+        assert_eq!((blob, stats), build());
+    }
+
+    #[test]
+    fn chunk_dedup_skips_quietly_where_it_cannot_apply() {
+        let no_digest = BlobWriter::new(
+            Vec::new(),
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            None,
+            true,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: TEST_GROUP_MIN_SIZE,
+            },
+        )
+        .unwrap()
+        .with_chunk_dedup(ChunkDedup::LoneChunk);
+        assert_eq!(no_digest.chunk_dedup(), ChunkDedup::Off);
+
+        let raw = BlobWriter::new(
+            Vec::new(),
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            Some(BlobMetadataDigester::Blake3),
+            true,
+            BlobLayout::RawDevice {
+                data_alignment: 0,
+                data_alignment_threshold: 0,
+            },
+        )
+        .unwrap()
+        .with_chunk_dedup(ChunkDedup::LoneChunk);
+        assert_eq!(raw.chunk_dedup(), ChunkDedup::Off);
+
+        let z_erofs = BlobWriter::new(
+            Vec::new(),
+            TEST_CHUNK_SIZE,
+            BlobMetadataCompressor::None,
+            Some(BlobMetadataDigester::Blake3),
+            true,
+            BlobLayout::ZErofs {
+                algorithm: ZErofsCompressor::Lz4,
+                pcluster: 64 * 1024,
+                base_blkaddr: 0,
+                fragment_threshold: 0,
+                data_alignment: 0,
+                data_alignment_threshold: 0,
+            },
+        )
+        .unwrap()
+        .with_chunk_dedup(ChunkDedup::LoneChunk);
+        assert_eq!(z_erofs.chunk_dedup(), ChunkDedup::Off);
     }
 }
