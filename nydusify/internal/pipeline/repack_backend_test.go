@@ -84,9 +84,17 @@ func fetchRepackBlob(t *testing.T, url, byteRange string) (int, string) {
 }
 
 func TestPrepareCacheRepack(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+	for _, mode := range []string{"disabled", "scratch", "shared"} {
+		t.Run(mode, func(t *testing.T) {
 			work := t.TempDir()
+			var parentCache, retained string
+			if mode == "shared" {
+				parentCache = filepath.Join(t.TempDir(), "shared cache")
+				if err := os.Mkdir(parentCache, 0700); err != nil {
+					t.Fatal(err)
+				}
+				retained = mockFile(t, filepath.Join(parentCache, "existing.blob.data"), []byte("keep"))
+			}
 			data := []byte("parent payload")
 			desc := ocispec.Descriptor{Digest: digest.FromBytes(data), Size: int64(len(data))}
 			var reads atomic.Int64
@@ -101,10 +109,10 @@ func TestPrepareCacheRepack(t *testing.T) {
 					return mockBlobReader{bytes.NewReader(data)}, nil
 				},
 			}
-			if enabled {
+			if mode != "disabled" {
 				opt.CompactMaxLayers = 1
 			}
-			config, closeBackend, err := PrepareCacheRepack(context.Background(), opt)
+			config, closeBackend, err := PrepareCacheRepack(context.Background(), opt, parentCache)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,7 +120,20 @@ func TestPrepareCacheRepack(t *testing.T) {
 			if reads.Load() != 0 {
 				t.Fatal("preparation downloaded parent data")
 			}
-			if enabled {
+			if mode != "disabled" {
+				data, err := os.ReadFile(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var cfg struct{ Storage struct{ Dir string } }
+				if err := json.Unmarshal(data, &cfg); err != nil {
+					t.Fatal(err)
+				}
+				wantCache := parentCache
+				if wantCache == "" {
+					wantCache = filepath.Join(filepath.Dir(config), "output", "cache")
+				}
+				assert.Equal(t, wantCache, cfg.Storage.Dir)
 				addr, repository := readRepackBackend(t, config)
 				status, body := fetchRepackBlob(t, addr+"/v2/"+repository+"/blobs/"+desc.Digest.String(), "bytes=0-5")
 				if status != http.StatusPartialContent || body != "parent" {
@@ -122,6 +143,11 @@ func TestPrepareCacheRepack(t *testing.T) {
 				t.Fatal("disabled compact created backend")
 			}
 			closeBackend()
+			if retained != "" {
+				data, err := os.ReadFile(retained)
+				assert.NoError(t, err)
+				assert.Equal(t, "keep", string(data))
+			}
 			entries, err := os.ReadDir(work)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("backend files were not removed: %v, %v", entries, err)
@@ -138,7 +164,7 @@ func TestPrepareCacheRepackSkipsImpossibleCompact(t *testing.T) {
 				WorkDir:          work,
 				CompactMaxLayers: limit,
 				ParentImages:     []ParentImageMetadata{{Blobs: []ocispec.Descriptor{{Digest: digest.FromString("parent"), Size: 1}}}},
-			})
+			}, "")
 			if err != nil || config != "" {
 				t.Fatalf("impossible compact prepared backend: %q %v", config, err)
 			}
@@ -276,7 +302,7 @@ func TestStartRepackBackend(t *testing.T) {
 
 			tc.mock(t, work, blobs)
 			opt := ArtifactOption{OpenCompactBlob: tc.open}
-			config, closeServer, err := startRepackBackend(context.Background(), opt, blobs, work)
+			config, closeServer, err := startRepackBackend(context.Background(), opt, blobs, work, "")
 			if closeServer != nil {
 				defer closeServer()
 			}

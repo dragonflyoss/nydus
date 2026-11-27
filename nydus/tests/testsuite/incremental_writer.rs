@@ -520,173 +520,274 @@ fn incremental_writer_cache_layout_compacts_parent_upper_alias_holes_and_tails()
         }
     }
     for parent_only in [false, true] {
-        let temp = tempdir().unwrap();
-        let output = temp.path();
-        let mut expected = vec![b'P'; 8192];
-        expected.extend_from_slice(&[0; 4096]);
-        expected.extend_from_slice(b"short-parent-tail");
-        let mut parent_options = cache_writer_options(output);
-        parent_options.chunk_group_min_size = EROFS_BLOCK_SIZE;
-        let mut parent = IncrementalWriter::create(parent_options).unwrap();
-        parent
-            .replace_file(Path::new("memory"), expected.clone())
-            .unwrap();
-        parent
-            .replace_file(Path::new("alias"), vec![b'P'; 4096])
-            .unwrap();
-        parent.commit().unwrap();
-        let mut middle = IncrementalWriter::open_metadata_only(
-            &output.join("image.boot"),
-            cache_writer_options(output),
-        )
-        .unwrap();
-        middle
-            .write_at_owned(Path::new("memory"), 4096, vec![b'B'; 4096])
-            .unwrap();
-        middle.commit().unwrap();
-        expected[4096..8192].fill(b'B');
-        let mut child = IncrementalWriter::open_metadata_only(
-            &output.join("image.boot"),
-            cache_writer_options(output),
-        )
-        .unwrap();
-        if !parent_only {
-            child
-                .write_at_owned(Path::new("memory"), 0, vec![b'U'; 4096])
+        for warmth in 0..3 {
+            let warm = warmth != 0;
+            let temp = tempdir().unwrap();
+            let output = temp.path();
+            let mut expected = vec![b'P'; 8192];
+            expected.extend_from_slice(&[0; 4096]);
+            expected.extend_from_slice(b"short-parent-tail");
+            let mut parent_options = cache_writer_options(output);
+            parent_options.chunk_group_min_size = EROFS_BLOCK_SIZE;
+            let mut parent = IncrementalWriter::create(parent_options).unwrap();
+            parent
+                .replace_file(Path::new("memory"), expected.clone())
                 .unwrap();
-            expected[..4096].fill(b'U');
-        }
-        let data = create_cache_data_file(output);
-        child
-            .commit_cache(TestChunkGroupCache(data.clone()))
+            parent
+                .replace_file(Path::new("alias"), vec![b'P'; 4096])
+                .unwrap();
+            parent.commit().unwrap();
+            let mut middle = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                cache_writer_options(output),
+            )
             .unwrap();
-        // Make two inodes share the exact source chunk, including upper.
-        let boot = output.join("cache.boot");
-        let reader = ErofsReader::open_metadata_only(&boot).unwrap();
-        let memory_nid = find_path(&reader, "memory");
-        let memory_inode = reader.inode(memory_nid).unwrap();
-        let memory_entries = reader
-            .read_chunk_index_entries(memory_nid, &memory_inode)
+            middle
+                .write_at_owned(Path::new("memory"), 4096, vec![b'B'; 4096])
+                .unwrap();
+            middle.commit().unwrap();
+            expected[4096..8192].fill(b'B');
+            let cache_dir = output.join("parent-cache");
+            if warm {
+                let core = NydusCore::new(
+                    &output.join("image.boot"),
+                    local_config(output, &cache_dir),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(core.fs.open("memory").unwrap().read().unwrap(), expected);
+                core.fs.open("alias").unwrap().read().unwrap();
+            }
+            let mut child = IncrementalWriter::open_metadata_only(
+                &output.join("image.boot"),
+                cache_writer_options(output),
+            )
             .unwrap();
-        let source = memory_entries[0];
-        let alias_nid = find_path(&reader, "alias");
-        let alias_inode = reader.inode(alias_nid).unwrap();
-        let offset = reader.superblock().meta_blkaddr() as usize * 4096
-            + alias_nid as usize * EROFS_SLOTSIZE as usize
-            + (alias_inode.header_size() + alias_inode.xattr_size())
-                .next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
-        let mut bytes = fs::read(&boot).unwrap();
-        bytes[offset..offset + EROFS_CHUNK_INDEX_SIZE]
-            .copy_from_slice(ErofsChunkIndex::new(source).unwrap().as_bytes());
-        fs::write(&boot, bytes).unwrap();
-        let before: Vec<_> = ["cache.boot", "cache.json", "cache.data"]
-            .iter()
-            .map(|name| fs::read(output.join(name)).unwrap())
-            .collect();
-        let reader_cache = output.join("compact-source-cache");
-        let options = || nydus_core::EncodeOptions {
-            compressor: None,
-            prune: true,
-            compact_max_layers: 1,
-            config: Some(local_config(output, &reader_cache)),
-        };
-        let mut invalid_options = options();
-        invalid_options.config.as_mut().unwrap().storage.dir = None;
-        let mut rejected_stream = Vec::new();
-        let error = test_encode_cache(output, &mut rejected_stream, invalid_options).unwrap_err();
-        assert!(error.to_string().contains("storage.dir"));
-        assert!(rejected_stream.is_empty());
-        let previous_boot = fs::read(output.join("image.boot")).unwrap();
-        assert!(test_encode_cache(output, FailedUpload, options(),).is_err());
-        assert_eq!(fs::read(output.join("image.boot")).unwrap(), previous_boot);
-        assert!(!output.join("image.json").exists());
-        assert!(!fs::read_dir(output).unwrap().any(|entry| entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".nydus-")));
-        let (result, stream) = encode_cache_options(output, options());
-        assert!(output.join("compact-source-cache").exists());
-        assert_eq!(result["compacted"], true);
-        let digest = result["blob"]["digest"]
-            .as_str()
-            .unwrap()
-            .strip_prefix("sha256:")
-            .unwrap();
-        assert!(!output.join(digest).exists());
-        assert_eq!(
-            stream.len() as u64,
-            result["blob"]["size"].as_u64().unwrap()
-        );
-        fs::write(output.join(digest), &stream).unwrap();
-        assert_cache_layout_file(output, "memory", &expected);
-        assert_cache_layout_file(output, "alias", &expected[..4096]);
-        let reader = ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
-        assert_eq!(reader.blob_infos().unwrap().len(), 1);
-        let nid = find_path(&reader, "memory");
-        let entries = reader
-            .read_chunk_index_entries(nid, &reader.inode(nid).unwrap())
-            .unwrap();
-        assert!(entries[2].is_hole());
-        let decoded = output.join(format!("{digest}.blob.data"));
-        let metadata =
-            BlobMetadata::from_path(&output.join(format!("{digest}.blob.meta"))).unwrap();
-        let cache_bytes = fs::read(&decoded).unwrap();
-        assert_eq!(
-            cache_bytes.len() as u64,
-            reader.blob_infos().unwrap()[0].blocks * 4096
-        );
-        for (index, entry) in entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.is_hole())
-        {
-            let start = index * 4096;
-            let end = (start + 4096).min(expected.len());
-            let cached = entry.blkaddr as usize * 4096;
-            assert_eq!(
-                &cache_bytes[cached..cached + end - start],
-                &expected[start..end]
-            );
-            assert!(cache_bytes[cached + end - start..cached + 4096]
+            if !parent_only {
+                child
+                    .write_at_owned(Path::new("memory"), 0, vec![b'U'; 4096])
+                    .unwrap();
+                expected[..4096].fill(b'U');
+            }
+            let data = create_cache_data_file(output);
+            child
+                .commit_cache(TestChunkGroupCache(data.clone()))
+                .unwrap();
+            // Make two inodes share the exact source chunk, including upper.
+            let boot = output.join("cache.boot");
+            let reader = ErofsReader::open_metadata_only(&boot).unwrap();
+            let memory_nid = find_path(&reader, "memory");
+            let memory_inode = reader.inode(memory_nid).unwrap();
+            let memory_entries = reader
+                .read_chunk_index_entries(memory_nid, &memory_inode)
+                .unwrap();
+            let mut next_mapping = fs::metadata(&boot).unwrap().len().div_ceil(4096) + 1;
+            let mappings: Vec<_> = reader
+                .blob_infos()
+                .unwrap()
                 .iter()
-                .all(|byte| *byte == 0));
+                .map(|info| {
+                    let start = next_mapping;
+                    next_mapping += info.blocks;
+                    start
+                })
+                .collect();
+            let flatten = |mut entry: ErofsChunkAddr| {
+                if warm && !entry.is_hole() && entry.device_id > 0 {
+                    let info = &reader.blob_infos().unwrap()[usize::from(entry.device_id) - 1];
+                    if info.blob_id != [0; 32] {
+                        entry.blkaddr += mappings[usize::from(entry.device_id) - 1];
+                        entry.device_id = 0;
+                    }
+                }
+                entry
+            };
+            let source = flatten(memory_entries[0]);
+            let alias_nid = find_path(&reader, "alias");
+            let alias_inode = reader.inode(alias_nid).unwrap();
+            let offset = reader.superblock().meta_blkaddr() as usize * 4096
+                + alias_nid as usize * EROFS_SLOTSIZE as usize
+                + (alias_inode.header_size() + alias_inode.xattr_size())
+                    .next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
+            let mut bytes = fs::read(&boot).unwrap();
+            if warm {
+                use nydus_format::erofs::{ErofsDeviceSlot, EROFS_DEVICESLOT_SIZE};
+                let base = reader.superblock().devt_slotoff() as usize * EROFS_DEVICESLOT_SIZE;
+                for (index, info) in reader.blob_infos().unwrap().iter().enumerate() {
+                    if info.blob_id != [0; 32] {
+                        let slot = ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(
+                            info.blocks,
+                            &info.blob_id,
+                            mappings[index],
+                        )
+                        .unwrap();
+                        let start = base + index * EROFS_DEVICESLOT_SIZE;
+                        bytes[start..start + EROFS_DEVICESLOT_SIZE]
+                            .copy_from_slice(slot.as_bytes());
+                    }
+                }
+            }
+            let memory_base = reader.superblock().meta_blkaddr() as usize * 4096
+                + memory_nid as usize * EROFS_SLOTSIZE as usize
+                + (memory_inode.header_size() + memory_inode.xattr_size())
+                    .next_multiple_of(EROFS_CHUNK_INDEX_SIZE);
+            for (index, entry) in memory_entries.into_iter().enumerate() {
+                let start = memory_base + index * EROFS_CHUNK_INDEX_SIZE;
+                bytes[start..start + EROFS_CHUNK_INDEX_SIZE]
+                    .copy_from_slice(ErofsChunkIndex::new(flatten(entry)).unwrap().as_bytes());
+            }
+            bytes[offset..offset + EROFS_CHUNK_INDEX_SIZE]
+                .copy_from_slice(ErofsChunkIndex::new(source).unwrap().as_bytes());
+            fs::write(&boot, bytes).unwrap();
+            if warm {
+                for info in reader.blob_infos().unwrap() {
+                    if info.blob_id != [0; 32] {
+                        // Poison only ready groups. A partial-cache fallback
+                        // must not extend its fetch window into these bytes.
+                        use std::os::unix::fs::FileExt;
+                        let id = hex::encode(info.blob_id);
+                        let metadata =
+                            BlobMetadata::from_path(&cache_dir.join(format!("{id}.blob.meta")))
+                                .unwrap();
+                        let map = nydus_storage::chunk_group_map::ChunkGroupMap::open(
+                            &cache_dir.join(format!("{id}.group.map")),
+                            metadata.chunk_group_count(),
+                        )
+                        .unwrap();
+                        if warmth == 1 {
+                            map.reset().unwrap();
+                        }
+                        let file = fs::OpenOptions::new()
+                            .write(true)
+                            .open(output.join(id))
+                            .unwrap();
+                        for group in metadata.chunk_groups() {
+                            if warmth == 2 || group.index() % 2 == 0 {
+                                map.set_ready(group.index() as usize).unwrap();
+                                file.write_all_at(
+                                    &vec![0; group.compressed_size() as usize],
+                                    group.compressed_offset(),
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+            let before: Vec<_> = ["cache.boot", "cache.json", "cache.data"]
+                .iter()
+                .map(|name| fs::read(output.join(name)).unwrap())
+                .collect();
+            let reader_cache = if warm {
+                cache_dir.clone()
+            } else {
+                output.join("compact-source-cache")
+            };
+            let options = || nydus_core::EncodeOptions {
+                compressor: None,
+                prune: true,
+                compact_max_layers: 1,
+                config: Some(local_config(output, &reader_cache)),
+            };
+            let mut invalid_options = options();
+            invalid_options.config.as_mut().unwrap().storage.dir = None;
+            let mut rejected_stream = Vec::new();
+            let error =
+                test_encode_cache(output, &mut rejected_stream, invalid_options).unwrap_err();
+            assert!(error.to_string().contains("storage.dir"));
+            assert!(rejected_stream.is_empty());
+            let previous_boot = fs::read(output.join("image.boot")).unwrap();
+            assert!(test_encode_cache(output, FailedUpload, options(),).is_err());
+            assert_eq!(fs::read(output.join("image.boot")).unwrap(), previous_boot);
+            assert!(!output.join("image.json").exists());
+            assert!(!fs::read_dir(output).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".nydus-")));
+            let (result, stream) = encode_cache_options(output, options());
+            assert_eq!(output.join("compact-source-cache").exists(), !warm);
+            assert_eq!(result["compacted"], true);
+            let digest = result["blob"]["digest"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("sha256:")
+                .unwrap();
+            assert!(!output.join(digest).exists());
+            assert_eq!(
+                stream.len() as u64,
+                result["blob"]["size"].as_u64().unwrap()
+            );
+            fs::write(output.join(digest), &stream).unwrap();
+            assert_cache_layout_file(output, "memory", &expected);
+            assert_cache_layout_file(output, "alias", &expected[..4096]);
+            let reader = ErofsReader::open_metadata_only(&output.join("image.boot")).unwrap();
+            assert_eq!(reader.blob_infos().unwrap().len(), 1);
+            let nid = find_path(&reader, "memory");
+            let entries = reader
+                .read_chunk_index_entries(nid, &reader.inode(nid).unwrap())
+                .unwrap();
+            assert!(entries[2].is_hole());
+            let decoded = output.join(format!("{digest}.blob.data"));
+            let metadata =
+                BlobMetadata::from_path(&output.join(format!("{digest}.blob.meta"))).unwrap();
+            let cache_bytes = fs::read(&decoded).unwrap();
+            assert_eq!(
+                cache_bytes.len() as u64,
+                reader.blob_infos().unwrap()[0].blocks * 4096
+            );
+            for (index, entry) in entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| !entry.is_hole())
+            {
+                let start = index * 4096;
+                let end = (start + 4096).min(expected.len());
+                let cached = entry.blkaddr as usize * 4096;
+                assert_eq!(
+                    &cache_bytes[cached..cached + end - start],
+                    &expected[start..end]
+                );
+                assert!(cache_bytes[cached + end - start..cached + 4096]
+                    .iter()
+                    .all(|byte| *byte == 0));
+            }
+            let alias = find_path(&reader, "alias");
+            assert_eq!(
+                reader
+                    .read_chunk_index_entries(alias, &reader.inode(alias).unwrap())
+                    .unwrap()[0]
+                    .blkaddr,
+                entries[0].blkaddr
+            );
+            fs::hard_link(&decoded, output.join("imported-cache.data")).unwrap();
+            let old_inode = fs::metadata(&decoded).unwrap().ino();
+            let (_, retry_stream) = encode_cache_options(output, options());
+            assert_eq!(retry_stream, stream);
+            assert_ne!(fs::metadata(&decoded).unwrap().ino(), old_inode);
+            assert_eq!(
+                fs::read(output.join("imported-cache.data")).unwrap(),
+                cache_bytes
+            );
+            assert_eq!(fs::read(&decoded).unwrap(), cache_bytes);
+            let map = nydus_storage::chunk_group_map::ChunkGroupMap::open(
+                &output.join(format!("{digest}.group.map")),
+                metadata.chunk_group_count(),
+            )
+            .unwrap();
+            assert!(map.is_all_ready());
+            for (index, name) in ["cache.boot", "cache.json", "cache.data"]
+                .iter()
+                .enumerate()
+            {
+                assert_eq!(fs::read(output.join(name)).unwrap(), before[index]);
+            }
+            assert!(!fs::read_dir(output).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".nydus-")));
         }
-        let alias = find_path(&reader, "alias");
-        assert_eq!(
-            reader
-                .read_chunk_index_entries(alias, &reader.inode(alias).unwrap())
-                .unwrap()[0]
-                .blkaddr,
-            entries[0].blkaddr
-        );
-        fs::hard_link(&decoded, output.join("imported-cache.data")).unwrap();
-        let old_inode = fs::metadata(&decoded).unwrap().ino();
-        let (_, retry_stream) = encode_cache_options(output, options());
-        assert_eq!(retry_stream, stream);
-        assert_ne!(fs::metadata(&decoded).unwrap().ino(), old_inode);
-        assert_eq!(
-            fs::read(output.join("imported-cache.data")).unwrap(),
-            cache_bytes
-        );
-        assert_eq!(fs::read(&decoded).unwrap(), cache_bytes);
-        let map = nydus_storage::chunk_group_map::ChunkGroupMap::open(
-            &output.join(format!("{digest}.group.map")),
-            metadata.chunk_group_count(),
-        )
-        .unwrap();
-        assert!(map.is_all_ready());
-        for (index, name) in ["cache.boot", "cache.json", "cache.data"]
-            .iter()
-            .enumerate()
-        {
-            assert_eq!(fs::read(output.join(name)).unwrap(), before[index]);
-        }
-        assert!(!fs::read_dir(output).unwrap().any(|entry| entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".nydus-")));
     }
 }
 

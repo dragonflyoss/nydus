@@ -684,26 +684,25 @@ pub(crate) fn cached_chunk_group_is_intact(
     span: &[u8],
 ) -> bool {
     let block = nydus_format::erofs::EROFS_BLOCK_SIZE as usize;
-    let mut chunks = Vec::with_capacity(group.chunk_range().len());
-    let mut at = 0usize;
-    for index in group.chunk_range() {
-        let Some(length) = metadata.chunk_length(index) else {
-            return false;
-        };
-        let length = length as usize;
-        let Some(chunk) = at.checked_add(length).and_then(|end| span.get(at..end)) else {
-            return false;
-        };
-        chunks.push(chunk);
-        at += length.div_ceil(block) * block;
-    }
-    let length: u64 = chunks.iter().map(|chunk| chunk.len() as u64).sum();
-    if length != u64::from(group.uncompressed_size()) {
+    let chunks = group.chunk_range().scan(0usize, |at, index| {
+        let length = metadata.chunk_length(index)? as usize;
+        let chunk = span.get(*at..at.checked_add(length)?)?;
+        *at = at.checked_add(length.div_ceil(block) * block)?;
+        Some(chunk)
+    });
+    let (count, length, crc32) =
+        chunks
+            .clone()
+            .fold((0, 0u64, 0), |(count, length, crc), chunk| {
+                (
+                    count + 1,
+                    length + chunk.len() as u64,
+                    crc32c::crc32c_append(crc, chunk),
+                )
+            });
+    if count != group.chunk_range().len() || length != u64::from(group.uncompressed_size()) {
         return false;
     }
-    let crc32 = chunks
-        .iter()
-        .fold(0, |crc32, chunk| crc32c::crc32c_append(crc32, chunk));
     if crc32 != group.uncompressed_crc32() {
         return false;
     }

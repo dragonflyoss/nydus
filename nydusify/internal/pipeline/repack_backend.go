@@ -21,7 +21,7 @@ import (
 
 // PrepareCacheRepack reuses the artifact backend for parent range reads.
 // The provisional upper device is read directly from cache.data by Rust.
-func PrepareCacheRepack(ctx context.Context, opt ArtifactOption) (string, func(), error) {
+func PrepareCacheRepack(ctx context.Context, opt ArtifactOption, parentCacheDir string) (string, func(), error) {
 	// A cache layout adds at most one upper blob. Pruning can only lower this
 	// bound, so do not stage metadata or require a reader when it fits.
 	sourceBlobCount := 1
@@ -57,7 +57,7 @@ func PrepareCacheRepack(ctx context.Context, opt ArtifactOption) (string, func()
 		cleanup()
 		return "", nil, err
 	}
-	config, closeBackend, err := startRepackBackend(ctx, opt, blobs, work)
+	config, closeBackend, err := startRepackBackend(ctx, opt, blobs, work, parentCacheDir)
 	if err != nil {
 		cleanup()
 		return "", nil, err
@@ -67,7 +67,10 @@ func PrepareCacheRepack(ctx context.Context, opt ArtifactOption) (string, func()
 
 // Serve only digests staged by the preparation callback. Auth and TLS stay in
 // containerd's resolver; Rust reuses its registry range reader over loopback.
-func startRepackBackend(ctx context.Context, opt ArtifactOption, blobs, work string) (string, func(), error) {
+func startRepackBackend(ctx context.Context, opt ArtifactOption, blobs, work, cacheDir string) (string, func(), error) {
+	if cacheDir == "" {
+		cacheDir = filepath.Join(work, "output", "cache")
+	}
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return "", nil, err
@@ -121,7 +124,7 @@ func startRepackBackend(ctx context.Context, opt ArtifactOption, blobs, work str
 		"backend": map[string]any{"type": "registry", "config": map[string]any{
 			"addr": "http://" + listener.Addr().String(), "repository": repository,
 		}},
-		"storage":  map[string]any{"dir": filepath.Join(work, "output", "cache")},
+		"storage":  map[string]any{"dir": cacheDir},
 		"prefetch": map[string]any{"scope": "none"},
 	}
 	data, err := json.Marshal(config)

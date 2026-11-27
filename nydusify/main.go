@@ -102,6 +102,10 @@ func convertCommand() *cli.Command {
 				Usage: "cache layout directory holding the bootstrap and decoded data to encode",
 			},
 			&cli.StringFlag{
+				Name:  "parent-cache-dir",
+				Usage: "shared decoded blob cache used for parent reads during compaction",
+			},
+			&cli.StringFlag{
 				Name:  "bootstrap",
 				Usage: "existing nydus bootstrap path to package as image.boot instead of building from --source",
 			},
@@ -298,6 +302,9 @@ func runConvert(c *cli.Context) error {
 	if !toOCI && !nydus.IsNydusCompressor(compressor) {
 		return errors.Errorf("unsupported --compressor %q, expected none, zstd, lz4, erofs-none, erofs-lz4, erofs-zstd, oci-gzip, oci-zstd or oci-tar", compressor)
 	}
+	if c.String("parent-cache-dir") != "" && c.String("cache-dir") == "" {
+		return errors.New("--parent-cache-dir requires --cache-dir")
+	}
 	if c.String("cache-dir") != "" && c.IsSet("compressor") {
 		return errors.New("--cache-dir uses the recorded compressor; --compressor cannot be overridden")
 	}
@@ -450,7 +457,7 @@ func runConvert(c *cli.Context) error {
 			Platform:          platform,
 		}
 		if cache := c.String("cache-dir"); cache != "" {
-			config, closeBackend, err := pipeline.PrepareCacheRepack(ctx, artifactOptions)
+			config, closeBackend, err := pipeline.PrepareCacheRepack(ctx, artifactOptions, c.String("parent-cache-dir"))
 			if err != nil {
 				return errors.Wrap(err, "prepare cache compact sources")
 			}

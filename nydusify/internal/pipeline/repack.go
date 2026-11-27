@@ -154,7 +154,7 @@ func repackArtifact(ctx context.Context, opt ArtifactOption, sourceBlobCount int
 	}
 	if opt.OpenCompactBlob != nil && opt.CompactMaxLayers > 0 &&
 		len(opt.ParentImages) > 0 && uint(sourceBlobCount) > opt.CompactMaxLayers {
-		config, closeBackend, startErr := startRepackBackend(ctx, opt, blobs, work)
+		config, closeBackend, startErr := startRepackBackend(ctx, opt, blobs, work, "")
 		if startErr != nil {
 			return report, work, startErr
 		}

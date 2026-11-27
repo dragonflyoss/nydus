@@ -55,6 +55,12 @@ func mockApp() *cli.App {
 	}
 }
 
+func TestParentCacheRequiresCacheLayout(t *testing.T) {
+	err := mockApp().Run([]string{"nydusify", "convert", "--source", mockSourceRef,
+		"--target", mockTargetRef, "--parent-cache-dir", t.TempDir()})
+	assert.EqualError(t, err, "--parent-cache-dir requires --cache-dir")
+}
+
 func TestCacheLayoutUsesRecordedCompressor(t *testing.T) {
 	for _, compressor := range []string{"none", "zstd", "lz4", "erofs-lz4", "oci-tar"} {
 		t.Run(compressor, func(t *testing.T) {
