@@ -53,13 +53,17 @@ func (Kernel) Start(t testing.TB, req Request) (string, *Daemon, func()) {
 func MustHaveEROFS(t testing.TB, layout fixture.Layout) {
 	t.Helper()
 	env.MustHaveRoot(t)
-	env.MustHaveKernel(t, 5, 16, "EROFS chunk-based files on extra devices")
 
-	switch layout.Compressor() {
-	case "erofs-lz4":
-		env.MustHaveKernel(t, 6, 1, "EROFS LZ4 fragments")
+	// A vendor kernel may carry both features under an older version.
+	if !env.Bool(t, "NYDUS_E2E_EROFS_BACKPORTED", false) {
+		env.MustHaveKernel(t, 5, 16, "EROFS chunk-based files on extra devices")
 
-	case "erofs-zstd":
+		if layout.Compressor() == "erofs-lz4" {
+			env.MustHaveKernel(t, 6, 1, "EROFS LZ4 fragments")
+		}
+	}
+
+	if layout.Compressor() == "erofs-zstd" {
 		env.MustHaveKernel(t, 6, 10, "EROFS zstd")
 	}
 
@@ -71,11 +75,21 @@ func MustHaveEROFS(t testing.TB, layout fixture.Layout) {
 	}
 }
 
-// EROFS mounts bootstrap at mnt with the kernel EROFS driver, over read-only
-// loop devices of the bootstrap and of devices, its extra devices in device
-// table order. The mount and the loop devices are released when t ends. The
-// caller has checked MustHaveEROFS.
+// EROFS mounts bootstrap at mnt as TryEROFS does, failing t when the kernel
+// refuses it.
 func EROFS(t testing.TB, mnt, bootstrap string, devices []string) {
+	t.Helper()
+	if !assert.NoError(t, TryEROFS(t, mnt, bootstrap, devices)) {
+		t.FailNow()
+	}
+}
+
+// TryEROFS mounts bootstrap at mnt with the kernel EROFS driver, over
+// read-only loop devices of the bootstrap and of devices, its extra devices
+// in device table order, and returns the error of a mount the kernel refuses.
+// The mount and the loop devices are released when t ends. The caller has
+// checked MustHaveEROFS.
+func TryEROFS(t testing.TB, mnt, bootstrap string, devices []string) error {
 	t.Helper()
 	losetup := env.LookPath(t, "losetup")
 
@@ -102,9 +116,7 @@ func EROFS(t testing.TB, mnt, bootstrap string, devices []string) {
 
 	t.Cleanup(func() { Unmount(mnt) })
 
-	if !assert.NoError(t, unix.Mount(primary, mnt, "erofs", unix.MS_RDONLY, strings.Join(opts, ","))) {
-		t.FailNow()
-	}
+	return unix.Mount(primary, mnt, "erofs", unix.MS_RDONLY, strings.Join(opts, ","))
 }
 
 // DeviceFiles returns the files in dir backing the extra devices of

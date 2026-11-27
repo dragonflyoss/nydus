@@ -62,6 +62,24 @@ func (c *seeded) Text(n int) []byte {
 	return b.Bytes()[:n]
 }
 
+// Matches returns n bytes of runs LZ4 cannot match, each followed by a match
+// longer than a block from anywhere in its 64KiB window, its own start
+// included: a read of part of a pcluster starts and stops inside either.
+func (c *seeded) Matches(n int) []byte {
+	var b []byte
+	for len(b) < n {
+		b = append(b, c.Random(1+c.rng.Intn(8<<10))...)
+		at := len(b) - 1 - c.rng.Intn(min(len(b), 65535))
+
+		for range 4096 + c.rng.Intn(28<<10) {
+			b = append(b, b[at])
+			at++
+		}
+	}
+
+	return b[:n]
+}
+
 // SetTime pins the timestamps of name, which Finish applies in place of
 // the default.
 func (c *seeded) SetTime(name string, sec, nsec int64) {
@@ -202,6 +220,7 @@ func seededData(t testing.TB, c *seeded) {
 	}
 
 	c.CreateFile(t, "data/content/barely_compressible", barely)
+	c.CreateFile(t, "data/content/long_matches", c.Matches(4<<20))
 	// Zero blocks inside data chunks, so no chunk is a hole.
 	mixed := make([]byte, 1<<20)
 	for off := 0; off < len(mixed); off += 8192 {

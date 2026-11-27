@@ -28,7 +28,7 @@ and run through `sudo -E`.
 | `export/`                   | `nydus export` reproduces the layer; build -> export -> build is a fixed point.                                                         |
 | `nydusify/`                 | `nydusify convert/check/optimize/mount/tooci` against an in-process registry.                                                           |
 | `compatibility/`            | Images built by a released version still read back exactly with the nydus under test.                                                  |
-| `kernel/`                   | The kernel EROFS driver reads native images the same way the FUSE reader does.                                                          |
+| `kernel/`                   | The kernel EROFS driver reads native images the same way the FUSE reader does, under memory reclaim too, and fails a damaged one.     |
 | `cache/`                    | Several FUSE daemons sharing one cache directory, including crashes and corruption.                                                     |
 | `fault/`                    | Backend errors, short reads, bit flips, daemon crashes, ENOSPC, signals: never wrong bytes.                                             |
 | `soak/`                     | Long parallel reads and mount cycles leak no fd, thread, mount or process.                                                              |
@@ -56,6 +56,12 @@ Group cases by their observable contract, not merely by the injected status:
 - `api` owns service behavior, independent of the optimizer that consumes
   its trace. `soak` owns duration/resource growth, not another correctness
   matrix. Benchmarks own performance only.
+- `kernel` owns the kernel EROFS driver as the reader of native images.
+  `TestStress` checks random ranges and the whole tree in parallel while it
+  drops the caches of the host every second, as erofs-utils' `stress.c` does.
+  `TestCorruptImage` overwrites the root inode, a logical cluster index or a
+  block of compressed data: the mount fails, or every read of the file fails
+  within its timeout and its reader is not killed.
 - NBD/fanotify share the transport-log checks in `experimental/transport`.
   Subtests express input variants of one contract instead of multiplying
   packages or duplicating whole test bodies.
@@ -317,7 +323,8 @@ run by hand only).
 | `NYDUS_E2E_COMPATIBILITY_VERSIONS` | Space-separated versions that must be present. |
 | `NYDUS_E2E_FUSE_PREDECESSOR` | Older hot-upgrade-capable nydus for the continuity suite. |
 | `NYDUS_E2E_DRAGONFLY_SCHEDULER` | Dragonfly scheduler address for the dragonfly suite. |
-| `NYDUS_E2E_SOAK_DURATION` | Soak duration per workload (default 30s). |
+| `NYDUS_E2E_EROFS_BACKPORTED` | The kernel carries the EROFS extra devices and LZ4 fragments of 5.16 and 6.1 under an older version, as a vendor kernel may: run the kernel mounts instead of skipping them (default false). |
+| `NYDUS_E2E_SOAK_DURATION` | Soak duration per workload, and of each kernel `TestStress` layout (default 30s). |
 | `NYDUS_E2E_SOAK_CYCLES` | Mount cycles per soak workload (default 6). |
 | `NYDUS_E2E_SOAK_RSS_MIB` | Optional peak RSS growth budget in MiB. |
 | `NYDUS_E2E_CONVERT_REGISTRY` | Target registry of the conversion sweep (default `localhost:5000`). |

@@ -109,12 +109,22 @@ func readAt(path string, off, n int64, cold bool) ([]byte, error) {
 
 // SameRange checks that mnt holds the bytes of src in [off, off+n).
 func SameRange(src, mnt string, off, n int64) error {
+	return sameRange(src, mnt, off, n, false)
+}
+
+// SameRangeCold evicts [off, off+n) of mnt from the page cache before
+// checking it as SameRange does.
+func SameRangeCold(src, mnt string, off, n int64) error {
+	return sameRange(src, mnt, off, n, true)
+}
+
+func sameRange(src, mnt string, off, n int64, cold bool) error {
 	want, err := ReadAt(src, off, n)
 	if err != nil {
 		return err
 	}
 
-	got, err := ReadAt(mnt, off, n)
+	got, err := readAt(mnt, off, n, cold)
 	if err != nil {
 		return fmt.Errorf("read %s at %d: %w", mnt, off, err)
 	}

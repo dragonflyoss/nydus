@@ -130,6 +130,7 @@ func tarEdgeMatrix() []tarVector {
 		vec("hardlink-own-metadata", reg("f", 3), with(link("l", "f"), func(h *tar.Header) { h.Mode, h.Uid = 0o600, 7 })),
 		vec("hardlink-missing-target", link("l", "missing")),
 		vec("hardlink-to-dir", dir("d/", 0o755), link("l", "d")),
+		vec("hardlink-to-root", link("l", ".")),
 		vec("symlink-absolute", symlink("s", "/etc/passwd")),
 		vec("symlink-dotdot", symlink("d/s", "../../x")),
 		vec("symlink-empty-target", symlink("s", "")),
