@@ -92,7 +92,9 @@ mod tests {
 
     #[test]
     fn is_daemon_tells_the_mount_services_from_the_one_shot_tools() {
-        let one_shot_commands = ["build", "repack", "export", "check", "merge", "optimize"];
+        let one_shot_commands = [
+            "build", "repack", "export", "check", "merge", "optimize", "encode",
+        ];
         for command in Args::command().get_subcommands() {
             let name = command.get_name();
             let cmdline = format!("nydus\0{name}\0--help\0");

@@ -149,6 +149,24 @@ pub struct ChunkGroupMap {
 }
 
 impl ChunkGroupMap {
+    /// Initialize an unpublished map whose decoded groups are all complete.
+    /// Publish it only after its matching data and metadata are retained.
+    pub fn create_ready(path: &Path, count: usize) -> io::Result<()> {
+        let map = Self::open(path, count)?;
+        // This map is not published yet; no per-group transition or counter
+        // increment is needed. Keep the unused bits in the last byte clear.
+        for index in (0..count).step_by(8) {
+            let mask = (1u16 << (count - index).min(8)) - 1;
+            map.bit_byte(index).store(mask as u8, Ordering::Relaxed);
+        }
+        map.mark_all_ready();
+        if let Some(tag) = current_boot_tag() {
+            map.set_boot_tag(tag);
+        }
+        map.map.flush()?;
+        map._file.sync_all()
+    }
+
     /// Reserves the blocks of the first `len` bytes of `file` without changing
     /// its size, so a ready bit stored through the mapping never allocates.
     #[allow(unused_variables)]
@@ -696,6 +714,22 @@ mod tests {
         // And the flag persists on disk.
         let reopened = ChunkGroupMap::open(&path, 9).unwrap();
         assert!(reopened.is_all_ready());
+    }
+
+    #[test]
+    fn create_ready_initializes_only_valid_bits() {
+        for count in [0, 8, 19] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("ready.map");
+            ChunkGroupMap::create_ready(&path, count).unwrap();
+            let map = ChunkGroupMap::open(&path, count).unwrap();
+            assert!(map.is_all_ready());
+            assert_eq!(map.ready_count(), count);
+            assert_eq!(map.boot_tag(), current_boot_tag().unwrap_or_default());
+            if count == 19 {
+                assert_eq!(map.bit_byte(16).load(Ordering::Relaxed), 0b111);
+            }
+        }
     }
 
     #[test]
