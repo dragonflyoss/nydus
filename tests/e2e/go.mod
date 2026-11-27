@@ -6,7 +6,7 @@ require (
 	github.com/containerd/containerd/v2 v2.0.13
 	github.com/containerd/continuity v0.4.4
 	github.com/google/go-containerregistry v0.20.1
-	github.com/moby/sys/mountinfo v0.7.2
+	github.com/moby/sys/mountinfo v0.7.3
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sys v0.34.0
