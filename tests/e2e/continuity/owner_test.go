@@ -15,19 +15,17 @@ import (
 
 const soAcceptCon = "00010000"
 
-func TestLiveOwnerWithoutControl(t *testing.T) {
-	t.Parallel()
-	t.Run("Missing", func(t *testing.T) { liveOwnerWithoutControl(t, false) })
-
-	t.Run("Unresponsive", func(t *testing.T) { liveOwnerWithoutControl(t, true) })
-}
-
+// liveOwnerWithoutControl starts a second daemon beside a live protected
+// owner whose control endpoint is missing or unresponsive. The start must
+// fail without touching the Holder's retained copy of the live session.
 func liveOwnerWithoutControl(t *testing.T, unresponsive bool) {
-	h, source := setup(t)
+	h, source := setup(t, true)
 	old := h.spawn(t, "live-owner")
 	h.waitMounted(t)
-	h.waitServing(t, old, 10*time.Second)
+	sessionID := h.holder.requireStoredBundle().SessionID
+	h.waitServing(t, old, sessionID, 10*time.Second)
 	dev := mountDev(t, h.mountpoint)
+	commands := h.holder.receivedCommands()
 	hiddenSocket := h.controlSocket + ".hidden"
 	if !assert.NoError(t, os.Rename(h.controlSocket, hiddenSocket)) {
 		t.FailNow()
@@ -79,6 +77,9 @@ func liveOwnerWithoutControl(t *testing.T, unresponsive bool) {
 		t.FailNow()
 	}
 
+	assert.Equal(t, commands, h.holder.receivedCommands(),
+		"control failure must not fetch a retained copy while the original reader lives")
+
 	info, err := requestControlInfo(hiddenSocket)
 	if !assert.NoError(t, err) {
 		t.FailNow()
@@ -96,7 +97,7 @@ func liveOwnerWithoutControl(t *testing.T, unresponsive bool) {
 		t.FailNow()
 	}
 
-	h.waitServing(t, old, 10*time.Second)
+	h.waitServing(t, old, sessionID, 10*time.Second)
 	old.Signal(unix.SIGTERM)
 	assert.True(t, old.WaitExit(30*time.Second))
 	h.waitUnmounted(t)
@@ -104,34 +105,76 @@ func liveOwnerWithoutControl(t *testing.T, unresponsive bool) {
 
 func TestWithoutAPIServer(t *testing.T) {
 	t.Parallel()
-	h, source := setup(t)
+	if os.Getenv(handleHelperEnv) == "1" {
+		runHandleHelper(t)
+		return
+	}
+
+	runProtectionMatrix(t, withoutAPIServer)
+}
+
+// withoutAPIServer serves without a control endpoint. A protected session
+// must still survive a crash: the Holder alone carries it to the next daemon.
+func withoutAPIServer(t *testing.T, protected bool) {
+	h, source := setup(t, protected)
 	h.controlSocket = ""
 	initial := h.spawn(t, "api-off-initial")
 	h.waitMounted(t)
+	handles := startHandleKeeper(t, h)
 
-	if !assert.FileExists(t, h.stateBase()+".owner") {
-		t.FailNow()
-	}
-	if !assert.FileExists(t, h.stateBase()+".lock") {
-		t.FailNow()
+	var sessionID *string
+	if protected {
+		sessionID = h.holder.requireStoredBundle().SessionID
+		if !assert.NotNil(t, sessionID) {
+			t.FailNow()
+		}
+
+		assert.Regexp(t, `^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`, *sessionID)
+
+		if !assert.FileExists(t, h.stateBase()+".owner") {
+			t.FailNow()
+		}
+		if !assert.FileExists(t, h.stateBase()+".lock") {
+			t.FailNow()
+		}
 	}
 
 	dev := mountDev(t, h.mountpoint)
 	h.requireFilesystem(t, source, dev)
 	assert.Empty(t, listeningSockets(t, initial.Pid()))
 
-	if !assert.True(t, initial.Alive()) {
+	serving := initial
+	if protected {
+		initial.Kill()
+		serving = h.spawn(t, "api-off-recovered")
+	}
+
+	handles.verify(t, source)
+	h.requireFilesystem(t, source, dev)
+
+	if !assert.True(t, serving.Alive()) {
 		t.FailNow()
 	}
 
-	initial.Signal(unix.SIGTERM)
+	if protected {
+		assert.Empty(t, listeningSockets(t, serving.Pid()))
+		assert.Equal(t, []string{"fetch", "retain", "fetch"}, h.holder.receivedCommands())
+		assert.Equal(t, sessionID, h.holder.requireStoredBundle().SessionID)
+	}
 
-	if !assert.True(t, initial.WaitExit(30*time.Second)) {
+	serving.Signal(unix.SIGTERM)
+
+	if !assert.True(t, serving.WaitExit(30*time.Second)) {
 		t.FailNow()
 	}
 
-	assert.Zero(t, initial.ExitCode())
+	assert.Zero(t, serving.ExitCode())
 	h.waitUnmounted(t)
+
+	if protected {
+		h.holder.requireReleased()
+		assert.Equal(t, []string{"fetch", "retain", "fetch", "release"}, h.holder.receivedCommands())
+	}
 }
 
 func listeningSockets(t *testing.T, pid int) []string {

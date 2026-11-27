@@ -22,7 +22,7 @@ and run through `sudo -E`.
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `conformance/`              | Filesystem conformance, run against every adapter: `TestFUSE`, `TestKernel`, `TestFileio`, `TestNBD`, `TestUblk`, `TestFanotify`. |
 | `api/`                      | Per-daemon metrics/trace isolation, HTTP method/path errors, disconnected clients, shutdown and stale Unix socket replacement.         |
-| `continuity/`               | FUSE hot upgrade with open handles, pre-ready rollback, live-owner exclusion, no-API operation and exact FD transfer.                  |
+| `continuity/`               | FUSE hot upgrade with open handles, pre-ready rollback, crash failover through a Recovery Holder, no-API operation and FD transfer.    |
 | `build/`                    | `nydus build/merge/check/optimize` across every GA layout: output contract, fsck.erofs, reproducibility.                                |
 | `tar/`                      | OCI layer tarballs (Go and containerd corpora, generated and mutated layers, large files) convert to the tree `archive.Apply` produces. |
 | `export/`                   | `nydus export` reproduces the layer; build -> export -> build is a fixed point.                                                         |

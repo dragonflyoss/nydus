@@ -52,10 +52,6 @@ impl Identity for InstanceInfo {
         &self.version
     }
 
-    fn protected(_session_id: Option<uuid::Uuid>) -> bool {
-        false
-    }
-
     fn check(&self, peer: &Self) -> Result<()> {
         if peer.mountpoint != self.mountpoint {
             return Err(Error::InvalidParameter(format!(
