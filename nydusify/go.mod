@@ -11,7 +11,7 @@ require (
 	github.com/containerd/log v0.1.0
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v29.5.2+incompatible
+	github.com/docker/cli v29.10.0+incompatible
 	github.com/dustin/go-humanize v1.0.1
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
