@@ -29,6 +29,7 @@ pub mod mount;
 #[cfg(feature = "nbd")]
 pub mod nbd;
 pub mod optimize;
+pub mod preheat;
 #[cfg(any(
     feature = "fanotify",
     feature = "fileio",
@@ -38,6 +39,8 @@ pub mod optimize;
     feature = "uffd"
 ))]
 pub mod signal;
+#[cfg(feature = "fuse")]
+pub mod systemd;
 #[cfg(feature = "ublk")]
 pub mod ublk;
 #[cfg(feature = "uffd")]

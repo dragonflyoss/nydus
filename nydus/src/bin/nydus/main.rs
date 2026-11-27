@@ -22,6 +22,7 @@ pub mod merge;
 #[cfg(feature = "nbd")]
 pub mod nbd;
 pub mod optimize;
+pub mod preheat;
 pub mod repack;
 #[cfg(feature = "ublk")]
 pub mod ublk;
@@ -110,6 +111,15 @@ pub enum Command {
     Optimize(optimize::OptimizeCommand),
 
     #[command(
+        name = "preheat",
+        author,
+        version,
+        about = "Download every blob of a nydus image into the local cache",
+        long_about = "Download every blob of a nydus image into the local cache directory without mounting the image, so a later mount reads nothing from the backend. The first blob that fails ends the preheat, and the state file reports the progress and the outcome."
+    )]
+    Preheat(preheat::PreheatCommand),
+
+    #[command(
         name = "fuse",
         author,
         version,
@@ -181,6 +191,7 @@ impl Command {
                 | Self::Check(_)
                 | Self::Merge(_)
                 | Self::Optimize(_)
+                | Self::Preheat(_)
         )
     }
 
@@ -192,6 +203,7 @@ impl Command {
             Self::Check(cmd) => cmd.execute(),
             Self::Merge(cmd) => cmd.execute(),
             Self::Optimize(cmd) => cmd.execute(),
+            Self::Preheat(cmd) => cmd.execute(),
             Self::Fuse(cmd) => cmd.execute(),
             #[cfg(feature = "ublk")]
             Self::Ublk(cmd) => cmd.execute(),

@@ -34,6 +34,8 @@ use crate::cache::BlobCaches;
 ///
 /// A blob whose prefetch fails is logged and skipped; the backend itself
 /// retries a read it could not serve once, hours later.
+/// [`Self::with_observer`] hands every result to a caller that needs all of
+/// them, as `nydus preheat` does without a mount.
 pub struct BlobPrefetcher {
     caches: Arc<BlobCaches>,
     priority: Vec<u16>,
@@ -44,7 +46,13 @@ pub struct BlobPrefetcher {
     timeout: Duration,
     /// Cooperative stop flag: once raised, no new prefetch work is started.
     stop: Arc<AtomicBool>,
+    /// Observer of every blob's prefetch result, see [`Self::with_observer`].
+    observer: Option<PrefetchObserver>,
 }
+
+/// The observer of a prefetch: called with the index of a blob and the result
+/// of its prefetch.
+type PrefetchObserver = Arc<dyn Fn(u16, &io::Result<()>) + Send + Sync>;
 
 /// The blob prefetch order: `priority` blobs stream first, sequentially and
 /// in declared order; `rest` follows through the worker pool when the scope
@@ -74,7 +82,20 @@ impl BlobPrefetcher {
             scope,
             timeout,
             stop: Arc::new(AtomicBool::new(false)),
+            observer: None,
         }
+    }
+
+    /// Reports the result of every blob's prefetch to `observer`, on the
+    /// thread that prefetched the blob. With the stop flag, a caller that
+    /// needs every blob can stop at the first one that fails instead of
+    /// having it skipped.
+    pub fn with_observer(
+        mut self,
+        observer: impl Fn(u16, &io::Result<()>) + Send + Sync + 'static,
+    ) -> Self {
+        self.observer = Some(Arc::new(observer));
+        self
     }
 
     /// A handle to this prefetcher's stop flag. Storing `true` makes the
@@ -215,10 +236,13 @@ impl BlobPrefetcher {
                 break;
             }
             let metrics = &self.caches.metrics().storage;
-            match self
+            let result = self
                 .caches
-                .prefetch_blob(blob_index, self.threads, self.timeout)
-            {
+                .prefetch_blob(blob_index, self.threads, self.timeout);
+            if let Some(observer) = &self.observer {
+                observer(blob_index, &result);
+            }
+            match result {
                 Ok(()) => {
                     metrics.collect_prefetch_task_finished_metrics();
                     info!("prefetched priority blob {}", blob_index)
@@ -245,6 +269,7 @@ impl BlobPrefetcher {
                 let blobs = self.caches.clone();
                 let queue = queue.clone();
                 let stop = self.stop.clone();
+                let observer = self.observer.clone();
                 let handle = thread::Builder::new()
                     .name("nydus_prefetch_worker".to_string())
                     .spawn(move || loop {
@@ -259,7 +284,11 @@ impl BlobPrefetcher {
                             break;
                         };
                         let metrics = &blobs.metrics().storage;
-                        match blobs.prefetch_blob(blob_index, 1, timeout) {
+                        let result = blobs.prefetch_blob(blob_index, 1, timeout);
+                        if let Some(observer) = &observer {
+                            observer(blob_index, &result);
+                        }
+                        match result {
                             Ok(()) => {
                                 metrics.collect_prefetch_task_finished_metrics();
                                 info!("prefetched blob {}", blob_index)
@@ -561,5 +590,73 @@ mod tests {
             rest: Vec::new(),
         };
         assert_eq!(blobs_read(PrefetchScope::Auto, plan), vec![1]);
+    }
+
+    #[test]
+    fn observer_is_told_the_result_of_every_blob() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let (_backend, caches, _ids) =
+            plain_and_ondemand_blobs(backend_dir.path(), cache_dir.path());
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let observed = results.clone();
+        let plan = PrefetchPlan {
+            priority: vec![1],
+            rest: vec![2],
+        };
+        BlobPrefetcher::new(caches, plan, 2, PrefetchScope::All, Duration::ZERO)
+            .with_observer(move |blob_index, result| {
+                observed.lock().unwrap().push((blob_index, result.is_ok()));
+            })
+            .run();
+
+        let mut results = results.lock().unwrap().clone();
+        results.sort_unstable();
+        assert_eq!(results, vec![(1, true), (2, true)]);
+    }
+
+    #[test]
+    fn observer_raising_the_stop_flag_skips_the_remaining_blobs() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let ids = [0xabu8, 0xcd].map(|byte| {
+            let payload = vec![byte; 4096];
+            FullBlob::new(&payload)
+                .with_blob_metadata(&single_chunk_group(&payload))
+                .with_blob_metadata_file()
+                .save_in(backend_dir.path())
+        });
+        let backend = FlakyBackend::new(backend_dir.path(), usize::MAX, || {
+            io::Error::other("ordinary failure")
+        });
+        let caches = Arc::new(
+            BlobCaches::new(
+                [(1u16, ids[0]), (2u16, ids[1])],
+                backend.clone(),
+                Some(cache_dir.path()),
+                None,
+                CacheOptions::default(),
+            )
+            .unwrap(),
+        );
+        let plan = PrefetchPlan {
+            priority: vec![1],
+            rest: vec![2],
+        };
+        let prefetcher = BlobPrefetcher::new(caches, plan, 1, PrefetchScope::All, Duration::ZERO);
+        let stop = prefetcher.stop_flag();
+        let failed = Arc::new(Mutex::new(Vec::new()));
+        let observed = failed.clone();
+        prefetcher
+            .with_observer(move |blob_index, result| {
+                if result.is_err() {
+                    stop.store(true, Ordering::SeqCst);
+                    observed.lock().unwrap().push(blob_index);
+                }
+            })
+            .run();
+
+        assert_eq!(*failed.lock().unwrap(), vec![1]);
+        assert_eq!(backend.attempts(), 1);
     }
 }

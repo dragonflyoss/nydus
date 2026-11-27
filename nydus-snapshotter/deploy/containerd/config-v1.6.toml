@@ -1,0 +1,18 @@
+# Merge into a /etc/containerd/config.toml of version = 2, then restart
+# containerd: containerd 1.6, or a 2.x that still reads a version 2 config, as
+# kind's node image ships. The installer never edits containerd's config.
+
+# The proxy snapshotter served by nydus-snapshotter-v3.service through its socket.
+[proxy_plugins.nydus]
+  type = "snapshot"
+  address = "/run/nydus-snapshotter/nydus-snapshotter.sock"
+  # Lets CRI ImageFsInfo and kubelet imagefs eviction find the snapshotter's
+  # filesystem.
+  [proxy_plugins.nydus.exports]
+    root = "/var/lib/nydus-snapshotter"
+
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  snapshotter = "nydus"
+  # Passes cri.image-ref and the layer annotations to the snapshotter as labels,
+  # which it needs to skip nydus blobs at pull and start daemons.
+  disable_snapshot_annotations = false

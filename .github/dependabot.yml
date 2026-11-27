@@ -12,6 +12,14 @@ updates:
   directory: "tests/e2e"
   schedule:
     interval: "weekly"
+- package-ecosystem: "gomod"
+  directory: "nydus-snapshotter"
+  schedule:
+    interval: "weekly"
+- package-ecosystem: "docker"
+  directory: "nydus-snapshotter"
+  schedule:
+    interval: "weekly"
 - package-ecosystem: "github-actions"
   directory: "/"
   schedule:

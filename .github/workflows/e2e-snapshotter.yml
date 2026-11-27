@@ -1,0 +1,159 @@
+name: E2E Test With Snapshotter
+
+on:
+  push:
+    branches: [main, release-*, v3]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  pull_request:
+    branches: [main, release-*, v3]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  schedule:
+    - cron: '0 4 * * *'
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  RUNC_VERSION: 1.5.2
+  KIND_VERSION: v0.32.0
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: 1.88.0
+
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-on-failure: true
+          shared-key: e2e-snapshotter
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: nydus-snapshotter/go.mod
+          cache-dependency-path: |
+            nydusify/go.sum
+            nydus-snapshotter/go.sum
+
+      - name: Build binaries
+        run: |
+          make build-ci build-nydusify FEATURES=cli,fuse
+          make build-snapshotter COVERAGE=1
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: e2e-snapshotter-binaries
+          path: |
+            target/ci/nydus
+            nydusify/nydusify
+            nydus-snapshotter/bin/nydus-snapshotter
+          if-no-files-found: error
+          retention-days: 3
+
+  test:
+    name: test (${{ matrix.containerd }})
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      COVERAGE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        containerd: [1.6.39, 2.3.7]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: tests/e2e/go.mod
+          cache-dependency-path: tests/e2e/go.sum
+
+      - name: Download binaries
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: e2e-snapshotter-binaries
+
+      - name: Install dependencies
+        run: |
+          chmod +x target/ci/nydus nydusify/nydusify nydus-snapshotter/bin/nydus-snapshotter
+          sudo apt-get update
+          sudo apt-get install -y busybox-static fuse3
+          sudo modprobe fuse
+
+      - name: Install containerd and runc
+        working-directory: ${{ runner.temp }}
+        run: |
+          containerd="containerd-${{ matrix.containerd }}-linux-amd64.tar.gz"
+          curl -fsSL --retry 2 --remote-name-all "https://github.com/containerd/containerd/releases/download/v${{ matrix.containerd }}/${containerd}"{,.sha256sum}
+          sha256sum -c "${containerd}.sha256sum"
+          mkdir -p containerd && tar -xzf "${containerd}" -C containerd
+          curl -fsSL --retry 2 -O "https://github.com/opencontainers/runc/releases/download/v${RUNC_VERSION}/runc.amd64" \
+            -O "https://github.com/opencontainers/runc/releases/download/v${RUNC_VERSION}/runc.sha256sum"
+          grep ' runc.amd64$' runc.sha256sum | sha256sum -c -
+          install -m 0755 runc.amd64 runc
+
+      # The API server the kube secret test creates its secrets in, and the
+      # node image the installer tests boot as a systemd host.
+      - name: Setup Kind
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: ${{ env.KIND_VERSION }}
+          cluster_name: kind
+
+      - name: Run E2E test
+        env:
+          NYDUS_E2E_CONTAINERD: ${{ runner.temp }}/containerd/bin/containerd
+          NYDUS_E2E_RUNC: ${{ runner.temp }}/runc
+        run: |
+          node_image="$(docker inspect --format '{{.Config.Image}}' kind-control-plane)"
+          NYDUS_E2E_KUBECONFIG="${HOME}/.kube/config" NYDUS_E2E_NODE_IMAGE="${node_image}" \
+            make e2e-run PKG=./snapshotter/... E2E_PARALLEL=4 E2E_TIMEOUT=6m
+
+      - name: Export coverage
+        run: go tool covdata textfmt -i=coverage/raw/go -o=coverage/go-e2e.out
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/go-e2e.out
+          flags: e2etests
+          disable_search: true
+
+      - name: Export logs
+        if: always()
+        run: |
+          mkdir -p /tmp/artifact
+          sudo journalctl --no-pager -o short-precise SYSLOG_IDENTIFIER=nydusd > /tmp/artifact/nydusd.log 2>&1 || true
+          sudo dmesg > /tmp/artifact/dmesg.log 2>&1 || true
+          findmnt > /tmp/artifact/mounts.log 2>&1 || true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: always()
+        with:
+          name: snapshotter-e2e-tests-logs-${{ matrix.containerd }}
+          path: /tmp/artifact
+          if-no-files-found: ignore

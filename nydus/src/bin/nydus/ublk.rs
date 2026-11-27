@@ -5,7 +5,7 @@ use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
 use nydus_config::{BackendConfig, Config};
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -110,6 +110,13 @@ pub struct UblkCommand {
         help = "Specify whether to print log"
     )]
     console: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_UBLK_LOG_JOURNALD",
+        help = "Specify whether to log to the systemd journal instead of the log directory and the console"
+    )]
+    log_journald: bool,
 }
 
 /// Implement the execute for UblkCommand.
@@ -129,13 +136,17 @@ impl UblkCommand {
 
         // Initialize tracing. The returned guards must stay alive for the
         // daemon's lifetime or file logging stops.
-        let _guards = init_tracing(
-            NAME,
-            self.log_dir.clone(),
-            self.log_level,
-            self.log_max_files,
-            self.console,
-        )?;
+        let _guards = if self.log_journald {
+            init_journald_tracing(NAME, self.log_level)?
+        } else {
+            init_tracing(
+                NAME,
+                self.log_dir.clone(),
+                self.log_level,
+                self.log_max_files,
+                self.console,
+            )?
+        };
 
         // Load the storage config and run the ublk service until shutdown.
         Config::load(&self.config)
@@ -171,6 +182,7 @@ impl UblkCommand {
         };
         let metrics = core.core().metrics().clone();
         let ondemand_recorder = core.core().ondemand_recorder().clone();
+        let backend = core.core().backend().clone();
         let service = UblkService::new(core, &options)?;
         if let Err(err) = writeln!(io::stdout(), "{}", service.dev_path()) {
             service.delete();
@@ -180,7 +192,12 @@ impl UblkCommand {
         // Non-fatal like the fuse service: the device keeps serving without metrics.
         let api_server = match self.apiserver.as_deref() {
             Some(address) => {
-                match crate::api_server::ApiServer::start(address, metrics, ondemand_recorder) {
+                match crate::api_server::ApiServer::start(
+                    address,
+                    metrics,
+                    ondemand_recorder,
+                    Some(backend),
+                ) {
                     Ok(server) => Some(server),
                     Err(err) => {
                         warn!("failed to start metrics apiserver: {}", err.report());

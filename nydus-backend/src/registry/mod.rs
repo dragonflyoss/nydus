@@ -244,6 +244,18 @@ impl Backend for Registry {
         &self.metrics
     }
 
+    /// Replaces the config's `auth`: the next challenge is answered with
+    /// `username` and `password`.
+    fn set_basic_auth(&self, username: &str, password: &str) -> io::Result<()> {
+        self.client.authorizer.set_basic(username, password)
+    }
+
+    /// Replaces the config's `registry_token`: the next request is sent with
+    /// `token`.
+    fn set_bearer_auth(&self, token: &str) -> io::Result<()> {
+        self.client.authorizer.set_bearer(token)
+    }
+
     /// Reads the blob's metadata for an on-demand read.
     ///
     /// ```text
@@ -2406,6 +2418,67 @@ backend:
                 assert_eq!(headers[0][AUTHORIZATION], "Bearer xyz");
                 assert_eq!(headers[1].get(AUTHORIZATION), None);
                 assert_eq!(headers[2][AUTHORIZATION], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn replaced_credentials_are_sent_with_the_next_read() {
+        let test_cases: Vec<(Option<&str>, fn(&Registry) -> io::Result<()>, &str)> = vec![
+            (
+                None,
+                |registry| registry.set_bearer_auth("abc"),
+                "Bearer abc",
+            ),
+            (
+                Some("xyz"),
+                |registry| registry.set_bearer_auth("abc"),
+                "Bearer abc",
+            ),
+            (
+                Some("xyz"),
+                |registry| registry.set_basic_auth("bob", "hunter2"),
+                "Bearer xyz",
+            ),
+        ];
+
+        for (registry_token, replace, expected) in test_cases {
+            for kind in [ReadKind::Ondemand, ReadKind::Prefetch] {
+                let body = b"authorized".to_vec();
+                let origin = OriginStub::serve(&["206 Partial Content"], b"unused".to_vec());
+                let transport = ScriptedTransport::new(vec![Scripted::Body(body.clone())]);
+                let registry_token = registry_token
+                    .map(|token| format!("    registry_token: {token}\n"))
+                    .unwrap_or_default();
+                let config: Config = serde_yaml::from_str(&format!(
+                    "backend:\n  type: registry\n  config:\n    addr: http://{}\n    repository: library/ubuntu\n    auth: YWxpY2U6c2VjcmV0\n{registry_token}prefetch:\n  retry_interval: 1ms\n",
+                    origin.addr
+                ))
+                .unwrap();
+                let BackendConfig::Registry(registry_config) = &config.backend else {
+                    unreachable!()
+                };
+                let mut registry =
+                    Registry::new(&config, registry_config, Arc::new(Metrics::new()), None)
+                        .unwrap();
+                Arc::get_mut(&mut registry.client).unwrap().transport = Transport::Direct {
+                    fetcher: Box::new(transport.clone()),
+                };
+
+                replace(&registry).unwrap();
+                let mut buf = vec![0u8; body.len()];
+                match kind {
+                    ReadKind::Ondemand => registry.get(&TEST_BLOB_ID, 0, buf.len()),
+                    ReadKind::Prefetch => registry.prefetch(&TEST_BLOB_ID, 0, buf.len()),
+                }
+                .and_then(|mut reader| reader.read_exact(&mut buf))
+                .unwrap();
+
+                assert_eq!(buf, body);
+                assert_eq!(origin.hits(), 0);
+                let headers = transport.headers();
+                assert_eq!(headers.len(), 1);
+                assert_eq!(headers[0][AUTHORIZATION], expected);
             }
         }
     }

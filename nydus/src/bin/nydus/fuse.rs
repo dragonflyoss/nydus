@@ -4,6 +4,7 @@ use nydus::error::{Context, Error, Result};
 use nydus::fuse::upgrade::Startup;
 use nydus::fuse::ErofsFs;
 use nydus::signal;
+use nydus::systemd::Notifier;
 use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, default_runtime_dir,
@@ -11,7 +12,7 @@ use nydus_config::{
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
-use nydus_telemetry::logging::init_tracing;
+use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -132,6 +133,13 @@ pub struct FuseCommand {
         help = "Specify whether to print log"
     )]
     console: bool,
+
+    #[arg(
+        long,
+        env = "NYDUS_FUSE_LOG_JOURNALD",
+        help = "Specify whether to log to the systemd journal instead of the log directory and the console"
+    )]
+    log_journald: bool,
 }
 
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
@@ -164,13 +172,17 @@ impl FuseCommand {
             .transpose()?;
 
         // Initialize tracing.
-        let _guards = init_tracing(
-            NAME,
-            self.log_dir.clone(),
-            self.log_level,
-            self.log_max_files,
-            self.console,
-        )?;
+        let _guards = if self.log_journald {
+            init_journald_tracing(NAME, self.log_level)?
+        } else {
+            init_tracing(
+                NAME,
+                self.log_dir.clone(),
+                self.log_level,
+                self.log_max_files,
+                self.console,
+            )?
+        };
 
         self.serve(shutdown, api_socket)
             .inspect_err(|err| error!("nydus fuse failed: {}", err.report()))
@@ -268,7 +280,7 @@ impl FuseCommand {
             .as_ref()
             .map(|config| CacheOptions::from(&config.storage))
             .unwrap_or_default();
-        let reader = match (&self.blob, &self.bootstrap, backend) {
+        let reader = match (&self.blob, &self.bootstrap, backend.clone()) {
             // A self-contained full blob still wants the decoded-chunk-group
             // cache: without it every read decodes from the blob in place.
             (Some(blob), None, _) => ErofsReader::open_blob(
@@ -322,8 +334,20 @@ impl FuseCommand {
             image_digest.as_ref().map(|digest| digest.as_slice()),
             reader.metrics().clone(),
             ondemand_recorder,
+            backend,
         )?;
+
+        // Start the watchdog keep-alive before a session exists: a daemon
+        // that cannot keep it up fails here, with no mount for the service
+        // manager's kill to take down.
+        let notifier = Notifier::from_env();
+        let _watchdog = notifier.spawn_watchdog()?;
         let session = startup.start(fs, &config, shutdown)?;
+
+        // The mount is served and a configured API endpoint is published, or
+        // its publication failed after a hot upgrade: report readiness to the
+        // service manager.
+        notifier.ready();
 
         let mut prefetch_stop = None;
         if prefetch_scope == PrefetchScope::None {
@@ -351,7 +375,7 @@ impl FuseCommand {
             }
         }
 
-        let result = session.serve();
+        let result = session.serve(&notifier);
 
         // The filesystem is unmounted: wind down the detached prefetch thread.
         if let Some(stop) = prefetch_stop {

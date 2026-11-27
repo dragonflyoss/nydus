@@ -123,3 +123,44 @@ jobs:
           files: coverage/go-unit-integration.out,coverage/rust-e2e.lcov
           flags: unittests
           disable_search: true
+
+  test-snapshotter:
+    name: Test Snapshotter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      COVERAGE: 1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: nydus-snapshotter/go.mod
+          cache-dependency-path: nydus-snapshotter/go.sum
+
+      - name: Install dependencies
+        run: |
+          go install go.uber.org/mock/mockgen@$(cd nydus-snapshotter && go list -m -f '{{.Version}}' go.uber.org/mock)
+          sudo modprobe fuse
+
+      - name: Check generated files
+        working-directory: nydus-snapshotter
+        run: |
+          make generate
+          go mod tidy -diff
+          git diff --exit-code -- .
+
+      - name: Run tests
+        run: make test-snapshotter
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        timeout-minutes: 1
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/go-snapshotter-unit.out
+          flags: unittests
+          disable_search: true

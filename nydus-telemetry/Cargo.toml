@@ -10,13 +10,15 @@ readme = "README.md"
 
 [features]
 default = []
-# tracing-subscriber installation (stdout + rolling files + panic hook).
+# tracing-subscriber installation (stdout + rolling files, or the systemd
+# journal, + panic hook).
 # Only binaries enable this: libraries emit through the `tracing` facade and
 # never install subscribers.
 logging = [
   "dep:rolling-file",
   "dep:tracing",
   "dep:tracing-appender",
+  "dep:tracing-journald",
   "dep:tracing-panic",
   "dep:tracing-subscriber",
 ]
@@ -27,6 +29,7 @@ prometheus = { workspace = true }
 rolling-file = { version = "0.2.0", optional = true }
 tracing = { workspace = true, optional = true }
 tracing-appender = { version = "0.2.4", optional = true }
+tracing-journald = { version = "0.3.1", optional = true }
 tracing-panic = { version = "0.1.2", optional = true }
 tracing-subscriber = { version = "0.3", features = [
   "chrono",
