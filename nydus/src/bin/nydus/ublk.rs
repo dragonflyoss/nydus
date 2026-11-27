@@ -4,11 +4,12 @@ use nydus::signal;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tracing::{error, info, warn, Level};
 
 use super::*;
@@ -156,7 +157,16 @@ impl UblkCommand {
     /// Runs the ublk service: builds the core, attaches the device, prints
     /// its path, and serves I/O until a termination signal stops it.
     fn run(&self, signals: signal::Signals, config: Config) -> Result<()> {
-        let core = Arc::new(UblkCore::new(&self.bootstrap, config)?);
+        // Build the tokio runtime a registry backend runs on, after the signals are registered.
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+        let core = Arc::new(UblkCore::new(
+            &self.bootstrap,
+            config,
+            runtime.as_ref().map(Runtime::handle).cloned(),
+        )?);
         info!(
             "serving {} as a {} byte block device",
             self.bootstrap.display(),

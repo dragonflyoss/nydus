@@ -78,7 +78,7 @@ fn probe_opens_a_cold_blob_cache_through_the_registry() {
         image.dir.path().join("cache").display(),
     ))
     .unwrap();
-    let core = Arc::new(UffdCore::new(&image.bootstrap, config).unwrap());
+    let core = Arc::new(UffdCore::new(&image.bootstrap, config, None).unwrap());
     let socket = image.dir.path().join("uffd.sock");
     let service = Arc::new(UffdService::new(core, socket.clone()));
     let server = {

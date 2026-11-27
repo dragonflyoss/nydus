@@ -24,11 +24,9 @@ import (
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/log"
 	sddaemon "github.com/coreos/go-systemd/v22/daemon"
-	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/cache"
@@ -47,18 +45,15 @@ const (
 	// return, so no handler runs once the stores close.
 	gracefulStopTimeout = 10 * time.Second
 
-	// dialTimeout bounds probing an existing socket for a live server.
-	dialTimeout = time.Second
+	// socketDialTimeout bounds probing an existing socket for a live server.
+	socketDialTimeout = time.Second
 
-	// reloadTimeout bounds applying a reloaded config.
-	reloadTimeout = time.Minute
-
-	// syncedPollInterval is how often the registry credentials are checked
-	// for their first sync.
-	syncedPollInterval = 100 * time.Millisecond
+	// credentialSyncPollInterval is how often the registry credentials are
+	// checked for their first sync.
+	credentialSyncPollInterval = 100 * time.Millisecond
 )
 
-// Server is the snapshotter process.
+// Server is the snapshotter server.
 type Server struct {
 	// cfg is the config the server started with. A reloaded config reaches
 	// the file system only.
@@ -82,17 +77,22 @@ type Server struct {
 	// gc evicts unused blobs from the cache.
 	gc cache.GC
 
-	// grpc serves the snapshotter to containerd.
-	grpc *grpc.Server
+	// grpcServer serves the snapshotter to containerd.
+	grpcServer *grpc.Server
 
-	// listener is the gRPC listener.
-	listener net.Listener
+	// healthServer answers the gRPC health checking protocol on the same
+	// socket.
+	//
+	//	Check answers ─▶ the snapshotter is alive
+	//	NOT_SERVING   ─▶ credentials are not synced yet, or the snapshotter stops
+	//	SERVING       ─▶ ready
+	healthServer *health.Server
 
-	// health answers the gRPC health checking protocol on the same socket.
-	health *health.Server
+	// metricsServer serves /metrics; nil when disabled.
+	metricsServer *metrics.Server
 
-	// metrics serves /metrics; nil when disabled.
-	metrics *metrics.Server
+	// ctx is the context of the background workers.
+	ctx context.Context
 
 	// cancel stops the background workers.
 	cancel context.CancelFunc
@@ -101,26 +101,13 @@ type Server struct {
 	wg sync.WaitGroup
 }
 
-// New returns a server. Its background workers start once every component
-// is built and stop on Stop.
-func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, error) {
+// New creates a new snapshotter server. Nothing runs until Serve.
+func New(ctx context.Context, cfg *config.Config) (*Server, error) {
+	// Initialize the root and runtime directories.
 	for _, dir := range []string{cfg.RootDir, cfg.RuntimeDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
-	}
-
-	// A Pod that mounts runtime_dir before the snapshotter is installed has
-	// kubelet create it 0755, so the mode is set here.
-	if err := os.Chmod(cfg.RuntimeDir, 0o700); err != nil {
-		return nil, fmt.Errorf("chmod %s: %w", cfg.RuntimeDir, err)
-	}
-
-	// Rendered daemon configs hold credentials, which stay off persistent
-	// disk only on tmpfs; a failed statfs is caught by the first daemon.
-	var stat unix.Statfs_t
-	if err := unix.Statfs(cfg.RuntimeDir, &stat); err == nil && stat.Type != unix.TMPFS_MAGIC {
-		log.G(ctx).WithField("path", cfg.RuntimeDir).Warn("runtime_dir is not on tmpfs, so rendered daemon configs keep credentials on disk")
 	}
 
 	s := &Server{
@@ -128,195 +115,173 @@ func New(ctx context.Context, cfg *config.Config, configPath string) (*Server, e
 		systemd: systemd.New(),
 	}
 
-	ctx, s.cancel = context.WithCancel(ctx)
-	if err := s.setupComponents(ctx); err != nil {
-		s.Stop()
+	// Initialize the store.
+	var err error
+	s.store, err = store.New(filepath.Join(cfg.RootDir, "nydusd.db"), store.DefaultOpenTimeout)
+	if err != nil {
 		return nil, err
 	}
 
-	s.wg.Go(func() { s.snapshotter.Run(ctx) })
-	s.wg.Go(func() { s.gc.Run(ctx) })
-	s.wg.Go(func() { s.fileSystem.Run(ctx) })
-	s.wg.Go(func() { s.reportServing(ctx) })
-	watcher := config.NewWatcher(configPath, cfg)
-	s.wg.Go(func() { watcher.Run(ctx, s.reloadConfig) })
-	if s.metrics != nil {
-		s.wg.Go(func() {
-			if err := s.metrics.Serve(); err != nil {
-				log.G(ctx).WithError(err).Error("serve metrics")
-			}
-		})
-	}
+	// Initialize the keychain.
+	s.keychain = auth.New(cfg)
 
-	return s, nil
-}
-
-// setupComponents builds the components in dependency order.
-func (s *Server) setupComponents(ctx context.Context) error {
-	var err error
-	s.store, err = store.New(filepath.Join(s.cfg.RootDir, "nydusd.db"), store.DefaultOpenTimeout)
-	if err != nil {
-		return err
-	}
-
-	s.keychain = auth.New(s.cfg)
-
-	// The GC and the file system need each other: the GC asks for the blobs
-	// of running daemons, a starting daemon holds the GC's start lock.
-	s.gc = cache.New(s.cfg, s.store,
+	// Initialize the GC and the file system, which need each other: the GC
+	// asks for the blobs of running daemons, a starting daemon holds the
+	// GC's start lock.
+	s.gc = cache.New(cfg, s.store,
 		func(ctx context.Context) (map[string]struct{}, error) { return s.fileSystem.RunningBlobs(ctx) },
 		func(ctx context.Context) (map[string]struct{}, error) { return s.snapshotter.CommittedBlobs(ctx) },
 	)
 
-	s.fileSystem, err = fs.New(ctx, s.cfg, s.systemd, s.store, s.keychain, s.gc.DaemonStartLock())
+	s.fileSystem, err = fs.New(ctx, cfg, s.systemd, s.store, s.keychain, s.gc.DaemonStartLock())
 	if err != nil {
-		return fmt.Errorf("init nydus file system: %w", err)
+		return nil, fmt.Errorf("init nydus file system: %w", err)
 	}
 
-	s.snapshotter, err = snapshot.New(s.cfg.RootDir, s.fileSystem)
+	// Initialize the snapshotter.
+	s.snapshotter, err = snapshot.New(cfg.RootDir, s.fileSystem)
 	if err != nil {
-		return fmt.Errorf("init snapshotter: %w", err)
+		return nil, fmt.Errorf("init snapshotter: %w", err)
 	}
 
-	if s.cfg.Metrics.Addr != "" {
-		s.metrics, err = metrics.NewServer(s.cfg.Metrics.Addr, s.fileSystem)
+	// Initialize the metrics server if metrics is enabled.
+	if cfg.Metrics.Addr != "" {
+		s.metricsServer, err = metrics.NewServer(cfg.Metrics.Addr, s.fileSystem)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	// Bind the gRPC socket last, as nothing closes it before Serve owns it.
-	s.listener, err = s.listen()
-	if err != nil {
-		return err
-	}
+	// Initialize the health server, which answers NOT_SERVING until the
+	// registry credentials are synced.
+	s.healthServer = health.NewServer()
+	s.healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
 
-	// Match containerd's proxy client limits, and let Stop wait for in-flight
-	// handlers before the stores close.
-	s.grpc = grpc.NewServer(
+	// Initialize the gRPC server. It matches containerd's proxy client
+	// limits, and lets Stop wait for in-flight handlers before the stores
+	// close. The preheat and health services share its socket.
+	s.grpcServer = grpc.NewServer(
 		grpc.MaxRecvMsgSize(defaults.DefaultMaxRecvMsgSize),
 		grpc.MaxSendMsgSize(defaults.DefaultMaxSendMsgSize),
 		grpc.WaitForHandlers(true),
 	)
-	snapshotsapi.RegisterSnapshotsServer(s.grpc, snapshotservice.FromSnapshotter(s.snapshotter))
+	snapshotsapi.RegisterSnapshotsServer(s.grpcServer, snapshotservice.FromSnapshotter(s.snapshotter))
+	resolver := preheat.NewResolver(cfg.Containerd.Addr, s.snapshotter)
+	nydussnapshotterv1.RegisterNydusSnapshotterServer(s.grpcServer, preheat.NewService(resolver, s.fileSystem))
+	grpc_health_v1.RegisterHealthServer(s.grpcServer, s.healthServer)
 
-	// The preheat service shares the socket.
-	resolver := preheat.NewResolver(s.cfg.Containerd.Addr, s.snapshotter)
-	nydussnapshotterv1.RegisterNydusSnapshotterServer(s.grpc, preheat.NewService(resolver, s.fileSystem))
+	// Initialize the context of the background workers.
+	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// Health is the gRPC health checking protocol.
-	s.health = health.NewServer()
-	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-	grpc_health_v1.RegisterHealthServer(s.grpc, s.health)
-
-	return nil
+	return s, nil
 }
 
-// Serve serves gRPC until Stop, and tells systemd the snapshotter is ready.
+// Serve starts the snapshotter server.
 func (s *Server) Serve() error {
-	// The listener is bound, so containerd's calls queue until Serve accepts
-	// them.
+	// Serve the background workers.
+	s.wg.Go(func() { s.snapshotter.Run(s.ctx) })
+	s.wg.Go(func() { s.gc.Run(s.ctx) })
+	s.wg.Go(func() { s.fileSystem.Run(s.ctx) })
+	s.wg.Go(func() { s.cfg.Watch(s.ctx, s.fileSystem.Reload) })
+
+	// Serve the health status, which is SERVING once the registry
+	// credentials are synced.
+	s.wg.Go(func() {
+		if !s.waitForCredentialSync(s.ctx) {
+			return
+		}
+
+		s.healthServer.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
+	})
+
+	// Serve the metrics server.
+	if s.metricsServer != nil {
+		s.wg.Go(func() {
+			if err := s.metricsServer.Serve(); err != nil {
+				log.L.WithError(err).Error("serve metrics")
+			}
+		})
+	}
+
+	listener, err := s.newGRPCListener()
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	// Notify systemd. The listener is bound, so containerd's calls queue
+	// until the gRPC server accepts them.
 	if _, err := sddaemon.SdNotify(false, sddaemon.SdNotifyReady); err != nil {
 		log.L.WithError(err).Warn("notify systemd ready")
 	}
 
+	// Serve the gRPC server.
 	log.L.WithField("address", s.cfg.GRPC.Addr).Info("serving snapshotter")
-	if err := s.grpc.Serve(s.listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+	if err := s.grpcServer.Serve(listener); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 		return err
 	}
 
 	return nil
 }
 
-// Stop drains gRPC calls, stops the metrics server and the workers, then
-// closes the stores. Daemons and their mounts keep running.
+// Stop stops the snapshotter server. Daemons and their mounts keep running.
 func (s *Server) Stop() {
+	// Notify systemd.
 	if _, err := sddaemon.SdNotify(false, sddaemon.SdNotifyStopping); err != nil {
 		log.L.WithError(err).Warn("notify systemd stopping")
 	}
 
-	if s.grpc != nil {
-		// Health checks answer NOT_SERVING while the calls drain.
-		s.health.Shutdown()
-		stopped := make(chan struct{})
-		go func() {
-			s.grpc.GracefulStop()
-			close(stopped)
-		}()
+	// Stop the gRPC server. Health checks answer NOT_SERVING while the calls
+	// drain.
+	s.healthServer.Shutdown()
+	stopped := make(chan struct{})
+	go func() {
+		s.grpcServer.GracefulStop()
+		close(stopped)
+	}()
 
-		timer := time.NewTimer(gracefulStopTimeout)
-		select {
-		case <-stopped:
-		case <-timer.C:
-			s.grpc.Stop()
-			<-stopped
-		}
-		timer.Stop()
+	timer := time.NewTimer(gracefulStopTimeout)
+	select {
+	case <-stopped:
+	case <-timer.C:
+		s.grpcServer.Stop()
+		<-stopped
+	}
+	timer.Stop()
+
+	// Stop the metrics server.
+	if s.metricsServer != nil {
+		s.metricsServer.Stop()
 	}
 
-	if s.metrics != nil {
-		s.metrics.Stop()
-	}
-
+	// Stop the background workers.
 	s.cancel()
 	s.wg.Wait()
 
-	if s.snapshotter != nil {
-		if err := s.snapshotter.Close(); err != nil {
-			log.L.WithError(err).Warn("close snapshotter")
-		}
+	// Stop the snapshotter.
+	if err := s.snapshotter.Close(); err != nil {
+		log.L.WithError(err).Warn("close snapshotter")
 	}
 
-	if s.store != nil {
-		if err := s.store.Close(); err != nil {
-			log.L.WithError(err).Warn("close store")
-		}
+	// Stop the store.
+	if err := s.store.Close(); err != nil {
+		log.L.WithError(err).Warn("close store")
 	}
 
+	// Stop the systemd connection.
 	s.systemd.Close()
 }
 
-// reportServing sets the health status to SERVING once the registry
-// credentials are synced.
-//
-//	Check answers ─▶ the snapshotter is alive
-//	NOT_SERVING   ─▶ credentials are not synced yet, or the snapshotter stops
-//	SERVING       ─▶ ready
-func (s *Server) reportServing(ctx context.Context) {
-	// The poll fails only once ctx is done.
-	if err := wait.PollUntilContextCancel(ctx, syncedPollInterval, true, func(context.Context) (bool, error) {
-		return s.keychain.Synced(), nil
-	}); err != nil {
-		return
-	}
-
-	s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-}
-
-// reloadConfig applies the reloadable sections of a changed config file.
-func (s *Server) reloadConfig(ctx context.Context, next *config.Config) {
-	ctx, cancel := context.WithTimeout(ctx, reloadTimeout)
-	defer cancel()
-
-	merged, restartOnly := s.cfg.Merge(next)
-	if restartOnly {
-		log.G(ctx).Warn("config changes outside cgroup and nydusd.config apply after a restart")
-	}
-
-	if err := s.fileSystem.Reload(ctx, merged); err != nil {
-		log.G(ctx).WithError(err).Error("apply reloaded config")
-	}
-}
-
-// listen returns the gRPC listener, a socket bound at grpc.addr.
-func (s *Server) listen() (net.Listener, error) {
+// newGRPCListener returns the listener of the gRPC server, a socket bound at
+// grpc.addr.
+func (s *Server) newGRPCListener() (net.Listener, error) {
 	address := s.cfg.GRPC.Addr
 	if err := os.MkdirAll(filepath.Dir(address), 0o700); err != nil {
 		return nil, fmt.Errorf("create socket dir: %w", err)
 	}
 
 	// Remove a stale socket, never one another snapshotter still serves.
-	if conn, err := net.DialTimeout("unix", address, dialTimeout); err == nil {
+	if conn, err := net.DialTimeout("unix", address, socketDialTimeout); err == nil {
 		conn.Close()
 		return nil, fmt.Errorf("socket %s is served by another process", address)
 	}
@@ -336,4 +301,21 @@ func (s *Server) listen() (net.Listener, error) {
 	}
 
 	return listener, nil
+}
+
+// waitForCredentialSync waits for the first sync of the registry credentials
+// and reports whether they synced before ctx was done.
+func (s *Server) waitForCredentialSync(ctx context.Context) bool {
+	tick := time.NewTicker(credentialSyncPollInterval)
+	defer tick.Stop()
+
+	for !s.keychain.Synced() {
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	return true
 }

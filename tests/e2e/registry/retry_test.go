@@ -101,6 +101,24 @@ func TestPrefetchRetry(t *testing.T) {
 	assert.Zero(t, m.backendReads(t, "ondemand", "http"))
 }
 
+func TestPrefetchRetryStop(t *testing.T) {
+	t.Parallel()
+	image, proxy, addr := newRegistrySuite(t)
+
+	proxy.inject(http.StatusServiceUnavailable, 0)
+	config := image.config(addr)
+	config.HTTP.MaxRetries = mount.Ptr(0)
+	config.prefetch.Scope = "all"
+	m := image.mount(t, config)
+	m.Daemon.WaitForLog(t, 10*time.Second, "http request failed, retrying in")
+
+	if !assert.True(t, m.Daemon.Stop()) {
+		t.FailNow()
+	}
+
+	assert.Zero(t, m.Daemon.ExitCode())
+}
+
 func TestPrefetchStatus(t *testing.T) {
 	t.Parallel()
 	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests} {

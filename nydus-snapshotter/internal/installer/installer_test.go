@@ -146,7 +146,6 @@ func TestNew(t *testing.T) {
 			expect: func(t *testing.T, i *Installer, err error) {
 				assert := assert.New(t)
 				assert.NoError(err)
-				assert.Equal(config.DefaultPath, i.configPath)
 				assert.Empty(i.nodeName)
 				assert.Nil(i.kubeClient)
 			},
@@ -193,7 +192,7 @@ func TestNew(t *testing.T) {
 			cfg.Installer.NodeLabel.Enable = tc.nodeLabel
 			cfg.Installer.ServiceAccountPath = filepath.Join("testdata", "serviceaccount")
 
-			i, err := New(cfg, config.DefaultPath, nil)
+			i, err := New(cfg, nil)
 			tc.expect(t, i, err)
 		})
 	}
@@ -375,13 +374,14 @@ func TestInstaller_Run(t *testing.T) {
 			assert.NoError(t, os.CopyFS("/", mockImage))
 			assert.NoError(t, os.CopyFS(unitDir, os.DirFS("../../deploy/systemd")))
 			assert.NoError(t, os.CopyFS(filepath.Dir(config.DefaultPath), os.DirFS("../../deploy/nydus-snapshotter")))
+			cfg := config.New()
+			assert.NoError(t, cfg.Load(config.DefaultPath))
 			for path, data := range tc.files {
 				assert.NoError(t, os.WriteFile(path, []byte(data), 0o755))
 			}
 
 			t.Setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
 			t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-			cfg := config.New()
 			cfg.Installer.ServiceAccountPath = t.TempDir()
 			cfg.Installer.SyncInterval = config.Duration(10 * time.Millisecond)
 			cfg.Installer.Registries.Enable = true
@@ -395,7 +395,7 @@ func TestInstaller_Run(t *testing.T) {
 			mockSystemd := mocks.NewMockSystemd(ctl)
 			tc.mock(t, cfg, mockSystemd.EXPECT(), cancel)
 
-			i, err := New(cfg, config.DefaultPath, mockSystemd)
+			i, err := New(cfg, mockSystemd)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -917,6 +917,7 @@ func TestInstaller_install(t *testing.T) {
 			assert.NoError(t, os.CopyFS(unitDir, os.DirFS("../../deploy/systemd")))
 			assert.NoError(t, os.CopyFS(filepath.Dir(config.DefaultPath), os.DirFS("../../deploy/nydus-snapshotter")))
 			cfg := config.New()
+			assert.NoError(t, cfg.Load(config.DefaultPath))
 			cfg.Installer.Registries.Enable = true
 
 			ctl := gomock.NewController(t)
@@ -927,7 +928,7 @@ func TestInstaller_install(t *testing.T) {
 				mockSystemd.EXPECT().EnableUnitFiles(gomock.Any(), gomock.Any()).Return(nil).Times(1)
 				mockSystemd.EXPECT().RestartUnit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
 				mockSystemd.EXPECT().StartUnit(gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
-				i, err := New(cfg, config.DefaultPath, mockSystemd)
+				i, err := New(cfg, mockSystemd)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -938,7 +939,7 @@ func TestInstaller_install(t *testing.T) {
 			tc.prepare(t, cfg)
 			mockSystemd := mocks.NewMockSystemd(ctl)
 			tc.mock(mockSystemd.EXPECT())
-			i, err := New(cfg, config.DefaultPath, mockSystemd)
+			i, err := New(cfg, mockSystemd)
 			if err != nil {
 				t.Fatal(err)
 			}

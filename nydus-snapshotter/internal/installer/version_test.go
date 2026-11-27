@@ -92,7 +92,7 @@ func TestInstaller_nydusBinaryVersion(t *testing.T) {
 				assert.NoError(t, os.WriteFile(nydusBinary, []byte(tc.script), 0o755))
 			}
 
-			i, err := New(config.New(), config.DefaultPath, nil)
+			i, err := New(config.New(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -292,7 +292,7 @@ func TestInstaller_switchNydusBinaryVersion(t *testing.T) {
 			assert.NoError(t, os.MkdirAll(filepath.Join(versionsDir, mockVersion), 0o755))
 			tc.prepare(t, versionsDir, link)
 
-			i, err := New(cfg, config.DefaultPath, nil)
+			i, err := New(cfg, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

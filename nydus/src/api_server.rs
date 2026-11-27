@@ -725,7 +725,7 @@ mod tests {
             "backend:\n  type: registry\n  config:\n    addr: http://127.0.0.1:5000\n    repository: a/b\n",
         )
         .unwrap();
-        <dyn Backend>::new(&config, None, Arc::new(Metrics::new())).unwrap()
+        <dyn Backend>::new(&config, Arc::new(Metrics::new()), None).unwrap()
     }
 
     struct Refusing(io::ErrorKind, Arc<Metrics>);

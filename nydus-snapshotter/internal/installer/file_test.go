@@ -461,6 +461,7 @@ func TestInstaller_syncConfig(t *testing.T) {
 			assert.NoError(t, os.CopyFS(unitDir, os.DirFS("../../deploy/systemd")))
 			assert.NoError(t, os.CopyFS(filepath.Dir(config.DefaultPath), os.DirFS("../../deploy/nydus-snapshotter")))
 			cfg := config.New()
+			assert.NoError(t, cfg.Load(config.DefaultPath))
 			cfg.Installer.Registries.Enable = true
 
 			ctl := gomock.NewController(t)
@@ -468,7 +469,7 @@ func TestInstaller_syncConfig(t *testing.T) {
 			mockSystemd := mocks.NewMockSystemd(ctl)
 			mockSystemd.EXPECT().EnableUnitFiles(gomock.Any(), gomock.Any()).Return(nil).Times(1)
 			mockSystemd.EXPECT().RestartUnit(gomock.Any(), gomock.Any()).Return(nil).Times(1)
-			i, err := New(cfg, config.DefaultPath, mockSystemd)
+			i, err := New(cfg, mockSystemd)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -544,7 +545,7 @@ func TestInstaller_removeRestartRequiredFile(t *testing.T) {
 			assert.NoError(t, os.MkdirAll(hostRootMount, 0o755))
 			tc.prepare(t)
 
-			i, err := New(config.New(), config.DefaultPath, nil)
+			i, err := New(config.New(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}

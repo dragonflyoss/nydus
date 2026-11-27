@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use tokio::runtime::Handle;
 use tracing::{debug, warn};
 
 use nydus_config::Config;
@@ -136,8 +137,8 @@ impl FanotifyCore {
     /// cache file is confirmed to be a regular file whose size matches the slot
     /// before its `(dev, ino)` identity is recorded from that same opened
     /// descriptor.
-    pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let core = Arc::new(NydusCore::new(bootstrap, config, None)?);
+    pub fn new(bootstrap: &Path, config: Config, runtime: Option<Handle>) -> Result<Self> {
+        let core = Arc::new(NydusCore::new(bootstrap, config, runtime)?);
         let entries = core
             .blobs
             .prepare_all()

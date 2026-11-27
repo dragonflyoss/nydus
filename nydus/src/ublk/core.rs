@@ -16,6 +16,7 @@ use nydus_core::flat::FlatImage;
 use nydus_core::NydusCore;
 use nydus_error::{Context, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
+use tokio::runtime::Handle;
 use tracing::warn;
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
@@ -32,10 +33,10 @@ impl UblkCore {
     /// read-only block device. All blobs referenced by the bootstrap device
     /// table are prepared up front, and background prefetch follows
     /// `config.prefetch`.
-    pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
+    pub fn new(bootstrap: &Path, config: Config, runtime: Option<Handle>) -> Result<Self> {
         // The kernel always reads in whole blocks, and the tail block of the
         // last blob may be partial, so the device is rounded up.
-        let image = FlatImage::open(bootstrap, config, UBLK_LOGICAL_BLOCK_SIZE, None)?;
+        let image = FlatImage::open(bootstrap, config, UBLK_LOGICAL_BLOCK_SIZE, runtime)?;
         // Warm the blob preparation (meta download + cache file sizing) in
         // the background so device creation and the EROFS mount are not
         // blocked on backend round trips. flat_layout() is single-flight: an

@@ -30,9 +30,10 @@ use nydus_config::Config;
 use nydus_error::{Context, Error, Result};
 use nydus_format::erofs::EROFS_BLOCK_SIZE;
 use nydus_format::utils::align_up_u64;
+use tokio::runtime::Handle;
 
 use crate::extent::{Extent, MmapCache};
-use crate::{Netns, NydusCore};
+use crate::NydusCore;
 
 /// EROFS block size as u64 — the granularity every flattened read is aligned
 /// to.
@@ -50,9 +51,7 @@ pub struct FlatImage {
 
 impl FlatImage {
     /// Open `bootstrap` with `config` and expose it as a flattened image
-    /// whose size is rounded up to `align` bytes, the registry backend
-    /// reaching the registry from `netns` when one is given, see
-    /// [`NydusCore::new`].
+    /// whose size is rounded up to `align` bytes, see [`NydusCore::new`].
     ///
     /// Pass [`BLOCK_SIZE`] for transports that address in EROFS blocks; a
     /// larger alignment (a ublk logical block, a uffd region) rounds up and
@@ -62,9 +61,9 @@ impl FlatImage {
         bootstrap: &Path,
         config: Config,
         align: u64,
-        netns: Option<Netns>,
+        runtime: Option<Handle>,
     ) -> Result<Self> {
-        let core = Arc::new(NydusCore::new(bootstrap, config, netns)?);
+        let core = Arc::new(NydusCore::new(bootstrap, config, runtime)?);
         Self::with_core(core, align)
     }
 

@@ -8,7 +8,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"math/rand/v2"
 	"net"
 	"os"
@@ -24,13 +23,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 
 	authmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/auth/mocks"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/config"
-	fsmocks "github.com/dragonflyoss/nydus/nydus-snapshotter/internal/fs/mocks"
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/store"
 )
 
@@ -41,7 +38,7 @@ func TestNew(t *testing.T) {
 		expect  func(t *testing.T, cfg *config.Config, s *Server, err error)
 	}{
 		{
-			name:    "serve the snapshot API until stopped",
+			name:    "initialize every component",
 			prepare: func(t *testing.T, cfg *config.Config) {},
 			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
 				assert := assert.New(t)
@@ -49,46 +46,13 @@ func TestNew(t *testing.T) {
 					return
 				}
 
-				served := make(chan error, 1)
-				go func() { served <- s.Serve() }()
-				conn, err := grpc.NewClient("unix://"+cfg.GRPC.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-				assert.NoError(err)
-				defer conn.Close()
-
-				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-				defer cancel()
-				_, err = snapshotsapi.NewSnapshotsClient(conn).Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key: "missing"}, grpc.WaitForReady(true))
-				assert.Equal(codes.NotFound, status.Code(err))
-				assert.Eventually(func() bool {
-					resp, err := grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
-					return err == nil && resp.GetStatus() == grpc_health_v1.HealthCheckResponse_SERVING
-				}, 10*time.Second, 10*time.Millisecond)
-
-				s.Stop()
-				assert.NoError(<-served)
-				resp, err := s.health.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+				resp, err := s.healthServer.Check(t.Context(), &grpc_health_v1.HealthCheckRequest{})
 				assert.NoError(err)
 				assert.Equal(grpc_health_v1.HealthCheckResponse_NOT_SERVING, resp.GetStatus())
-				_, err = os.Stat(cfg.GRPC.Addr)
-				assert.ErrorIs(err, os.ErrNotExist)
-			},
-		},
-		{
-			name: "runtime dir that exists with another mode",
-			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.MkdirAll(cfg.RuntimeDir, 0o755))
-				assert.NoError(t, os.Chmod(cfg.RuntimeDir, 0o755))
-			},
-			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
-				assert := assert.New(t)
-				if !assert.NoError(err) {
-					return
-				}
-
-				defer s.Stop()
-				info, err := os.Stat(cfg.RuntimeDir)
+				s.Stop()
+				reopened, err := store.New(filepath.Join(cfg.RootDir, "nydusd.db"), time.Second)
 				assert.NoError(err)
-				assert.Equal(os.FileMode(0o700), info.Mode().Perm())
+				assert.NoError(reopened.Close())
 			},
 		},
 		{
@@ -150,21 +114,94 @@ func TestNew(t *testing.T) {
 				assert.Nil(s)
 			},
 		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if os.Geteuid() != 0 {
+				t.Skip("talks to systemd as root")
+			}
+
+			if _, err := os.Stat("/run/systemd/system"); err != nil {
+				t.Skip("needs systemd as init")
+			}
+
+			dir := t.TempDir()
+			cfg := config.New()
+			cfg.RootDir = filepath.Join(dir, "lib")
+			cfg.RuntimeDir = filepath.Join(dir, "run")
+			cfg.GRPC.Addr = filepath.Join(cfg.RuntimeDir, "s.sock")
+			cfg.Metrics.Addr = "127.0.0.1:0"
+			cfg.Cgroup.Slice = "nydustest" + strconv.Itoa(os.Getpid()) + strconv.Itoa(rand.IntN(1<<30)) + ".slice"
+			t.Cleanup(func() { _ = exec.Command("systemctl", "stop", cfg.Cgroup.Slice).Run() })
+
+			tc.prepare(t, cfg)
+			s, err := New(t.Context(), cfg)
+			tc.expect(t, cfg, s, err)
+		})
+	}
+}
+
+func TestServer_Serve(t *testing.T) {
+	tests := []struct {
+		name   string
+		expect func(t *testing.T, cfg *config.Config, s *Server)
+	}{
 		{
-			name: "socket that another process serves",
-			prepare: func(t *testing.T, cfg *config.Config) {
-				assert.NoError(t, os.MkdirAll(filepath.Dir(cfg.GRPC.Addr), 0o700))
-				listener, err := net.Listen("unix", cfg.GRPC.Addr)
-				assert.NoError(t, err)
-				t.Cleanup(func() { assert.NoError(t, listener.Close()) })
-			},
-			expect: func(t *testing.T, cfg *config.Config, s *Server, err error) {
+			name: "serve the snapshot API until stopped",
+			expect: func(t *testing.T, cfg *config.Config, s *Server) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "is served by another process")
-				assert.Nil(s)
+				served := make(chan error, 1)
+				go func() { served <- s.Serve() }()
+				conn, err := grpc.NewClient("unix://"+cfg.GRPC.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+				assert.NoError(err)
+				defer conn.Close()
+
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				_, err = snapshotsapi.NewSnapshotsClient(conn).Stat(ctx, &snapshotsapi.StatSnapshotRequest{Key: "missing"}, grpc.WaitForReady(true))
+				assert.Equal(codes.NotFound, status.Code(err))
+				assert.Eventually(func() bool {
+					resp, err := grpc_health_v1.NewHealthClient(conn).Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+					return err == nil && resp.GetStatus() == grpc_health_v1.HealthCheckResponse_SERVING
+				}, 10*time.Second, 10*time.Millisecond)
+
+				s.Stop()
+				assert.NoError(<-served)
+				resp, err := s.healthServer.Check(ctx, &grpc_health_v1.HealthCheckRequest{})
+				assert.NoError(err)
+				assert.Equal(grpc_health_v1.HealthCheckResponse_NOT_SERVING, resp.GetStatus())
+				_, err = os.Stat(cfg.GRPC.Addr)
+				assert.ErrorIs(err, os.ErrNotExist)
 				reopened, err := store.New(filepath.Join(cfg.RootDir, "nydusd.db"), time.Second)
 				assert.NoError(err)
 				assert.NoError(reopened.Close())
+			},
+		},
+		{
+			name: "socket that another process serves",
+			expect: func(t *testing.T, cfg *config.Config, s *Server) {
+				assert := assert.New(t)
+				listener, err := net.Listen("unix", cfg.GRPC.Addr)
+				assert.NoError(err)
+				defer listener.Close()
+
+				assert.ErrorContains(s.Serve(), "is served by another process")
+				s.Stop()
+				assert.FileExists(cfg.GRPC.Addr)
+				reopened, err := store.New(filepath.Join(cfg.RootDir, "nydusd.db"), time.Second)
+				assert.NoError(err)
+				assert.NoError(reopened.Close())
+			},
+		},
+		{
+			name: "return at once when stopped before",
+			expect: func(t *testing.T, cfg *config.Config, s *Server) {
+				assert := assert.New(t)
+				s.Stop()
+				assert.NoError(s.Serve())
+				_, err := os.Stat(cfg.GRPC.Addr)
+				assert.ErrorIs(err, os.ErrNotExist)
 			},
 		},
 	}
@@ -188,14 +225,17 @@ func TestNew(t *testing.T) {
 			cfg.Cgroup.Slice = "nydustest" + strconv.Itoa(os.Getpid()) + strconv.Itoa(rand.IntN(1<<30)) + ".slice"
 			t.Cleanup(func() { _ = exec.Command("systemctl", "stop", cfg.Cgroup.Slice).Run() })
 
-			tc.prepare(t, cfg)
-			s, err := New(t.Context(), cfg, filepath.Join(cfg.RootDir, "config.yaml"))
-			tc.expect(t, cfg, s, err)
+			s, err := New(t.Context(), cfg)
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			tc.expect(t, cfg, s)
 		})
 	}
 }
 
-func TestServer_listen(t *testing.T) {
+func TestServer_newGRPCListener(t *testing.T) {
 	tests := []struct {
 		name    string
 		prepare func(t *testing.T, address string)
@@ -273,42 +313,42 @@ func TestServer_listen(t *testing.T) {
 			tc.prepare(t, cfg.GRPC.Addr)
 
 			s := &Server{cfg: cfg}
-			listener, err := s.listen()
+			listener, err := s.newGRPCListener()
 			tc.expect(t, cfg.GRPC.Addr, listener, err)
 		})
 	}
 }
 
-func TestServer_reportServing(t *testing.T) {
+func TestServer_waitForCredentialSync(t *testing.T) {
 	tests := []struct {
 		name   string
 		mock   func(m *authmocks.MockKeychainMockRecorder, cancel context.CancelFunc)
-		expect func(t *testing.T, status grpc_health_v1.HealthCheckResponse_ServingStatus)
+		expect func(t *testing.T, synced bool)
 	}{
 		{
-			name: "serving once the credentials are synced",
+			name: "credentials that sync",
 			mock: func(m *authmocks.MockKeychainMockRecorder, cancel context.CancelFunc) {
 				gomock.InOrder(
 					m.Synced().Return(false).Times(1),
 					m.Synced().Return(true).Times(1),
 				)
 			},
-			expect: func(t *testing.T, status grpc_health_v1.HealthCheckResponse_ServingStatus) {
+			expect: func(t *testing.T, synced bool) {
 				assert := assert.New(t)
-				assert.Equal(grpc_health_v1.HealthCheckResponse_SERVING, status)
+				assert.True(synced)
 			},
 		},
 		{
-			name: "not serving when stopped before the credentials are synced",
+			name: "stopped before the credentials are synced",
 			mock: func(m *authmocks.MockKeychainMockRecorder, cancel context.CancelFunc) {
 				m.Synced().DoAndReturn(func() bool {
 					cancel()
 					return false
 				}).Times(1)
 			},
-			expect: func(t *testing.T, status grpc_health_v1.HealthCheckResponse_ServingStatus) {
+			expect: func(t *testing.T, synced bool) {
 				assert := assert.New(t)
-				assert.Equal(grpc_health_v1.HealthCheckResponse_NOT_SERVING, status)
+				assert.False(synced)
 			},
 		},
 	}
@@ -322,81 +362,8 @@ func TestServer_reportServing(t *testing.T) {
 			defer cancel()
 			tc.mock(keychain.EXPECT(), cancel)
 
-			s := &Server{keychain: keychain, health: health.NewServer()}
-			s.health.SetServingStatus("", grpc_health_v1.HealthCheckResponse_NOT_SERVING)
-			s.reportServing(ctx)
-			resp, err := s.health.Check(t.Context(), &grpc_health_v1.HealthCheckRequest{})
-			assert.NoError(t, err)
-			tc.expect(t, resp.GetStatus())
-		})
-	}
-}
-
-func TestServer_reloadConfig(t *testing.T) {
-	tests := []struct {
-		name   string
-		next   func(cfg config.Config) *config.Config
-		mock   func(m *fsmocks.MockFileSystemMockRecorder)
-		expect func(t *testing.T, running *config.Config)
-	}{
-		{
-			name: "apply new cgroup limits",
-			next: func(cfg config.Config) *config.Config {
-				cfg.Cgroup.MemoryMax = 4 << 30
-				return &cfg
-			},
-			mock: func(m *fsmocks.MockFileSystemMockRecorder) {
-				m.Reload(gomock.Any(), gomock.Cond(func(cfg *config.Config) bool {
-					return cfg.Cgroup.MemoryMax == 4<<30
-				})).Return(nil).Times(1)
-			},
-			expect: func(t *testing.T, running *config.Config) {
-				assert := assert.New(t)
-				assert.Equal(config.DefaultCgroupMemoryMax, running.Cgroup.MemoryMax)
-			},
-		},
-		{
-			name: "keep restart only changes for a restart",
-			next: func(cfg config.Config) *config.Config {
-				cfg.Cgroup.Slice = "other.slice"
-				cfg.Nydusd.MountTimeout = config.Duration(0)
-				return &cfg
-			},
-			mock: func(m *fsmocks.MockFileSystemMockRecorder) {
-				m.Reload(gomock.Any(), gomock.Cond(func(cfg *config.Config) bool {
-					return cfg.Cgroup.Slice == config.DefaultCgroupSlice && cfg.Nydusd.MountTimeout != 0
-				})).Return(nil).Times(1)
-			},
-			expect: func(t *testing.T, running *config.Config) {
-				assert := assert.New(t)
-				assert.Equal(config.DefaultCgroupSlice, running.Cgroup.Slice)
-			},
-		},
-		{
-			name: "survive a failed reload",
-			next: func(cfg config.Config) *config.Config {
-				return &cfg
-			},
-			mock: func(m *fsmocks.MockFileSystemMockRecorder) {
-				m.Reload(gomock.Any(), gomock.Any()).Return(errors.New("foo")).Times(1)
-			},
-			expect: func(t *testing.T, running *config.Config) {
-				assert := assert.New(t)
-				assert.Equal(config.New(), running)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ctl := gomock.NewController(t)
-			defer ctl.Finish()
-			fileSystem := fsmocks.NewMockFileSystem(ctl)
-			tc.mock(fileSystem.EXPECT())
-
-			s := &Server{cfg: config.New(), fileSystem: fileSystem}
-			s.reloadConfig(t.Context(), tc.next(*config.New()))
-			tc.expect(t, s.cfg)
+			s := &Server{keychain: keychain}
+			tc.expect(t, s.waitForCredentialSync(ctx))
 		})
 	}
 }

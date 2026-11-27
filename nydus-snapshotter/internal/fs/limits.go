@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"time"
 
 	"github.com/containerd/log"
 
@@ -17,9 +18,15 @@ import (
 	"github.com/dragonflyoss/nydus/nydus-snapshotter/internal/systemd"
 )
 
+// reloadTimeout bounds applying the cgroup limits of a reloaded config.
+const reloadTimeout = time.Minute
+
 // Reload switches to a reloaded config: its cgroup limits apply now, the
 // rest to daemons started later.
 func (f *fileSystem) Reload(ctx context.Context, cfg *config.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, reloadTimeout)
+	defer cancel()
+
 	f.cfg.Store(cfg)
 	return f.applyCgroupLimits(ctx)
 }

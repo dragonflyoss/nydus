@@ -97,7 +97,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			name: "rotate token",
 			host: "10.96.0.1",
 			prepare: func(t *testing.T, cfg *config.Config) {
-				i, err := New(cfg, config.DefaultPath, nil)
+				i, err := New(cfg, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -203,7 +203,7 @@ func TestInstaller_syncKubeconfig(t *testing.T) {
 			assert.NoError(t, os.CopyFS(cfg.Installer.ServiceAccountPath, mockServiceAccount))
 			tc.prepare(t, cfg)
 
-			i, err := New(cfg, config.DefaultPath, nil)
+			i, err := New(cfg, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

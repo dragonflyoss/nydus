@@ -31,6 +31,9 @@ import (
 
 // Config is the snapshotter config.
 type Config struct {
+	// path is the file the config was loaded from, which Reload reads again.
+	path string
+
 	// RootDir is the directory of persistent data: snapshots, the cache and
 	// instances.
 	RootDir string `yaml:"root_dir"`
@@ -485,79 +488,44 @@ func New() *Config {
 	}
 }
 
-// Parse decodes strictly and validates a YAML config over the defaults. An
-// empty document keeps the defaults.
-func Parse(data []byte) (*Config, error) {
-	cfg := New()
+// Parse decodes a YAML config strictly over c and validates the result. An
+// empty document keeps c as it is, and a config that fails leaves c half
+// decoded.
+func (c *Config) Parse(data []byte) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
-	if err := decoder.Decode(cfg); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("decode config: %w", err)
+	if err := decoder.Decode(c); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("decode config: %w", err)
 	}
 
 	// The keys of a second document would be dropped without a word.
 	if err := decoder.Decode(&yaml.Node{}); !errors.Is(err, io.EOF) {
-		return nil, errors.New("decode config: more than one YAML document")
+		return errors.New("decode config: more than one YAML document")
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
+	return c.Validate()
 }
 
-// Load reads the config at path into c: the file decoded strictly over the
-// defaults and validated. A file that does not load leaves c as it was.
-func (c *Config) Load(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read config: %w", err)
-	}
-
-	cfg, err := Parse(data)
-	if err != nil {
-		return fmt.Errorf("load config %s: %w", path, err)
-	}
-
-	*c = *cfg
-
-	return nil
-}
-
-// Validate checks the config values.
+// Validate config parameters.
 func (c *Config) Validate() error {
-	for _, p := range []struct {
-		name, path string
-		optional   bool
-	}{
-		{name: "root_dir", path: c.RootDir},
-		{name: "runtime_dir", path: c.RuntimeDir},
-		{name: "grpc.addr", path: c.GRPC.Addr},
-		{name: "registry.config_path", path: c.Registry.ConfigPath, optional: true},
-		{name: "auth.docker_config.path", path: c.Auth.DockerConfig.Path, optional: true},
-		{name: "auth.kube_secret.kubeconfig", path: c.Auth.KubeSecret.Kubeconfig, optional: true},
-		{name: "nydusd.binary", path: c.Nydusd.Binary},
-		{name: "nydusd.config.runtime_dir", path: c.Nydusd.Config.RuntimeDir},
-		{name: "nydusd.config.storage.dir", path: c.Nydusd.Config.Storage.Dir, optional: true},
-		{name: "containerd.addr", path: c.Containerd.Addr},
-		{name: "installer.service_account_path", path: c.Installer.ServiceAccountPath},
-	} {
-		if p.optional && p.path == "" {
-			continue
-		}
-
-		if !filepath.IsAbs(p.path) {
-			return fmt.Errorf("%s must be an absolute path, got %q", p.name, p.path)
-		}
+	if !filepath.IsAbs(c.RootDir) {
+		return fmt.Errorf("root_dir must be an absolute path, got %q", c.RootDir)
 	}
 
-	if len(c.GRPC.Addr) > maxSocketPath {
-		return fmt.Errorf("grpc.addr %q is %d bytes long, over the %d byte limit", c.GRPC.Addr, len(c.GRPC.Addr), maxSocketPath)
+	if !filepath.IsAbs(c.RuntimeDir) {
+		return fmt.Errorf("runtime_dir must be an absolute path, got %q", c.RuntimeDir)
 	}
 
 	if socket := c.APISocket(strings.Repeat("0", daemonIDLength)); len(socket) > maxSocketPath {
 		return fmt.Errorf("runtime_dir %q makes the daemon API socket %d bytes long, over the %d byte limit", c.RuntimeDir, len(socket), maxSocketPath)
+	}
+
+	if !filepath.IsAbs(c.GRPC.Addr) {
+		return fmt.Errorf("grpc.addr must be an absolute path, got %q", c.GRPC.Addr)
+	}
+
+	if len(c.GRPC.Addr) > maxSocketPath {
+		return fmt.Errorf("grpc.addr %q is %d bytes long, over the %d byte limit", c.GRPC.Addr, len(c.GRPC.Addr), maxSocketPath)
 	}
 
 	if _, err := logrus.ParseLevel(c.Log.Level); err != nil {
@@ -570,89 +538,30 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if !filepath.IsAbs(c.Containerd.Addr) {
+		return fmt.Errorf("containerd.addr must be an absolute path, got %q", c.Containerd.Addr)
+	}
+
+	if c.Registry.ConfigPath != "" {
+		if !filepath.IsAbs(c.Registry.ConfigPath) {
+			return fmt.Errorf("registry.config_path must be an absolute path, got %q", c.Registry.ConfigPath)
+		}
+	}
+
+	if c.Auth.DockerConfig.Path != "" {
+		if !filepath.IsAbs(c.Auth.DockerConfig.Path) {
+			return fmt.Errorf("auth.docker_config.path must be an absolute path, got %q", c.Auth.DockerConfig.Path)
+		}
+	}
+
+	if c.Auth.KubeSecret.Kubeconfig != "" {
+		if !filepath.IsAbs(c.Auth.KubeSecret.Kubeconfig) {
+			return fmt.Errorf("auth.kube_secret.kubeconfig must be an absolute path, got %q", c.Auth.KubeSecret.Kubeconfig)
+		}
+	}
+
 	if _, err := labels.Parse(c.Auth.KubeSecret.LabelSelector); err != nil {
 		return fmt.Errorf("invalid auth.kube_secret.label_selector: %w", err)
-	}
-
-	if c.Nydusd.Driver != DriverFUSE {
-		return fmt.Errorf("unsupported nydusd.driver %q", c.Nydusd.Driver)
-	}
-
-	if !slices.Contains(nydusdLogLevels, c.Nydusd.Log.Level) {
-		return fmt.Errorf("invalid nydusd.log.level %q, want one of %s", c.Nydusd.Log.Level, strings.Join(nydusdLogLevels, ", "))
-	}
-
-	if time.Duration(c.Nydusd.MountTimeout) < minMountTimeout {
-		return fmt.Errorf("nydusd.mount_timeout must be at least %s", minMountTimeout)
-	}
-
-	if timeout := time.Duration(c.Nydusd.WatchdogTimeout); timeout != 0 && timeout < minWatchdogTimeout {
-		return fmt.Errorf("nydusd.watchdog_timeout must be 0 or at least %s", minWatchdogTimeout)
-	}
-
-	registry := c.Nydusd.Config.Backend.Config
-	for _, client := range []struct {
-		name                               string
-		requestTimeout, requestReadTimeout Duration
-		maxRetries                         int
-	}{
-		{name: "http", requestTimeout: registry.HTTP.RequestTimeout, requestReadTimeout: registry.HTTP.RequestReadTimeout, maxRetries: registry.HTTP.MaxRetries},
-		{name: "fallback", requestTimeout: registry.Fallback.RequestTimeout, requestReadTimeout: registry.Fallback.RequestReadTimeout, maxRetries: registry.Fallback.MaxRetries},
-	} {
-		if client.requestTimeout <= 0 {
-			return fmt.Errorf("nydusd.config.backend.config.%s.request_timeout must be positive", client.name)
-		}
-
-		if client.requestReadTimeout <= 0 {
-			return fmt.Errorf("nydusd.config.backend.config.%s.request_read_timeout must be positive", client.name)
-		}
-
-		if client.maxRetries < 0 {
-			return fmt.Errorf("nydusd.config.backend.config.%s.max_retries must not be negative", client.name)
-		}
-	}
-
-	if registry.Fallback.RateLimit < 1 {
-		return errors.New("nydusd.config.backend.config.fallback.rate_limit must be at least 1")
-	}
-
-	// The address may carry the proxy's credentials, so it is never echoed.
-	if addr := registry.HTTP.Proxy.Addr; addr != "" {
-		if u, err := url.Parse(addr); err != nil || u.Scheme == "" || u.Host == "" {
-			return errors.New("nydusd.config.backend.config.http.proxy.addr must be a URL with a scheme and a host")
-		}
-	}
-
-	// Dragonfly counts only with a scheduler endpoint.
-	if dragonfly := registry.Dragonfly; dragonfly.SchedulerEndpoint != "" {
-		if dragonfly.RequestTimeout <= 0 {
-			return errors.New("nydusd.config.backend.config.dragonfly.request_timeout must be positive")
-		}
-
-		if dragonfly.RequestReadTimeout <= 0 {
-			return errors.New("nydusd.config.backend.config.dragonfly.request_read_timeout must be positive")
-		}
-
-		if dragonfly.MaxRetries < 0 || dragonfly.MaxRetries > maxDragonflyRetries {
-			return fmt.Errorf("nydusd.config.backend.config.dragonfly.max_retries must be within [0, %d]", maxDragonflyRetries)
-		}
-	}
-
-	prefetch := c.Nydusd.Config.Prefetch
-	if prefetch.ConcurrentBlobCount < 1 {
-		return errors.New("nydusd.config.prefetch.concurrent_blob_count must be at least 1")
-	}
-
-	if prefetch.RequestTimeout <= 0 {
-		return errors.New("nydusd.config.prefetch.request_timeout must be positive")
-	}
-
-	if prefetch.RetryInterval < 0 {
-		return errors.New("nydusd.config.prefetch.retry_interval must not be negative")
-	}
-
-	if !slices.Contains(PrefetchScopes, prefetch.Scope) {
-		return fmt.Errorf("invalid nydusd.config.prefetch.scope %q, want one of %s", prefetch.Scope, strings.Join(PrefetchScopes, ", "))
 	}
 
 	if !sliceRegexp.MatchString(c.Cgroup.Slice) {
@@ -667,41 +576,196 @@ func (c *Config) Validate() error {
 		return errors.New("gc.policy.blob_ttl must be positive")
 	}
 
-	if low, high := c.GC.Policy.DiskLowThresholdPercent, c.GC.Policy.DiskHighThresholdPercent; high < 1 || high > 99 || low < 1 || low >= high {
-		return fmt.Errorf("invalid gc.policy thresholds: low %d%%, high %d%%", low, high)
+	if c.GC.Policy.DiskHighThresholdPercent < 1 || c.GC.Policy.DiskHighThresholdPercent > 99 {
+		return errors.New("gc.policy.disk_high_threshold_percent must be within [1, 99]")
+	}
+
+	if c.GC.Policy.DiskLowThresholdPercent < 1 || c.GC.Policy.DiskLowThresholdPercent >= c.GC.Policy.DiskHighThresholdPercent {
+		return errors.New("gc.policy.disk_low_threshold_percent must be at least 1 and below gc.policy.disk_high_threshold_percent")
 	}
 
 	if c.Preheat.MaxConcurrentImages <= 0 {
 		return errors.New("preheat.max_concurrent_images must be positive")
 	}
 
+	if !filepath.IsAbs(c.Installer.ServiceAccountPath) {
+		return fmt.Errorf("installer.service_account_path must be an absolute path, got %q", c.Installer.ServiceAccountPath)
+	}
+
 	if c.Installer.SyncInterval <= 0 {
 		return errors.New("installer.sync_interval must be positive")
 	}
 
-	if c.Installer.Registries.Enable && c.Registry.ConfigPath == "" {
-		return errors.New("registry.config_path must not be empty with installer.registries.enable, which installs certs.d there")
+	if c.Installer.Registries.Enable {
+		if c.Registry.ConfigPath == "" {
+			return errors.New("registry.config_path must not be empty with installer.registries.enable, which installs certs.d there")
+		}
+	}
+
+	if c.Nydusd.Driver != DriverFUSE {
+		return fmt.Errorf("unsupported nydusd.driver %q", c.Nydusd.Driver)
+	}
+
+	if !filepath.IsAbs(c.Nydusd.Binary) {
+		return fmt.Errorf("nydusd.binary must be an absolute path, got %q", c.Nydusd.Binary)
+	}
+
+	if !slices.Contains(nydusdLogLevels, c.Nydusd.Log.Level) {
+		return fmt.Errorf("invalid nydusd.log.level %q, want one of %s", c.Nydusd.Log.Level, strings.Join(nydusdLogLevels, ", "))
+	}
+
+	if time.Duration(c.Nydusd.MountTimeout) < minMountTimeout {
+		return fmt.Errorf("nydusd.mount_timeout must be at least %s", minMountTimeout)
+	}
+
+	if c.Nydusd.WatchdogTimeout != 0 {
+		if time.Duration(c.Nydusd.WatchdogTimeout) < minWatchdogTimeout {
+			return fmt.Errorf("nydusd.watchdog_timeout must be 0 or at least %s", minWatchdogTimeout)
+		}
+	}
+
+	if !filepath.IsAbs(c.Nydusd.Config.RuntimeDir) {
+		return fmt.Errorf("nydusd.config.runtime_dir must be an absolute path, got %q", c.Nydusd.Config.RuntimeDir)
+	}
+
+	if c.Nydusd.Config.Backend.Config.HTTP.RequestTimeout <= 0 {
+		return errors.New("nydusd.config.backend.config.http.request_timeout must be positive")
+	}
+
+	if c.Nydusd.Config.Backend.Config.HTTP.RequestReadTimeout <= 0 {
+		return errors.New("nydusd.config.backend.config.http.request_read_timeout must be positive")
+	}
+
+	if c.Nydusd.Config.Backend.Config.HTTP.MaxRetries < 0 {
+		return errors.New("nydusd.config.backend.config.http.max_retries must not be negative")
+	}
+
+	// The address may carry the proxy's credentials, so it is never echoed.
+	if c.Nydusd.Config.Backend.Config.HTTP.Proxy.Addr != "" {
+		u, err := url.Parse(c.Nydusd.Config.Backend.Config.HTTP.Proxy.Addr)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return errors.New("nydusd.config.backend.config.http.proxy.addr must be a URL with a scheme and a host")
+		}
+	}
+
+	// Dragonfly counts only with a scheduler endpoint.
+	if c.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint != "" {
+		if c.Nydusd.Config.Backend.Config.Dragonfly.RequestTimeout <= 0 {
+			return errors.New("nydusd.config.backend.config.dragonfly.request_timeout must be positive")
+		}
+
+		if c.Nydusd.Config.Backend.Config.Dragonfly.RequestReadTimeout <= 0 {
+			return errors.New("nydusd.config.backend.config.dragonfly.request_read_timeout must be positive")
+		}
+
+		if c.Nydusd.Config.Backend.Config.Dragonfly.MaxRetries < 0 || c.Nydusd.Config.Backend.Config.Dragonfly.MaxRetries > maxDragonflyRetries {
+			return fmt.Errorf("nydusd.config.backend.config.dragonfly.max_retries must be within [0, %d]", maxDragonflyRetries)
+		}
+	}
+
+	if c.Nydusd.Config.Backend.Config.Fallback.RequestTimeout <= 0 {
+		return errors.New("nydusd.config.backend.config.fallback.request_timeout must be positive")
+	}
+
+	if c.Nydusd.Config.Backend.Config.Fallback.RequestReadTimeout <= 0 {
+		return errors.New("nydusd.config.backend.config.fallback.request_read_timeout must be positive")
+	}
+
+	if c.Nydusd.Config.Backend.Config.Fallback.MaxRetries < 0 {
+		return errors.New("nydusd.config.backend.config.fallback.max_retries must not be negative")
+	}
+
+	if c.Nydusd.Config.Backend.Config.Fallback.RateLimit < 1 {
+		return errors.New("nydusd.config.backend.config.fallback.rate_limit must be at least 1")
+	}
+
+	if c.Nydusd.Config.Storage.Dir != "" {
+		if !filepath.IsAbs(c.Nydusd.Config.Storage.Dir) {
+			return fmt.Errorf("nydusd.config.storage.dir must be an absolute path, got %q", c.Nydusd.Config.Storage.Dir)
+		}
+	}
+
+	if c.Nydusd.Config.Prefetch.ConcurrentBlobCount < 1 {
+		return errors.New("nydusd.config.prefetch.concurrent_blob_count must be at least 1")
+	}
+
+	if c.Nydusd.Config.Prefetch.RequestTimeout <= 0 {
+		return errors.New("nydusd.config.prefetch.request_timeout must be positive")
+	}
+
+	if c.Nydusd.Config.Prefetch.RetryInterval < 0 {
+		return errors.New("nydusd.config.prefetch.retry_interval must not be negative")
+	}
+
+	if !slices.Contains(PrefetchScopes, c.Nydusd.Config.Prefetch.Scope) {
+		return fmt.Errorf("invalid nydusd.config.prefetch.scope %q, want one of %s", c.Nydusd.Config.Prefetch.Scope, strings.Join(PrefetchScopes, ", "))
 	}
 
 	return nil
 }
 
-// Merge returns the running config with the settings of next that apply
-// without a restart: the cgroup limits and nydusd.config, which a daemon
-// reads when it starts. It reports whether next changes anything else, which
-// applies on the next restart; a new cgroup slice, runtime directory or cache
-// directory would hide the running daemons' own, so they are among those.
-// The installer section is not: the snapshotter ignores it.
-func (c *Config) Merge(next *Config) (*Config, bool) {
-	merged := *c
-	merged.Installer = next.Installer
-	merged.Cgroup = next.Cgroup
-	merged.Cgroup.Slice = c.Cgroup.Slice
-	merged.Nydusd.Config = next.Nydusd.Config
-	merged.Nydusd.Config.RuntimeDir = c.Nydusd.Config.RuntimeDir
-	merged.Nydusd.Config.Storage.Dir = c.Nydusd.Config.Storage.Dir
+// Load reads the config at path into c: the file decoded strictly over the
+// defaults and validated. A file that does not load leaves c as it was.
+func (c *Config) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
 
-	return &merged, !reflect.DeepEqual(&merged, next)
+	cfg := New()
+	if err := cfg.Parse(data); err != nil {
+		return fmt.Errorf("load config %s: %w", path, err)
+	}
+
+	*c = *cfg
+	c.path = path
+
+	return nil
+}
+
+// Reload reads the file c was loaded from again and returns c with the
+// settings of the file that apply without a restart. It reports whether the
+// returned config differs from c, and whether the file changes a setting
+// that applies on the next restart.
+//
+//	cgroup, nydusd.config                    ─▶ from the file
+//	cgroup.slice, nydusd.config.runtime_dir,
+//	nydusd.config.storage.dir                ─▶ c's, the running daemons live there
+//	installer                                ─▶ c's, the snapshotter ignores it
+//	any other key                            ─▶ c's until the next restart
+//
+// An empty file is one caught mid-write, not a config, and changes nothing.
+func (c *Config) Reload() (cfg *Config, changed, restartOnly bool, err error) {
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		return nil, false, false, fmt.Errorf("read config: %w", err)
+	}
+
+	if len(data) == 0 {
+		return c, false, false, nil
+	}
+
+	next := New()
+	if err := next.Parse(data); err != nil {
+		return nil, false, false, fmt.Errorf("load config %s: %w", c.path, err)
+	}
+	next.path = c.path
+	next.Installer = c.Installer
+
+	reloaded := *c
+	reloaded.Cgroup = next.Cgroup
+	reloaded.Cgroup.Slice = c.Cgroup.Slice
+	reloaded.Nydusd.Config = next.Nydusd.Config
+	reloaded.Nydusd.Config.RuntimeDir = c.Nydusd.Config.RuntimeDir
+	reloaded.Nydusd.Config.Storage.Dir = c.Nydusd.Config.Storage.Dir
+
+	return &reloaded, !reflect.DeepEqual(&reloaded, c), !reflect.DeepEqual(&reloaded, next), nil
+}
+
+// Path returns the file the config was loaded from, empty for a config that
+// was not loaded from one.
+func (c *Config) Path() string {
+	return c.path
 }
 
 // DaemonRuntimesDir returns the tmpfs parent of the daemons' runtime

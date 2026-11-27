@@ -44,7 +44,7 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("set log level: %w", err)
 		}
 
-		return runNydusSnapshotter(cmd.Context(), cfg, configPath)
+		return runNydusSnapshotter(cmd.Context(), cfg)
 	},
 }
 
@@ -90,11 +90,11 @@ func initConfig() {
 }
 
 // runNydusSnapshotter serves the snapshotter until ctx is done, reloading the
-// config file at configPath.
-func runNydusSnapshotter(ctx context.Context, cfg *config.Config, configPath string) error {
+// config file cfg was loaded from.
+func runNydusSnapshotter(ctx context.Context, cfg *config.Config) error {
 	log.G(ctx).WithField("version", version.String()).Info("starting nydus-snapshotter")
 
-	s, err := server.New(ctx, cfg, configPath)
+	s, err := server.New(ctx, cfg)
 	if err != nil {
 		return err
 	}

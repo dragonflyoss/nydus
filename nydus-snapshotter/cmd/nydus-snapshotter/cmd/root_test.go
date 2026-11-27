@@ -217,8 +217,7 @@ func TestRunSnapshotter(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			done := make(chan error, 1)
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			go func() { done <- runNydusSnapshotter(ctx, cfg, path) }()
+			go func() { done <- runNydusSnapshotter(ctx, cfg) }()
 			tc.expect(t, cfg, cancel, done)
 		})
 	}

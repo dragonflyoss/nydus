@@ -309,11 +309,11 @@ container by one GC interval.
 ### Snapshotter start and stop
 
 1. Open both bbolt files with a timeout.
-2. Listen on `grpc.addr`, a socket the snapshotter binds itself, as
+2. In the background, reconcile: records whose unit is gone are deleted, and the
+   teardown worker runs once.
+3. Listen on `grpc.addr`, a socket the snapshotter binds itself, as
    stargz-snapshotter does: dial the path first and remove it only when nothing
    answers, then listen. Message size limits match containerd's proxy client.
-3. In the background, reconcile: records whose unit is gone are deleted, and the
-   teardown worker runs once.
 4. Serve the snapshots API and, on the same socket, the
    [gRPC health checking protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md)
    with grpc-go's `health` server, as containerd (`plugins/services/healthcheck`)
@@ -612,10 +612,10 @@ while a reload that fails logs a warning and keeps the running config. Keys are
 snake_case, as in nydus-config. Durations use a `UnmarshalText` type (`10s`);
 sizes use `docker/go-units` (`1GiB`). `Validate()` runs after defaults are
 applied. The `cgroup` and `nydusd.config` sections are reloaded by polling the
-file and comparing bytes, as Dragonfly does (`cmd/dependency`), which survives
-ConfigMap symlink swaps. A change of `nydusd.config` applies to newly started
-daemons, except its `runtime_dir` and `storage.dir`; those and every other
-change log a warning and need a restart.
+file, as Dragonfly does (`cmd/dependency`), which survives ConfigMap symlink
+swaps. A change of `nydusd.config` applies to newly started daemons, except
+its `runtime_dir` and `storage.dir`; those and every other change log a
+warning and need a restart.
 
 The file below states the built-in defaults, which a missing key falls back
 to, as containerd's `config default` prints its own; a test keeps the shipped
@@ -1154,7 +1154,7 @@ nydus-snapshotter/                  module github.com/dragonflyoss/nydus/nydus-s
 │   ├── main.go                     cmd.Execute()
 │   └── cmd/{root.go,install.go,uninstall.go}  serve; install (DaemonSet entrypoint); uninstall (post-delete hook)
 ├── internal/
-│   ├── config/                     config.go (Config, New, Parse, Load, Validate), constants.go, types.go, watch.go; testdata/
+│   ├── config/                     config.go (Config, New, Parse, Load, Reload, Validate), constants.go, types.go, watch.go (Watch); testdata/
 │   ├── snapshot/                   snapshots.Snapshotter on core/snapshots/storage: snapshot.go, mount.go, label.go, blobs.go, image.go, release.go
 │   ├── fs/                         FileSystem (fs.go), daemon.go, limits.go, pusher.go, preheat.go, render.go, bootstrap.go, gather.go, Driver and fuse
 │   ├── preheat/                    NydusSnapshotter gRPC service (service.go), image resolver over containerd (resolver.go)

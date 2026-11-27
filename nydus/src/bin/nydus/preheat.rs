@@ -2,13 +2,14 @@ use clap::Parser;
 use nydus::error::{Context, Error, Result};
 use nydus::preheat::{write_failure, Preheat};
 use nydus_backend::Backend;
-use nydus_config::Config;
+use nydus_config::{BackendConfig, Config};
 use nydus_core::{CacheOptions, ErofsReader, Metrics};
 use nydus_telemetry::logging::{init_journald_tracing, init_tracing};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 use tracing::{error, Level};
 
 use super::{default_log_dir, NAME};
@@ -104,14 +105,17 @@ impl PreheatCommand {
     /// Runs the preheat. A preheat that cannot start has no status yet, so
     /// its failure is written to the state file here.
     fn run(&self) -> Result<()> {
-        self.prepare()
-            .inspect_err(|err| write_failure(&self.state_file, err))?
-            .run()
+        let (_runtime, preheat) = self
+            .prepare()
+            .inspect_err(|err| write_failure(&self.state_file, err))?;
+        preheat.run()
     }
 
     /// Lowers the raw CLI flags into the preheat: the blob backend and the
-    /// cache directory from the config, and the image from the bootstrap.
-    fn prepare(&self) -> Result<Preheat> {
+    /// cache directory from the config, and the image from the bootstrap. The
+    /// runtime a registry backend runs its I/O on is returned with the
+    /// preheat and lives as long as it.
+    fn prepare(&self) -> Result<(Option<Runtime>, Preheat)> {
         // Load the storage config. A preheat ends at the first blob that
         // fails, so a prefetch read does not wait hours to be sent once more.
         let mut config = Config::load(&self.config)?;
@@ -127,8 +131,17 @@ impl PreheatCommand {
             format!("failed to create cache directory: {}", cache_dir.display())
         })?;
 
-        let backend = <dyn Backend>::new(&config, None, Arc::new(Metrics::new()))
-            .context("failed to build blob backend")?;
+        let runtime = match &config.backend {
+            BackendConfig::Registry(_) => Some(Runtime::new()?),
+            BackendConfig::Local(_) => None,
+        };
+
+        let backend = <dyn Backend>::new(
+            &config,
+            Arc::new(Metrics::new()),
+            runtime.as_ref().map(Runtime::handle).cloned(),
+        )
+        .context("failed to build blob backend")?;
         let reader = ErofsReader::open_bootstrap(
             &self.bootstrap,
             backend,
@@ -138,12 +151,14 @@ impl PreheatCommand {
         )
         .context("failed to open EROFS image")?;
 
-        Preheat::new(
+        let preheat = Preheat::new(
             &reader,
             config.prefetch.concurrent_blob_count,
             config.prefetch.request_timeout,
             &self.state_file,
-        )
+        )?;
+
+        Ok((runtime, preheat))
     }
 }
 

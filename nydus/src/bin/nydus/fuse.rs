@@ -8,7 +8,7 @@ use nydus::systemd::Notifier;
 use nydus_backend::{Backend, Local};
 use nydus_config::{
     default_prefetch_concurrent_blob_count, default_prefetch_request_timeout, default_runtime_dir,
-    Config, PrefetchScope,
+    BackendConfig, Config, PrefetchScope,
 };
 use nydus_core::{CacheOptions, ErofsReader, OndemandRecorder};
 use nydus_storage::prefetch::BlobPrefetcher;
@@ -17,6 +17,7 @@ use nydus_telemetry::metrics::Metrics;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tracing::{error, info, warn, Level};
 
 use super::{default_log_dir, default_parallelism, NAME};
@@ -237,6 +238,7 @@ impl FuseCommand {
         // cover it all.
         let metrics = Arc::new(Metrics::new());
         let ondemand_recorder = Arc::new(OndemandRecorder::default());
+        let runtime;
         let backend: Option<Arc<dyn Backend>> = if self.blob.is_some() {
             None
         } else if let Some(dir) = self.blob_dir.as_ref() {
@@ -248,9 +250,18 @@ impl FuseCommand {
             }
             Some(Arc::new(Local::new(dir.clone(), metrics.clone())))
         } else if let Some(config) = storage_config.as_ref() {
+            // Build the tokio runtime a registry backend runs on, after the signals are registered.
+            runtime = match &config.backend {
+                BackendConfig::Registry(_) => Some(Runtime::new()?),
+                BackendConfig::Local(_) => None,
+            };
             Some(
-                <dyn Backend>::new(config, None, metrics.clone())
-                    .context("failed to build blob backend")?,
+                <dyn Backend>::new(
+                    config,
+                    metrics.clone(),
+                    runtime.as_ref().map(Runtime::handle).cloned(),
+                )
+                .context("failed to build blob backend")?,
             )
         } else {
             None

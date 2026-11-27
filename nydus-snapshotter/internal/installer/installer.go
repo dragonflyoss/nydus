@@ -69,10 +69,6 @@ type Installer struct {
 	// holds the installer's own settings.
 	cfg *config.Config
 
-	// configPath is the config file of the ConfigMap, which every sync reads
-	// again and copies to the host.
-	configPath string
-
 	// nodeName is the node to label with NodeLabel, the spec.nodeName of the
 	// Pod.
 	nodeName string
@@ -86,20 +82,19 @@ type Installer struct {
 }
 
 // New returns an installer that drives the host's units through systemd. The
-// file at configPath is used twice: cfg, loaded from it at start, holds the
-// installer's own settings, and every sync reads the file again to copy it
-// to the host, so a ConfigMap update reaches the snapshotter.
+// file cfg was loaded from is used twice: cfg holds the installer's own
+// settings, and every sync reads the file again to copy it to the host, so a
+// ConfigMap update reaches the snapshotter.
 //
 //	                         ┌─ cfg, loaded at start ──▶ installer settings
 //	config.yaml (ConfigMap) ─┤
-//	                         └─ configPath, each sync ─▶ config.yaml on the host
+//	                         └─ cfg.Path(), each sync ─▶ config.yaml on the host
 //	NODE_NAME (Downward API) ──▶ node name
-func New(cfg *config.Config, configPath string, systemd systemd.Systemd) (*Installer, error) {
+func New(cfg *config.Config, systemd systemd.Systemd) (*Installer, error) {
 	i := &Installer{
-		cfg:        cfg,
-		configPath: configPath,
-		nodeName:   os.Getenv(NodeNameEnvVar),
-		systemd:    systemd,
+		cfg:      cfg,
+		nodeName: os.Getenv(NodeNameEnvVar),
+		systemd:  systemd,
 	}
 
 	if err := i.validate(); err != nil {

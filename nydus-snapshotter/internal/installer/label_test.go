@@ -287,7 +287,7 @@ func TestInstaller_syncNodeLabel(t *testing.T) {
 			}
 
 			client := fake.NewClientset(tc.nodes...)
-			i, err := New(config.New(), config.DefaultPath, nil)
+			i, err := New(config.New(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -424,7 +424,7 @@ func TestInstaller_checkNydusSnapshotterReady(t *testing.T) {
 			cfg := config.New()
 			tc.mock(t, cfg, snapshotter, containerd)
 
-			i, err := New(cfg, config.DefaultPath, nil)
+			i, err := New(cfg, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -479,7 +479,7 @@ func TestInstaller_waitForNydusSnapshotter(t *testing.T) {
 			go func() { _ = server.Serve(listener) }()
 			t.Cleanup(server.Stop)
 
-			i, err := New(config.New(), config.DefaultPath, nil)
+			i, err := New(config.New(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -618,9 +618,10 @@ func TestInstaller_Run_nodeLabel(t *testing.T) {
 
 			client := fake.NewClientset(mockNode)
 			cfg := config.New()
+			assert.NoError(t, cfg.Load(config.DefaultPath))
 			cfg.Installer.SyncInterval = config.Duration(10 * time.Millisecond)
 			cfg.Installer.Registries.Enable = true
-			i, err := New(cfg, config.DefaultPath, mockSystemd)
+			i, err := New(cfg, mockSystemd)
 			if err != nil {
 				t.Fatal(err)
 			}

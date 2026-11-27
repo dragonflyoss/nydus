@@ -8,6 +8,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ func TestNew(t *testing.T) {
 				assert := assert.New(t)
 				shipped := New()
 				assert.NoError(shipped.Load("../../deploy/nydus-snapshotter/config.yaml"))
+				cfg.path = shipped.Path()
 				assert.Equal(cfg, shipped)
 			},
 		},
@@ -55,7 +57,7 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestLoad(t *testing.T) {
+func TestConfig_Load(t *testing.T) {
 	tests := []struct {
 		name   string
 		path   string
@@ -87,6 +89,7 @@ func TestLoad(t *testing.T) {
 				assert.Equal(uint64(4_000_000), cfg.Cgroup.CPUQuota.PerSecUSec())
 				assert.Equal(Size(1<<30), cfg.Cgroup.Daemon.MemoryHigh)
 				assert.Equal(Duration(720*time.Hour), cfg.GC.Policy.BlobTTL)
+				assert.Equal("testdata/config.yaml", cfg.Path())
 			},
 		},
 		{
@@ -96,6 +99,7 @@ func TestLoad(t *testing.T) {
 				assert := assert.New(t)
 				assert.ErrorIs(err, os.ErrNotExist)
 				assert.Equal(New(), cfg)
+				assert.Empty(cfg.Path())
 			},
 		},
 	}
@@ -109,7 +113,171 @@ func TestLoad(t *testing.T) {
 	}
 }
 
-func TestParse(t *testing.T) {
+func TestConfig_Reload(t *testing.T) {
+	tests := []struct {
+		name   string
+		data   string
+		expect func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error)
+	}{
+		{
+			name: "apply cgroup limits and the daemon config",
+			data: `
+cgroup:
+  memory_max: "4GiB"
+nydusd:
+  config:
+    backend:
+      config:
+        dragonfly:
+          scheduler_endpoint: "http://scheduler:8002"
+        fallback:
+          rate_limit: 5
+    storage:
+      fetch_size: 4194304
+    prefetch:
+      concurrent_blob_count: 4
+`,
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(changed)
+				assert.False(restartOnly)
+				assert.Equal(Size(4<<30), cfg.Cgroup.MemoryMax)
+				assert.Equal("http://scheduler:8002", cfg.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint)
+				assert.Equal(5, cfg.Nydusd.Config.Backend.Config.Fallback.RateLimit)
+				assert.Equal(uint64(4<<20), cfg.Nydusd.Config.Storage.FetchSize)
+				assert.Equal(4, cfg.Nydusd.Config.Prefetch.ConcurrentBlobCount)
+				assert.Equal(running.Path(), cfg.Path())
+				assert.Equal(DefaultCgroupMemoryMax, running.Cgroup.MemoryMax)
+			},
+		},
+		{
+			name: "keep the directories of the running daemons",
+			data: `
+nydusd:
+  config:
+    runtime_dir: /run/nydus-other
+    storage:
+      dir: /data/nydus-cache
+`,
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(changed)
+				assert.True(restartOnly)
+				assert.Equal(running.CacheDir(), cfg.CacheDir())
+				assert.Equal(running.Nydusd.Config.RuntimeDir, cfg.Nydusd.Config.RuntimeDir)
+			},
+		},
+		{
+			name: "keep the slice of the running daemons",
+			data: "cgroup:\n  slice: system-other.slice\n",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(changed)
+				assert.True(restartOnly)
+				assert.Equal(running.Cgroup.Slice, cfg.Cgroup.Slice)
+			},
+		},
+		{
+			name: "ignore the installer config",
+			data: "installer:\n  sync_interval: 1s\n  node_label:\n    enable: true\n",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(changed)
+				assert.False(restartOnly)
+				assert.Equal(running, cfg)
+			},
+		},
+		{
+			name: "defer settings that need a restart",
+			data: "root_dir: /var/lib/other\nlog:\n  level: debug\n",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(changed)
+				assert.True(restartOnly)
+				assert.Equal(running, cfg)
+			},
+		},
+		{
+			name: "apply the limits beside settings that need a restart",
+			data: "log:\n  level: debug\ncgroup:\n  memory_max: \"4GiB\"\n",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.True(changed)
+				assert.True(restartOnly)
+				assert.Equal(Size(4<<30), cfg.Cgroup.MemoryMax)
+				assert.Equal(running.Log.Level, cfg.Log.Level)
+			},
+		},
+		{
+			name: "config equal to the running one",
+			data: "log:\n  level: info\n",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(changed)
+				assert.False(restartOnly)
+				assert.Equal(running, cfg)
+			},
+		},
+		{
+			name: "empty file caught mid-write",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.NoError(err)
+				assert.False(changed)
+				assert.False(restartOnly)
+				assert.Same(running, cfg)
+			},
+		},
+		{
+			name: "invalid config",
+			data: "log:\n  level: loud\n",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.ErrorContains(err, "load config ")
+				assert.False(changed)
+				assert.False(restartOnly)
+				assert.Nil(cfg)
+			},
+		},
+		{
+			name: "missing file",
+			data: "missing",
+			expect: func(t *testing.T, running, cfg *Config, changed, restartOnly bool, err error) {
+				assert := assert.New(t)
+				assert.ErrorIs(err, os.ErrNotExist)
+				assert.False(changed)
+				assert.False(restartOnly)
+				assert.Nil(cfg)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			assert.NoError(t, os.WriteFile(path, nil, 0o644))
+			running := New()
+			assert.NoError(t, running.Load(path))
+			if tc.data == "missing" {
+				assert.NoError(t, os.Remove(path))
+			} else {
+				assert.NoError(t, os.WriteFile(path, []byte(tc.data), 0o644))
+			}
+
+			cfg, changed, restartOnly, err := running.Reload()
+			tc.expect(t, running, cfg, changed, restartOnly, err)
+		})
+	}
+}
+
+func TestConfig_Parse(t *testing.T) {
 	tests := []struct {
 		name   string
 		data   string
@@ -144,7 +312,6 @@ func TestParse(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "decode config")
-				assert.Nil(cfg)
 			},
 		},
 		{
@@ -170,14 +337,14 @@ func TestParse(t *testing.T) {
 			expect: func(t *testing.T, cfg *Config, err error) {
 				assert := assert.New(t)
 				assert.ErrorContains(err, "invalid log.level")
-				assert.Nil(cfg)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Parse([]byte(tc.data))
+			cfg := New()
+			err := cfg.Parse([]byte(tc.data))
 			tc.expect(t, cfg, err)
 		})
 	}
@@ -516,7 +683,7 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid gc.policy thresholds: low 70%, high 50%")
+				assert.EqualError(err, "gc.policy.disk_low_threshold_percent must be at least 1 and below gc.policy.disk_high_threshold_percent")
 			},
 		},
 		{
@@ -524,7 +691,7 @@ func TestConfig_Validate(t *testing.T) {
 			mutate: func(cfg *Config) { cfg.GC.Policy.DiskHighThresholdPercent = 100 },
 			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.ErrorContains(err, "invalid gc.policy thresholds")
+				assert.EqualError(err, "gc.policy.disk_high_threshold_percent must be within [1, 99]")
 			},
 		},
 		{
@@ -603,91 +770,6 @@ func TestConfig_Paths(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.expect(t, New())
-		})
-	}
-}
-
-func TestConfig_Merge(t *testing.T) {
-	tests := []struct {
-		name   string
-		update func(next *Config)
-		expect func(t *testing.T, running, merged *Config, restartOnly bool)
-	}{
-		{
-			name: "apply cgroup limits and the daemon config",
-			update: func(next *Config) {
-				next.Cgroup.MemoryMax = 4 << 30
-				next.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint = "http://scheduler:8002"
-				next.Nydusd.Config.Backend.Config.Fallback.RateLimit = 5
-				next.Nydusd.Config.Storage.FetchSize = 4 << 20
-				next.Nydusd.Config.Prefetch.ConcurrentBlobCount = 4
-			},
-			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
-				assert := assert.New(t)
-				assert.False(restartOnly)
-				assert.Equal(Size(4<<30), merged.Cgroup.MemoryMax)
-				assert.Equal("http://scheduler:8002", merged.Nydusd.Config.Backend.Config.Dragonfly.SchedulerEndpoint)
-				assert.Equal(5, merged.Nydusd.Config.Backend.Config.Fallback.RateLimit)
-				assert.Equal(uint64(4<<20), merged.Nydusd.Config.Storage.FetchSize)
-				assert.Equal(4, merged.Nydusd.Config.Prefetch.ConcurrentBlobCount)
-			},
-		},
-		{
-			name: "keep the directories of the running daemons",
-			update: func(next *Config) {
-				next.Nydusd.Config.Storage.Dir = "/data/nydus-cache"
-				next.Nydusd.Config.RuntimeDir = "/run/nydus-other"
-			},
-			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
-				assert := assert.New(t)
-				assert.True(restartOnly)
-				assert.Equal(running.CacheDir(), merged.CacheDir())
-				assert.Equal(running.Nydusd.Config.RuntimeDir, merged.Nydusd.Config.RuntimeDir)
-			},
-		},
-		{
-			name: "keep the slice of the running daemons",
-			update: func(next *Config) {
-				next.Cgroup.Slice = "system-other.slice"
-			},
-			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
-				assert := assert.New(t)
-				assert.True(restartOnly)
-				assert.Equal(running.Cgroup.Slice, merged.Cgroup.Slice)
-			},
-		},
-		{
-			name: "ignore the installer config",
-			update: func(next *Config) {
-				next.Installer.SyncInterval = Duration(time.Second)
-				next.Installer.NodeLabel.Enable = true
-			},
-			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
-				assert := assert.New(t)
-				assert.False(restartOnly)
-			},
-		},
-		{
-			name: "defer settings that need a restart",
-			update: func(next *Config) {
-				next.RootDir = "/var/lib/other"
-				next.Log.Level = "debug"
-			},
-			expect: func(t *testing.T, running, merged *Config, restartOnly bool) {
-				assert := assert.New(t)
-				assert.True(restartOnly)
-				assert.Equal(running.RootDir, merged.RootDir)
-				assert.Equal(running.Log.Level, merged.Log.Level)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			running, next := New(), New()
-			tc.update(next)
-			merged, restartOnly := running.Merge(next)
-			tc.expect(t, running, merged, restartOnly)
 		})
 	}
 }

@@ -8,6 +8,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,10 +18,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestWatcher_Run(t *testing.T) {
+func TestConfig_Watch(t *testing.T) {
 	tests := []struct {
 		name   string
 		update string
+		err    error
 		expect func(t *testing.T, reloaded []*Config)
 	}{
 		{
@@ -33,8 +35,26 @@ func TestWatcher_Run(t *testing.T) {
 			},
 		},
 		{
+			name:   "pass a config that fails to apply once",
+			update: "cgroup:\n  memory_max: \"4GiB\"\n",
+			err:    errors.New("foo"),
+			expect: func(t *testing.T, reloaded []*Config) {
+				assert := assert.New(t)
+				assert.Len(reloaded, 1)
+				assert.Equal(Size(4<<30), reloaded[0].Cgroup.MemoryMax)
+			},
+		},
+		{
 			name:   "keep the running config on an invalid change",
 			update: "cgroup:\n  memory_max: \"lots\"\n",
+			expect: func(t *testing.T, reloaded []*Config) {
+				assert := assert.New(t)
+				assert.Empty(reloaded)
+			},
+		},
+		{
+			name:   "leave a change that needs a restart to the restart",
+			update: "log:\n  level: debug\n",
 			expect: func(t *testing.T, reloaded []*Config) {
 				assert := assert.New(t)
 				assert.Empty(reloaded)
@@ -60,14 +80,22 @@ func TestWatcher_Run(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			if tc.update != "" {
+			assert.NoError(t, os.WriteFile(path, nil, 0o644))
+			cfg := New()
+			assert.NoError(t, cfg.Load(path))
+			if tc.update == "" {
+				assert.NoError(t, os.Remove(path))
+			} else {
 				assert.NoError(t, os.WriteFile(path, []byte(tc.update), 0o644))
 			}
 
 			synctest.Test(t, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(t.Context())
 				var reloaded []*Config
-				go NewWatcher(path, New()).Run(ctx, func(_ context.Context, cfg *Config) { reloaded = append(reloaded, cfg) })
+				go cfg.Watch(ctx, func(_ context.Context, cfg *Config) error {
+					reloaded = append(reloaded, cfg)
+					return tc.err
+				})
 
 				time.Sleep(3 * watchInterval)
 				synctest.Wait()

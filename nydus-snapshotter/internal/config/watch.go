@@ -7,10 +7,7 @@
 package config
 
 import (
-	"bytes"
 	"context"
-	"os"
-	"reflect"
 	"time"
 
 	"github.com/containerd/log"
@@ -19,33 +16,24 @@ import (
 // watchInterval is the interval of polling the config file.
 const watchInterval = 10 * time.Second
 
-// Watcher polls a config file for changes. Polling survives the symlink swap
-// of a ConfigMap update, which fsnotify watches miss.
-type Watcher struct {
-	// path is the config file.
-	path string
+// Watch polls the file c was loaded from and calls fn with every reloaded
+// config that differs from the running one, until ctx is done. A file that
+// fails to load keeps the running config, and a config fn fails to apply is
+// logged and not passed again. Polling survives the symlink swap of a
+// ConfigMap update, which fsnotify watches miss.
+func (c *Config) Watch(ctx context.Context, fn func(context.Context, *Config) error) {
+	var (
+		// running is the config last passed to fn, at first c.
+		running = c
 
-	// last is the config last passed to fn, at first the one the snapshotter
-	// started with.
-	last *Config
+		// lastErr is the last reload error, so a lasting one is reported once.
+		lastErr string
 
-	// lastData is the file content last read, so an unchanged invalid file
-	// is reported once.
-	lastData []byte
+		// lastRestartOnly is whether the last reload left settings to a
+		// restart, so lasting ones are reported once.
+		lastRestartOnly bool
+	)
 
-	// lastErr is the last read error, so a lasting one is reported once.
-	lastErr string
-}
-
-// NewWatcher returns a watcher of the config file at path, whose running
-// config is current.
-func NewWatcher(path string, current *Config) *Watcher {
-	return &Watcher{path: path, last: current}
-}
-
-// Run calls fn with every config that decodes, validates and differs from
-// the last one, until ctx is done. A config that fails keeps the running one.
-func (w *Watcher) Run(ctx context.Context, fn func(context.Context, *Config)) {
 	ticker := time.NewTicker(watchInterval)
 	defer ticker.Stop()
 	for {
@@ -55,35 +43,30 @@ func (w *Watcher) Run(ctx context.Context, fn func(context.Context, *Config)) {
 		case <-ticker.C:
 		}
 
-		data, err := os.ReadFile(w.path)
+		cfg, changed, restartOnly, err := running.Reload()
 		if err != nil {
-			if err.Error() != w.lastErr {
-				log.G(ctx).WithError(err).Warn("read config, keeping the running one")
-				w.lastErr = err.Error()
+			if err.Error() != lastErr {
+				log.G(ctx).WithError(err).Warn("reload config, keeping the running one")
+				lastErr = err.Error()
 			}
 
 			continue
 		}
-		w.lastErr = ""
+		lastErr = ""
 
-		// An empty read is a file caught mid-write, not a config.
-		if len(data) == 0 || bytes.Equal(data, w.lastData) {
+		if restartOnly && !lastRestartOnly {
+			log.G(ctx).Warn("config changes outside cgroup and nydusd.config apply after a restart")
+		}
+		lastRestartOnly = restartOnly
+
+		if !changed {
 			continue
 		}
-		w.lastData = data
-
-		cfg, err := Parse(data)
-		if err != nil {
-			log.G(ctx).WithError(err).Warn("reload config, keeping the running one")
-			continue
-		}
-
-		if reflect.DeepEqual(cfg, w.last) {
-			continue
-		}
-		w.last = cfg
+		running = cfg
 
 		log.G(ctx).Info("config changed, reloading")
-		fn(ctx, cfg)
+		if err := fn(ctx, cfg); err != nil {
+			log.G(ctx).WithError(err).Error("apply reloaded config")
+		}
 	}
 }

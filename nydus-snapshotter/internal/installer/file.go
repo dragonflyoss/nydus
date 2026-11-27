@@ -193,12 +193,12 @@ func (i *Installer) unitFiles() []file {
 func (i *Installer) configFiles() ([]file, error) {
 	// Read the config file as it is now: a ConfigMap update may have changed
 	// it since the installer started.
-	data, err := os.ReadFile(i.configPath)
+	data, err := os.ReadFile(i.cfg.Path())
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	if _, err := config.Parse(data); err != nil {
+	if err := config.New().Parse(data); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
