@@ -301,9 +301,6 @@ func runConvert(c *cli.Context) error {
 	if c.String("cache-dir") != "" && c.IsSet("compressor") {
 		return errors.New("--cache-dir uses the recorded compressor; --compressor cannot be overridden")
 	}
-	if c.String("cache-dir") != "" && (c.Bool("prune") || c.Uint("compact-max-layers") > 0) {
-		return errors.New("--prune/--compact-max-layers are not supported with --cache-dir")
-	}
 	if toOCI && len(manifestAnnotations) > 0 {
 		return errors.New("--manifest-annotation is only supported when converting to nydus")
 	}
@@ -453,15 +450,26 @@ func runConvert(c *cli.Context) error {
 			Platform:          platform,
 		}
 		if cache := c.String("cache-dir"); cache != "" {
+			config, closeBackend, err := pipeline.PrepareCacheRepack(ctx, artifactOptions)
+			if err != nil {
+				return errors.Wrap(err, "prepare cache compact sources")
+			}
 			bootstrapPath, uploadedBlobs, err = pipeline.EncodeCache(ctx, nydus.EncodeOption{
-				BuilderPath: c.String("builder"),
-				CacheDir:    cache,
+				BuilderPath:      c.String("builder"),
+				CacheDir:         cache,
+				Prune:            artifactOptions.Prune,
+				CompactMaxLayers: artifactOptions.CompactMaxLayers,
+				ConfigPath:       config,
 			}, provider, target)
+			closeBackend()
 			if err != nil {
 				return err
 			}
 			artifactOptions.BootstrapPath = bootstrapPath
 			artifactOptions.UploadedBlobs = uploadedBlobs
+			// Cache encoding already pruned/compacted before streaming.
+			artifactOptions.Prune = false
+			artifactOptions.CompactMaxLayers = 0
 		}
 		artifact, err := pipeline.ConvertNydusArtifacts(ctx, provider.ContentStore(), artifactOptions)
 		if err != nil {

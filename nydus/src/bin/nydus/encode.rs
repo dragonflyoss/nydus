@@ -31,6 +31,21 @@ pub struct EncodeCommand {
         help = "Specify the cache layout directory holding the bootstrap and the decoded data of the blob to encode"
     )]
     cache_dir: PathBuf,
+    #[arg(long, env = "NYDUS_ENCODE_PRUNE", help = "Remove unreferenced blobs")]
+    prune: bool,
+    #[arg(
+        long,
+        default_value_t = 0,
+        env = "NYDUS_ENCODE_COMPACT_MAX_LAYERS",
+        help = "Compact when the number of live data blobs exceeds this limit; zero disables compaction"
+    )]
+    compact_max_layers: usize,
+    #[arg(
+        long,
+        env = "NYDUS_ENCODE_CONFIG",
+        help = "Specify the parent reader configuration, including storage.dir"
+    )]
+    config: Option<PathBuf>,
     #[arg(
         long,
         value_enum,
@@ -57,6 +72,13 @@ impl EncodeCommand {
         let mut output = BufWriter::with_capacity(256 * 1024, stdout.lock());
         let options = nydus_core::EncodeOptions {
             compressor: self.compressor.map(Into::into),
+            prune: self.prune,
+            compact_max_layers: self.compact_max_layers,
+            config: self
+                .config
+                .as_deref()
+                .map(nydus_config::Config::load)
+                .transpose()?,
         };
         nydus_core::CacheLayout::open(&self.cache_dir)?.encode(&mut output, options)?;
         output.flush()?;
@@ -74,11 +96,14 @@ mod tests {
             "encode",
             "--cache-dir",
             "layout",
+            "--config",
+            "reader.yaml",
             "--compressor",
             "lz4",
         ])
         .unwrap();
         assert_eq!(command.cache_dir, PathBuf::from("layout"));
+        assert_eq!(command.config, Some(PathBuf::from("reader.yaml")));
         assert!(matches!(command.compressor, Some(Compressor::Lz4)));
         for args in [
             ["--compressor", "erofs-zstd"],

@@ -32,6 +32,9 @@ func TestCacheBuilderHelper(t *testing.T) {
 		os.Exit(20)
 	}
 	dir, mode := args[2], os.Getenv("NYDUS_CACHE_TEST_MODE")
+	if mode == "reader-config" && (len(args) != 5 || args[3] != "--config" || args[4] != filepath.Join(dir, "reader config.json") || os.Getenv("NYDUS_ENCODE_COMPRESSOR") != "") {
+		os.Exit(21)
+	}
 	if mode == "sleep" {
 		time.Sleep(time.Minute)
 		os.Exit(22)
@@ -114,7 +117,7 @@ func (u *fakeCacheUpload) Abort() {
 }
 
 func TestEncodeCache(t *testing.T) {
-	for _, mode := range []string{"success", "parent", "mismatch", "fail", "sleep", "missing-sidecar", "missing-bootstrap"} {
+	for _, mode := range []string{"success", "parent", "mismatch", "fail", "sleep", "missing-sidecar", "missing-bootstrap", "reader-config"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			t.Setenv("NYDUS_CACHE_TEST_MODE", mode)
@@ -133,6 +136,10 @@ func TestEncodeCache(t *testing.T) {
 			}
 			upload := &fakeCacheUpload{block: mode == "fail"}
 			options := nydus.EncodeOption{BuilderPath: cacheTestBuilder(t, dir), CacheDir: dir}
+			if mode == "reader-config" {
+				t.Setenv("NYDUS_ENCODE_COMPRESSOR", "lz4")
+				options.ConfigPath = filepath.Join(dir, "reader config.json")
+			}
 			boot, blobs, err := encodeCache(ctx, options, func(ctx context.Context) (cacheUpload, error) {
 				if mode == "parent" {
 					t.Fatal("metadata-only cache layout started upload")
@@ -140,7 +147,7 @@ func TestEncodeCache(t *testing.T) {
 				upload.ctx = ctx
 				return upload, nil
 			})
-			success := mode == "success" || mode == "parent"
+			success := mode == "success" || mode == "parent" || mode == "reader-config"
 			if success {
 				if err != nil {
 					t.Fatal(err)

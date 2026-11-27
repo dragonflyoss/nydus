@@ -91,12 +91,7 @@ struct Source {
 }
 
 impl IncrementalWriter {
-    fn compact_existing(
-        &mut self,
-        reader: &ErofsReader,
-        backend: &dyn Backend,
-        layout: &FlatLayout,
-    ) -> Result<()> {
+    pub(super) fn prepare_compact_chunk_size(&mut self) -> Result<()> {
         for inode in &self.inodes {
             if let InodeData::RegularFile {
                 chunk_size_bits, ..
@@ -108,87 +103,121 @@ impl IncrementalWriter {
                 self.chunk_size = self.chunk_size.max(size);
             }
         }
-        validate_chunk_size(self.chunk_size)?;
+        validate_chunk_size(self.chunk_size)
+    }
+
+    fn compact_existing(
+        &mut self,
+        reader: &ErofsReader,
+        backend: &dyn Backend,
+        layout: &FlatLayout,
+    ) -> Result<()> {
+        self.prepare_compact_chunk_size()?;
         if self.try_compact_groups(reader, backend, layout)? {
             return Ok(());
         }
         self.prepare_compact_output();
-        let result = (|| -> Result<()> {
-            let mut copied = HashMap::new();
-            for inode_index in 0..self.inodes.len() {
-                let (count, chunk_size) = match &self.inodes[inode_index].data {
-                    InodeData::RegularFile {
-                        chunk_index_entries,
-                        chunk_size_bits,
-                    } => (chunk_index_entries.len(), 1u64 << chunk_size_bits),
-                    _ => continue,
-                };
-                let nid = self.parent_nids[inode_index];
-                let source_inode = reader.inode(nid).context("read compact source inode")?;
-                for chunk_index in 0..count {
-                    let InodeData::RegularFile {
-                        chunk_index_entries,
-                        ..
-                    } = &self.inodes[inode_index].data
-                    else {
-                        unreachable!()
-                    };
-                    let source = chunk_index_entries[chunk_index];
-                    if source.is_hole() {
-                        continue;
-                    }
-                    let offset = chunk_index as u64 * chunk_size;
-                    let len = (source_inode.size() - offset).min(chunk_size) as u32;
-                    let key = ChunkKey {
-                        block: source.blkaddr,
-                        len,
-                        device: source.device_id,
-                    };
-                    let mut addr = if let Some(&blkaddr) = copied.get(&key) {
-                        // Compaction has a single output device; retain only
-                        // its block/token, not a padded address per map entry.
-                        ErofsChunkAddr {
-                            blkaddr,
-                            device_id: if blkaddr == EROFS_NULL_ADDR { 0 } else { 1 },
-                        }
-                    } else {
-                        let addr = self.write_upper_chunk_addr_from_source(
-                            len as usize,
-                            true,
-                            |mut dst| {
-                                let written = reader
-                                    .write_file_data_to(nid, &source_inode, offset, len, &mut dst)
-                                    .context("read live compact chunk")?;
-                                if written != len as usize {
-                                    return Err(Error::InvalidImage(
-                                        "short compact chunk read".to_string(),
-                                    ));
-                                }
-                                Ok(())
-                            },
-                        )?;
-                        copied.insert(key, addr.blkaddr);
-                        addr
-                    };
-                    self.resolve_or_track_blob_chunk(inode_index, chunk_index, &mut addr)?;
-                    let InodeData::RegularFile {
-                        chunk_index_entries,
-                        ..
-                    } = &mut self.inodes[inode_index].data
-                    else {
-                        unreachable!()
-                    };
-                    chunk_index_entries[chunk_index] = addr;
-                }
+        self.ensure_blob_writer()?;
+        let mut output = self.blob_writer.take().expect("compact writer initialized");
+        let result = self.compact_decoded(reader, &mut output, |nid, inode, _, offset, dst| {
+            let len = dst.len();
+            let written = reader
+                .write_file_data_to(nid, inode, offset, len as u32, &mut &mut *dst)
+                .context("read live compact chunk")?;
+            if written != len {
+                return Err(Error::InvalidImage("short compact chunk read".to_string()));
             }
             Ok(())
-        })();
+        });
+        self.blob_writer = Some(output);
         if let Err(error) = result {
             self.discard_current_blob();
             return Err(error);
         }
         self.has_changes = true;
         self.commit_output()
+    }
+
+    /// Shared live-chunk traversal for ordinary and streamed cache compaction.
+    /// Source addresses stay original until every read has completed.
+    pub(super) fn compact_decoded<W: Write>(
+        &mut self,
+        reader: &ErofsReader,
+        output: &mut BlobWriter<W>,
+        mut read: impl FnMut(u64, &ErofsInode<'_>, ErofsChunkAddr, u64, &mut [u8]) -> Result<()>,
+    ) -> Result<()> {
+        let mut copied = HashMap::new();
+        for inode_index in 0..self.inodes.len() {
+            let (count, chunk_size) = match &self.inodes[inode_index].data {
+                InodeData::RegularFile {
+                    chunk_index_entries,
+                    chunk_size_bits,
+                } => (chunk_index_entries.len(), 1u64 << chunk_size_bits),
+                _ => continue,
+            };
+            let nid = self.parent_nids[inode_index];
+            let source_inode = reader.inode(nid).context("read compact source inode")?;
+            for chunk_index in 0..count {
+                let InodeData::RegularFile {
+                    chunk_index_entries,
+                    ..
+                } = &self.inodes[inode_index].data
+                else {
+                    unreachable!()
+                };
+                let source = chunk_index_entries[chunk_index];
+                if source.is_hole() {
+                    continue;
+                }
+                let offset = chunk_index as u64 * chunk_size;
+                let len = (source_inode.size() - offset).min(chunk_size) as u32;
+                let key = ChunkKey {
+                    block: source.blkaddr,
+                    len,
+                    device: source.device_id,
+                };
+                let addr = if let Some(&blkaddr) = copied.get(&key) {
+                    // Compaction has a single output device; retain only
+                    // its block/token, not a padded address per map entry.
+                    ErofsChunkAddr {
+                        blkaddr,
+                        device_id: if blkaddr == EROFS_NULL_ADDR { 0 } else { 1 },
+                    }
+                } else {
+                    let block = output
+                        .write_nonzero_data_chunk_from_source(len as usize, |dst| {
+                            read(nid, &source_inode, source, offset, dst)
+                        })?;
+                    let addr = ErofsChunkAddr {
+                        blkaddr: block.unwrap_or(EROFS_NULL_ADDR),
+                        device_id: if block.is_some() { 1 } else { 0 },
+                    };
+                    copied.insert(key, addr.blkaddr);
+                    addr
+                };
+                let InodeData::RegularFile {
+                    chunk_index_entries,
+                    ..
+                } = &mut self.inodes[inode_index].data
+                else {
+                    unreachable!()
+                };
+                chunk_index_entries[chunk_index] = addr;
+            }
+        }
+        output.finish()?;
+        for inode in &mut self.inodes {
+            if let InodeData::RegularFile {
+                chunk_index_entries,
+                ..
+            } = &mut inode.data
+            {
+                for addr in chunk_index_entries {
+                    output.resolve_chunk_addr(addr)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn repack_from_reader(
@@ -234,7 +263,7 @@ impl IncrementalWriter {
         Ok(result)
     }
 
-    fn repack_blob_ids(&self) -> Result<Vec<crate::BlobId>> {
+    pub(super) fn repack_blob_ids(&self) -> Result<Vec<crate::BlobId>> {
         let mut seen = std::collections::HashSet::new();
         let mut blobs = Vec::new();
         for slot in &self.device_slots {
@@ -246,7 +275,7 @@ impl IncrementalWriter {
         Ok(blobs)
     }
 
-    fn prepare_compact_output(&mut self) {
+    pub(super) fn prepare_compact_output(&mut self) {
         let old_device_count = self.device_slots.len();
         self.device_slots.clear();
         // Every retained prefetch target now belongs to the single output blob.

@@ -70,6 +70,7 @@ pub struct BlobWriter<W> {
     writer: W,
     // Called after a group's logical placement is fixed, before encoding.
     cache_output: Option<CacheOutput>,
+    decoded_group: Option<ChunkGroupCallback>,
     file_chunk_size: u32,
     compressor: BlobMetadataCompressor,
     digester: Option<BlobMetadataDigester>,
@@ -1011,6 +1012,7 @@ impl<W: Write> BlobWriter<W> {
         let mut writer = Self {
             writer,
             cache_output: None,
+            decoded_group: None,
             file_chunk_size: chunk_size,
             compressor,
             digester,
@@ -1405,6 +1407,14 @@ impl<W: Write> BlobWriter<W> {
         });
         self.digester = None;
         self.data_hasher = None;
+    }
+
+    /// Observe the exact decoded group buffer before it is handed to the encoder.
+    pub(crate) fn set_decoded_group_callback<F>(&mut self, callback: F)
+    where
+        F: FnMut(u64, &[u32], &[u8]) -> Result<()> + Send + 'static,
+    {
+        self.decoded_group = Some(Box::new(callback));
     }
 
     /// Encode an already placed decoded group without regrouping its chunks.
@@ -2041,6 +2051,9 @@ impl<W: Write> BlobWriter<W> {
             }
             return Ok(());
         }
+        if let Some(callback) = self.decoded_group.as_mut() {
+            callback(first_block, lengths, input.as_slice())?;
+        }
         self.next_group = group + 1;
         self.next_blkaddr = end_block;
         let data = match input {
@@ -2135,6 +2148,74 @@ pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_callback_and_encoder_share_placed_group_buffer() {
+        let payload = vec![42; 4096];
+        let address = payload.as_ptr() as usize;
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback = observed.clone();
+        let mut encoded = Vec::new();
+        let mut writer = BlobWriter::new(
+            &mut encoded,
+            4096,
+            BlobMetadataCompressor::None,
+            None,
+            true,
+            BlobLayout::ChunkGroups {
+                chunk_group_min_size: 4096,
+            },
+        )
+        .unwrap();
+        writer.set_decoded_group_callback(move |first, lengths, bytes| {
+            assert_eq!(first, 0);
+            assert_eq!(lengths, &[4096]);
+            assert_eq!(bytes.as_ptr() as usize, address);
+            callback.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        });
+        writer.write_placed_group(0, &[4096], payload).unwrap();
+        writer.finish().unwrap();
+        drop(writer);
+        assert_eq!(encoded, *observed.lock().unwrap());
+        assert_eq!(encoded, vec![42; 4096]);
+    }
+
+    #[test]
+    fn group_callback_failure_does_not_advance_or_encode() {
+        for cache_output in [false, true] {
+            let mut encoded = Vec::new();
+            let mut writer = BlobWriter::new(
+                &mut encoded,
+                4096,
+                BlobMetadataCompressor::None,
+                None,
+                true,
+                BlobLayout::ChunkGroups {
+                    chunk_group_min_size: 4096,
+                },
+            )
+            .unwrap();
+            let callback =
+                |_: u64, _: &[u32], _: &[u8]| Err(Error::Runtime("cache write failed".to_string()));
+            if cache_output {
+                writer.set_cache_output(callback);
+            } else {
+                writer.set_decoded_group_callback(callback);
+            }
+            let error = writer
+                .write_placed_group(0, &[4096], vec![42; 4096])
+                .unwrap_err();
+            assert!(error.to_string().contains("cache write failed"));
+            assert_eq!(writer.next_blkaddr, 0);
+            assert_eq!(writer.next_group, 0);
+            assert!(writer.members.is_empty());
+            assert!(writer.blob_metadata_chunk_groups.is_empty());
+            assert!(writer.encoder.is_none());
+            drop(writer);
+            assert!(encoded.is_empty());
+        }
+    }
 
     #[test]
     fn cache_output_borrows_lone_chunks_and_reuses_packed_groups() {

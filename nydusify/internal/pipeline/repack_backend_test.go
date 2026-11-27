@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -80,6 +81,73 @@ func fetchRepackBlob(t *testing.T, url, byteRange string) (int, string) {
 	}
 
 	return resp.StatusCode, string(body)
+}
+
+func TestPrepareCacheRepack(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			work := t.TempDir()
+			data := []byte("parent payload")
+			desc := ocispec.Descriptor{Digest: digest.FromBytes(data), Size: int64(len(data))}
+			var reads atomic.Int64
+			opt := ArtifactOption{
+				WorkDir:      work,
+				ParentImages: []ParentImageMetadata{{Blobs: []ocispec.Descriptor{desc}, BlobMetas: []nydus.BlobMetaFile{{Name: desc.Digest.Encoded() + ".blob.meta", Data: []byte("metadata")}}}},
+				OpenCompactBlob: func(_ context.Context, actual ocispec.Descriptor, _ string) (io.ReadSeekCloser, error) {
+					if actual.Digest != desc.Digest {
+						t.Fatal("unexpected parent digest")
+					}
+					reads.Add(1)
+					return mockBlobReader{bytes.NewReader(data)}, nil
+				},
+			}
+			if enabled {
+				opt.CompactMaxLayers = 1
+			}
+			config, closeBackend, err := PrepareCacheRepack(context.Background(), opt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeBackend()
+			if reads.Load() != 0 {
+				t.Fatal("preparation downloaded parent data")
+			}
+			if enabled {
+				addr, repository := readRepackBackend(t, config)
+				status, body := fetchRepackBlob(t, addr+"/v2/"+repository+"/blobs/"+desc.Digest.String(), "bytes=0-5")
+				if status != http.StatusPartialContent || body != "parent" {
+					t.Fatalf("parent range: %d %q", status, body)
+				}
+			} else if config != "" {
+				t.Fatal("disabled compact created backend")
+			}
+			closeBackend()
+			entries, err := os.ReadDir(work)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("backend files were not removed: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestPrepareCacheRepackSkipsImpossibleCompact(t *testing.T) {
+	for _, limit := range []uint{0, 2, 32} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			work := filepath.Join(t.TempDir(), "must-not-be-created")
+			config, cleanup, err := PrepareCacheRepack(context.Background(), ArtifactOption{
+				WorkDir:          work,
+				CompactMaxLayers: limit,
+				ParentImages:     []ParentImageMetadata{{Blobs: []ocispec.Descriptor{{Digest: digest.FromString("parent"), Size: 1}}}},
+			})
+			if err != nil || config != "" {
+				t.Fatalf("impossible compact prepared backend: %q %v", config, err)
+			}
+			cleanup()
+			if _, err := os.Stat(work); !os.IsNotExist(err) {
+				t.Fatalf("impossible compact touched work directory: %v", err)
+			}
+		})
+	}
 }
 
 func TestStartRepackBackend(t *testing.T) {

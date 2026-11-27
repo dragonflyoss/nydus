@@ -4,6 +4,7 @@ use crate::build::bootstrap::patch_device_slots;
 use nydus_format::erofs::{EROFS_DEVICESLOT_SIZE, EROFS_SUPER_OFFSET};
 use serde::{Deserialize, Serialize};
 use std::io::{BufReader, BufWriter, Read};
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +32,11 @@ impl CacheChunkGroupTable {
 pub struct EncodeOptions {
     /// Override the recorded chunk group compressor.
     pub compressor: Option<BlobMetadataCompressor>,
+    pub prune: bool,
+    /// Compact when the number of unique live blobs exceeds this nonzero limit.
+    pub compact_max_layers: usize,
+    /// Parent backend and decoded-cache configuration; required only for compact.
+    pub config: Option<nydus_config::Config>,
 }
 
 pub(super) struct CacheLayoutState {
@@ -233,6 +239,7 @@ pub struct CacheLayout {
     dir: PathBuf,
     chunk_group_table: CacheChunkGroupTable,
     data: File,
+    reader: Arc<ErofsReader>,
     bootstrap: memmap2::MmapMut,
     slots: Vec<ErofsDeviceSlot>,
     device_index: Option<usize>,
@@ -278,7 +285,9 @@ impl CacheLayout {
             }
         };
         let bootstrap_file = File::open(dir.join(CacheLayout::BOOTSTRAP))?;
-        let reader = ErofsReader::open_metadata_only(&dir.join(CacheLayout::BOOTSTRAP))?;
+        let reader = Arc::new(ErofsReader::open_metadata_only(
+            &dir.join(CacheLayout::BOOTSTRAP),
+        )?);
         if reader.sb_offset != EROFS_SUPER_OFFSET as usize
             || bootstrap_file.metadata()?.len() != reader.mmap.len() as u64
         {
@@ -360,6 +369,7 @@ impl CacheLayout {
             dir: dir.to_path_buf(),
             chunk_group_table,
             data,
+            reader,
             bootstrap,
             slots,
             device_index,
@@ -376,6 +386,7 @@ impl CacheLayout {
             dir,
             chunk_group_table,
             data,
+            reader,
             mut bootstrap,
             mut slots,
             device_index,
@@ -386,6 +397,48 @@ impl CacheLayout {
         let dir = dir.as_path();
         ensure_not_published(dir)?;
         let compressor = options.compressor.unwrap_or(compressor);
+        let mut writer_options = IncrementalWriterOptions::new(dir.to_path_buf());
+        writer_options.chunk_size = chunk_group_table.chunk_size;
+        writer_options.chunk_group_min_size = chunk_group_table.chunk_group_minimum_size;
+        writer_options.compressor = compressor;
+        writer_options.digester = digester;
+        let mut imported = if options.prune || options.compact_max_layers > 0 {
+            Some(IncrementalWriter::from_reader(
+                reader.clone(),
+                writer_options,
+                ParentMode::Compact,
+            )?)
+        } else {
+            None
+        };
+        let device_ids = if let Some(writer) = imported.as_mut() {
+            writer.prune_parent_devices(writer.device_slots.len())?
+        } else {
+            None
+        };
+        let pruned = device_ids.is_some();
+        if options.compact_max_layers > 0
+            && imported
+                .as_ref()
+                .expect("compact enabled")
+                .repack_blob_ids()?
+                .len()
+                > options.compact_max_layers
+        {
+            // Compaction uses the imported writer, not the original encoded layout.
+            drop(chunk_group_table);
+            drop(bootstrap);
+            drop(slots);
+            drop(device_ids);
+            return compact_cache_layout(
+                dir,
+                &data,
+                sink,
+                options,
+                &reader,
+                imported.expect("compact enabled"),
+            );
+        }
         if let Some(index) = device_index {
             let mut writer = BlobWriter::new(
                 sink,
@@ -443,6 +496,24 @@ impl CacheLayout {
                 &finished.blob_metadata,
             )?;
         }
+        if pruned {
+            let mut imported = imported.expect("prune enabled");
+            if let Some(index) = device_index {
+                for slot in &mut imported.device_slots {
+                    if slot.blob_id()? == CacheLayout::BLOB_ID {
+                        slot.set_blob_id(&slots[index].blob_id()?);
+                    }
+                }
+            }
+            let rendered = render_bootstrap_remapped(
+                &mut imported.inodes,
+                imported.epoch,
+                &imported.device_slots,
+                &imported.uuid,
+                device_ids.as_deref(),
+            )?;
+            return publish_bootstrap(dir, &rendered);
+        }
         publish_bootstrap(dir, &bootstrap)
     }
 }
@@ -494,6 +565,106 @@ fn publish_decoded(dir: &Path, source: &Path, digest: &str, metadata: &BlobMetad
     )?;
     fs::rename(&staged.0, dir.join(format!("{digest}.group.map")))?;
     Ok(())
+}
+
+fn compact_cache_layout<W: Write>(
+    dir: &Path,
+    data: &File,
+    sink: W,
+    options: EncodeOptions,
+    reader: &ErofsReader,
+    mut imported: IncrementalWriter,
+) -> Result<()> {
+    let config = options.config.ok_or_else(|| {
+        Error::InvalidParameter("cache layout compact requires config".to_string())
+    })?;
+    if config.storage.dir.is_none() {
+        return Err(Error::InvalidConfig(
+            "cache layout compact requires storage.dir for lazy parent reads".to_string(),
+        ));
+    }
+    let cache_options = crate::CacheOptions::from(&config.storage);
+    let fallback_reader = std::cell::OnceCell::<ErofsReader>::new();
+    let parent_reader = || -> std::io::Result<&ErofsReader> {
+        if fallback_reader.get().is_none() {
+            let backend =
+                <dyn nydus_backend::Backend>::new(&config, None, Arc::new(crate::Metrics::new()))?;
+            let reader = ErofsReader::open_bootstrap(
+                &dir.join(CacheLayout::BOOTSTRAP),
+                backend,
+                config.storage.dir.as_deref(),
+                None,
+                cache_options,
+            )?;
+            // Single-threaded repack; no background prefetch or filesystem view.
+            assert!(fallback_reader.set(reader).is_ok());
+        }
+        Ok(fallback_reader.get().expect("fallback reader initialized"))
+    };
+    let infos = reader.blob_infos()?;
+    let (cache_path, cache) = create_temp_file(dir, "compact-cache")?;
+    let staged_cache = StagedCache(cache_path);
+    cache.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let cache = Arc::new(cache);
+    let cache_output = cache.clone();
+    imported.prepare_compact_chunk_size()?;
+    let mut output = BlobWriter::new(
+        sink,
+        imported.chunk_size,
+        imported.compressor,
+        imported.digester,
+        true,
+        BlobLayout::ChunkGroups {
+            chunk_group_min_size: imported.chunk_group_min_size,
+        },
+    )?;
+    output.set_decoded_group_callback(move |first, lengths, payload| {
+        nydus_storage::cache::write_decoded_group(&cache_output, first, lengths, payload)?;
+        Ok(())
+    });
+    imported.prepare_compact_output();
+    imported.compact_decoded(reader, &mut output, |nid, inode, source, offset, dst| {
+        // The new blob always has an explicit device. Device zero
+        // may instead refer to flattened parent data or bootstrap-local bytes.
+        if source.device_id > 0
+            && infos
+                .get(usize::from(source.device_id) - 1)
+                .is_some_and(|info| info.blob_id == CacheLayout::BLOB_ID)
+        {
+            data.read_exact_at(
+                dst,
+                source.blkaddr.checked_mul(4096).ok_or_else(|| {
+                    Error::Overflow("cache layout chunk address overflow".to_string())
+                })?,
+            )?;
+            return Ok(());
+        }
+        let len = dst.len();
+        let written =
+            parent_reader()?.write_file_data_to(nid, inode, offset, len as u32, &mut &mut *dst)?;
+        if written != len {
+            return Err(Error::InvalidImage("short compact parent read".to_string()));
+        }
+        Ok(())
+    })?;
+    let finished = finish_upper_blob(output)?;
+    cache.set_len(finished.blob_blocks * 4096)?;
+    cache.sync_all()?;
+    imported.device_slots.push(ErofsDeviceSlot::with_blob_id(
+        finished.blob_blocks,
+        &finished.full_blob_digest,
+    )?);
+    let bootstrap = render_bootstrap_remapped(
+        &mut imported.inodes,
+        imported.epoch,
+        &imported.device_slots,
+        &imported.uuid,
+        None,
+    )?;
+    let digest = hex::encode(finished.full_blob_digest);
+    publish_sidecar(dir, &digest, &finished.blob_metadata)?;
+    publish_decoded(dir, &staged_cache.0, &digest, &finished.blob_metadata)?;
+    publish_bootstrap(dir, &bootstrap)
 }
 
 struct StagedCache(PathBuf);

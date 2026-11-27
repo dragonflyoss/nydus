@@ -177,8 +177,11 @@ func RunNydusExport(ctx context.Context, opt ExportOption, dest io.Writer) error
 
 // EncodeOption describes a nydus encode invocation.
 type EncodeOption struct {
-	BuilderPath string
-	CacheDir    string
+	BuilderPath      string
+	CacheDir         string
+	Prune            bool
+	CompactMaxLayers uint
+	ConfigPath       string
 }
 
 type encodeStderr struct{ data []byte }
@@ -199,6 +202,15 @@ func RunNydusEncode(ctx context.Context, opt EncodeOption, output io.Writer, can
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	args := []string{"encode", "--cache-dir", opt.CacheDir}
+	if opt.Prune {
+		args = append(args, "--prune")
+	}
+	if opt.CompactMaxLayers > 0 {
+		args = append(args, "--compact-max-layers", strconv.FormatUint(uint64(opt.CompactMaxLayers), 10))
+	}
+	if opt.ConfigPath != "" {
+		args = append(args, "--config", opt.ConfigPath)
+	}
 	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
 	// The caller owns encode settings; standalone NYDUS_ENCODE_* defaults
 	// must not change the layout algorithm or override the parent config.
