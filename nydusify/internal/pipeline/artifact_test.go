@@ -7,6 +7,7 @@
 package pipeline
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/platforms"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -1607,5 +1609,97 @@ func TestDescribeArtifactBlob(t *testing.T) {
 			desc, meta, err := describeArtifactBlob(tc.path(t))
 			tc.expect(t, desc, meta, err)
 		})
+	}
+}
+
+func TestDescribeArtifactBlobHashesLegacyName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy-name")
+	blobData := []byte("legacy blob")
+	metaData := []byte("legacy sidecar")
+	if err := os.WriteFile(path, blobData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".blob.meta", metaData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	desc, _, err := describeArtifactBlob(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := digest.FromBytes(blobData); desc.Digest != want {
+		t.Fatalf("digest = %s, want %s", desc.Digest, want)
+	}
+}
+
+func TestConvertNydusArtifactsReferencesUploadedBlobWithoutLocalData(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := local.NewStore(filepath.Join(dir, "content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrapPath := filepath.Join(dir, "image.boot")
+	if err := os.WriteFile(bootstrapPath, []byte("streamed bootstrap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blobDigest := digest.FromString("streamed full blob")
+	metaPath := filepath.Join(dir, "upper.blob.meta")
+	if err := os.WriteFile(metaPath, []byte("streamed blob metadata"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousInspect := inspectBootstrapBlobDigests
+	inspectBootstrapBlobDigests = func(context.Context, string, string) (map[digest.Digest]struct{}, error) {
+		return map[digest.Digest]struct{}{blobDigest: {}}, nil
+	}
+	defer func() { inspectBootstrapBlobDigests = previousInspect }()
+
+	opt := ArtifactOption{
+		BootstrapPath: bootstrapPath,
+		UploadedBlobs: []UploadedBlob{{
+			Digest: blobDigest, Size: 12345, MetadataPath: metaPath,
+		}},
+		Platform: ocispec.Platform{OS: "linux", Architecture: "amd64"},
+	}
+	result, err := ConvertNydusArtifacts(ctx, store, opt)
+	mismatch := opt
+	mismatch.UploadedBlobs = []UploadedBlob{{Digest: digest.FromString("wrong stream"), Size: 12345, MetadataPath: metaPath}}
+	if _, err := ConvertNydusArtifacts(ctx, store, mismatch); err == nil || !strings.Contains(err.Error(), "bootstrap does not reference uploaded nydus blob") {
+		t.Fatalf("unexpected error for unreferenced upload: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.LocalBlobs) != 0 || len(result.ExternalBlobs) != 1 {
+		t.Fatalf("local = %v, uploaded = %v", result.LocalBlobs, result.ExternalBlobs)
+	}
+	if result.ExternalBlobs[0].Digest != blobDigest || result.ExternalBlobs[0].Size != 12345 {
+		t.Fatalf("uploaded descriptor = %+v", result.ExternalBlobs[0])
+	}
+	if _, err := store.Info(ctx, blobDigest); err == nil {
+		t.Fatal("streamed blob was unexpectedly copied into the local content store")
+	}
+	var manifest ocispec.Manifest
+	if err := oci.ReadJSON(ctx, store, *result.Descriptor, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Layers) != 2 || manifest.Layers[0].Digest != blobDigest {
+		t.Fatalf("layers = %+v", manifest.Layers)
+	}
+	var gotMeta []byte
+	if err := oci.WalkBootstrapLayer(ctx, store, manifest.Layers[1], func(hdr *tar.Header, tr *tar.Reader) error {
+		if hdr.Name == "image/"+blobDigest.Encoded()+".blob.meta" {
+			var err error
+			gotMeta, err = io.ReadAll(tr)
+			return err
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if string(gotMeta) != "streamed blob metadata" {
+		t.Fatalf("blob metadata = %q", gotMeta)
 	}
 }

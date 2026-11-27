@@ -55,6 +55,16 @@ func mockApp() *cli.App {
 	}
 }
 
+func TestCacheLayoutUsesRecordedCompressor(t *testing.T) {
+	for _, compressor := range []string{"none", "zstd", "lz4", "erofs-lz4", "oci-tar"} {
+		t.Run(compressor, func(t *testing.T) {
+			err := mockApp().Run([]string{"nydusify", "convert", "--target", mockTargetRef,
+				"--cache-dir", t.TempDir(), "--compressor", compressor})
+			assert.EqualError(t, err, "--cache-dir uses the recorded compressor; --compressor cannot be overridden")
+		})
+	}
+}
+
 func builderPath(t *testing.T) string {
 	builder := os.Getenv("NYDUS_TEST_BUILDER")
 	if builder == "" {

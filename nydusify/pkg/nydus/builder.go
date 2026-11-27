@@ -10,9 +10,13 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 )
@@ -169,4 +173,75 @@ func RunNydusExport(ctx context.Context, opt ExportOption, dest io.Writer) error
 	}
 
 	return nil
+}
+
+// EncodeOption describes a nydus encode invocation.
+type EncodeOption struct {
+	BuilderPath string
+	CacheDir    string
+}
+
+type encodeStderr struct{ data []byte }
+
+func (b *encodeStderr) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := 8192 - len(b.data); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		b.data = append(b.data, p...)
+	}
+	return n, nil
+}
+
+// Reap a failed encoder even when the registry is blocking its output.
+func RunNydusEncode(ctx context.Context, opt EncodeOption, output io.Writer, cancelIO context.CancelFunc) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	args := []string{"encode", "--cache-dir", opt.CacheDir}
+	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
+	// The caller owns encode settings; standalone NYDUS_ENCODE_* defaults
+	// must not change the layout algorithm or override the parent config.
+	env := cmd.Environ()
+	cmd.Env = env[:0]
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, "NYDUS_ENCODE_") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.WaitDelay = 2 * time.Second
+	stderr := &encodeStderr{}
+	cmd.Stderr = stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = reader.Close() }()
+	cmd.Stdout = writer
+	if err := cmd.Start(); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	_ = writer.Close()
+	done := make(chan error, 1)
+	go func() {
+		err := cmd.Wait()
+		if err != nil {
+			cancelIO()
+			cancel()
+			_ = reader.Close()
+		}
+		done <- err
+	}()
+	stop := context.AfterFunc(ctx, func() { _ = reader.Close() })
+	defer stop()
+	_, copyErr := io.Copy(output, reader)
+	if copyErr != nil {
+		cancelIO()
+		cancel()
+	}
+	if waitErr := <-done; waitErr != nil {
+		return fmt.Errorf("encode: %w: %s", waitErr, stderr.data)
+	}
+	return copyErr
 }
